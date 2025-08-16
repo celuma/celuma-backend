@@ -9,7 +9,7 @@ jobs:
         with: { python-version: "3.12" }
       - run: pip install -r requirements.txt
       - run: pip install pytest
-      - run: pytest -q || echo "TODO: add tests"
+      # - run: pytest -q || echo "TODO: add tests"
   docker-build:
     runs-on: ubuntu-latest
     needs: test
