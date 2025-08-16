@@ -11,6 +11,8 @@ A FastAPI-based backend service with user authentication, PostgreSQL database, a
 - **Alembic** - Database migration tool
 - **Docker** - Containerized development environment
 - **Password Hashing** - Secure password storage with bcrypt
+- **CI/CD Pipeline** - Automated testing and Docker image building
+- **Production Ready** - Optimized Docker images for deployment
 
 ## 📋 Requirements
 
@@ -60,13 +62,26 @@ cp .env.example .env
 ## 🚀 Usage
 
 ### Quick Start
+
+#### Development Environment
 ```bash
-# Start the application with Docker
+# Start the application with Docker (development)
 make run
 
 # Or manually
 docker compose up --build
 ```
+
+#### Production Environment
+```bash
+# Start the application with production Docker Compose
+docker compose -f docker-compose.prod.yml up -d
+
+# Or with custom environment file
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+```
+
+**Note**: The production environment uses the pre-built Docker image from GitHub Container Registry (GHCR) instead of building locally.
 
 ### Available Commands
 ```bash
@@ -108,6 +123,54 @@ docker compose exec db psql -U postgres -d celumadb -c "\dt"
 ```
 
 ## 🔧 Development
+
+## 🚀 Production Deployment
+
+### Using Production Docker Compose
+
+The project includes a production-ready Docker Compose configuration that uses the pre-built Docker image from GitHub Container Registry.
+
+#### 1. Production Environment Variables
+Create a `.env.prod` file with your production settings:
+```bash
+# .env.prod
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/celumadb
+JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
+JWT_EXPIRES_MIN=480
+APP_NAME=celuma
+ENV=production
+```
+
+#### 2. Start Production Services
+```bash
+# Start all services (database + API)
+docker compose -f docker-compose.prod.yml up -d
+
+# Check service status
+docker compose -f docker-compose.prod.yml ps
+
+# View logs
+docker compose -f docker-compose.prod.yml logs -f api
+```
+
+#### 3. Production Features
+- **Pre-built Image**: Uses optimized Docker image from CI/CD pipeline
+- **No Hot Reload**: Production-optimized without development overhead
+- **Persistent Database**: PostgreSQL data persisted in Docker volumes
+- **Health Checks**: Automatic restart policies for production reliability
+
+#### 4. Scaling and Management
+```bash
+# Scale API service (if needed)
+docker compose -f docker-compose.prod.yml up -d --scale api=3
+
+# Update to latest image
+docker compose -f docker-compose.prod.yml pull api
+docker compose -f docker-compose.prod.yml up -d api
+
+# Stop production services
+docker compose -f docker-compose.prod.yml down
+```
 
 ### Project Structure
 ```

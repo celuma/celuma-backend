@@ -52,7 +52,7 @@ jobs:
       
       - name: Build and push Docker image
         run: |
-          IMAGE=ghcr.io/${{ github.repository }}/api:$(git rev-parse --short HEAD)
+          IMAGE=ghcr.io/${{ github.repository }}:$(git rev-parse --short HEAD)
           docker build -t $IMAGE .
           docker push $IMAGE
         env:
