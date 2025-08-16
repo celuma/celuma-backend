@@ -19,6 +19,8 @@ services:
       - JWT_EXPIRES_MIN=480
       - APP_NAME=celuma
       - ENV=production
+      - DB_HOST=db
+      - DB_PORT=5432
     ports: ["8000:8000"]
     depends_on:
       - db
