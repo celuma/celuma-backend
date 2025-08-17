@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="4621ad62-c2f1-407c-994e-8d072e00f827" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/.idea/dataSources.local.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/dataSources/8deeda38-707b-4e5b-9509-e3851dd91ac8.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/dataSources/8deeda38-707b-4e5b-9509-e3851dd91ac8/storage_v2/_src_/database/celumadb._eDYyQ/schema/information_schema.FNRwLQ.meta" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/dataSources/8deeda38-707b-4e5b-9509-e3851dd91ac8/storage_v2/_src_/database/celumadb._eDYyQ/schema/pg_catalog.0S1ZNQ.meta" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/dataSources/8deeda38-707b-4e5b-9509-e3851dd91ac8/storage_v2/_src_/database/celumadb._eDYyQ/schema/public.abK9xQ.meta" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/DATABASE_README.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/alembic/versions/d34b82b6375e_complete_database_schema_with_multi_.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/alembic/versions/f45e096206ac_add_hashed_password_to_app_user.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/api/v1/billing.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/api/v1/branches.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/api/v1/laboratory.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/api/v1/patients.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/api/v1/reports.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/api/v1/tenants.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/models/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/models/audit.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/models/base.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/models/billing.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/models/enums.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/models/laboratory.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/models/patient.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/models/report.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/models/storage.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/models/tenant.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/run_tests.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/TESTING_README.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/cleanup_test_data.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/run_all_tests.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/test_endpoints.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/test_performance.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/test_validation_errors.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Makefile" beforeDir="false" afterPath="$PROJECT_DIR$/Makefile" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/alembic/env.py" beforeDir="false" afterPath="$PROJECT_DIR$/alembic/env.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/auth.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/auth.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/models/user.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/user.py" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "git-widget-placeholder": "main"
+  }
+}]]></component>
+</project>

@@ -18,7 +18,7 @@ if config.config_file_name is not None:
 # for 'autogenerate' support
 from sqlmodel import SQLModel
 from app.core.config import settings
-from app.models.user import User  # import models
+from app.models import *  # import all models
 
 # Set the database URL from settings
 config.set_main_option("sqlalchemy.url", settings.database_url)
