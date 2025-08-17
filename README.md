@@ -158,6 +158,38 @@ alembic upgrade head
 alembic downgrade -1
 ```
 
+### **Troubleshooting Migrations**
+
+#### **When Automatic Migrations Fail (Docker)**
+```bash
+# 1. Check container logs for errors
+docker compose logs api
+
+# 2. Verify database connection
+docker compose exec api python -c "
+import psycopg2
+import os
+try:
+    conn = psycopg2.connect(os.environ['DATABASE_URL'])
+    print('✅ Database connection successful')
+    conn.close()
+except Exception as e:
+    print(f'❌ Database connection failed: {e}')
+"
+
+# 3. Run migrations manually
+docker compose exec api alembic upgrade head
+
+# 4. Check migration status
+docker compose exec api alembic current
+```
+
+#### **Common Migration Issues**
+- **Database not ready**: Wait for database to be fully initialized
+- **Permission denied**: Check database user permissions
+- **Connection timeout**: Verify DATABASE_URL and network connectivity
+- **Migration conflicts**: Check if multiple containers are running migrations
+
 ### **Database Connection Examples**
 
 #### **Local PostgreSQL**
@@ -283,6 +315,39 @@ docker compose logs api
 
 # Should see: "Running database migrations..."
 # If not, check environment variables
+```
+
+#### **Running Migrations Manually**
+If automatic migrations fail, you can run them manually:
+
+**Option 1: From outside the container**
+```bash
+# If using docker-compose
+docker compose exec api alembic upgrade head
+
+# If using docker run
+docker exec -it nombre-del-contenedor alembic upgrade head
+```
+
+**Option 2: Enter the container and run**
+```bash
+# Enter the container
+docker exec -it nombre-del-contenedor bash
+
+# Inside the container, run:
+alembic upgrade head
+```
+
+**Option 3: Check migration status first**
+```bash
+# Check current migration status
+docker compose exec api alembic current
+
+# View migration history
+docker compose exec api alembic history
+
+# View pending migrations
+docker compose exec api alembic show head
 ```
 
 #### **Port Already in Use**
