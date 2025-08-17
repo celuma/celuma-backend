@@ -1,159 +1,151 @@
 #!/usr/bin/env python3
 """
-Master test script for the Celuma API
-Runs all test suites and generates a comprehensive report
+Master test runner for Celuma API
+Runs all test suites and generates comprehensive report
 """
 
 import subprocess
 import sys
 import time
-import os
 from datetime import datetime
 
-def run_test_script(script_name: str, description: str):
-    """Run a test script and capture its output"""
-    print(f"\n{'='*60}")
-    print(f"🚀 Running {description}")
-    print(f"{'='*60}")
+def print_header(title):
+    """Print a formatted header"""
+    print(f"\n{'='*80}")
+    print(f"🚀 {title}")
+    print(f"{'='*80}")
+
+def print_status(message, status="INFO"):
+    """Print a formatted status message"""
+    status_icons = {
+        "INFO": "ℹ️",
+        "SUCCESS": "✅",
+        "ERROR": "❌",
+        "WARNING": "⚠️"
+    }
+    icon = status_icons.get(status, "ℹ️")
+    print(f"{icon} {message}")
+
+def run_test_script(script_name, description):
+    """Run a test script and return success status"""
+    print_header(f"Running {description}")
+    print(f"📁 Script: {script_name}")
+    print(f"⏰ Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     try:
-        # Run the test script from the current directory (tests/)
-        script_path = os.path.join(os.path.dirname(__file__), script_name)
-        result = subprocess.run([sys.executable, script_path], 
-                              capture_output=True, 
-                              text=True, 
-                              timeout=300)  # 5 minute timeout
+        result = subprocess.run([sys.executable, script_name], 
+                              capture_output=True, text=True, timeout=300)
         
         if result.returncode == 0:
-            print("✅ Test script completed successfully")
-            print("\n📋 Output:")
-            print(result.stdout)
-            if result.stderr:
-                print("\n⚠️  Warnings/Errors:")
-                print(result.stderr)
-            return True, result.stdout
+            print_status(f"✅ {description} completed successfully", "SUCCESS")
+            if result.stdout:
+                print("📋 Output:")
+                print(result.stdout)
+            return True
         else:
-            print("❌ Test script failed")
-            print(f"Return code: {result.returncode}")
-            print("\n📋 Output:")
-            print(result.stdout)
+            print_status(f"❌ {description} failed with return code {result.returncode}", "ERROR")
             if result.stderr:
-                print("\n❌ Errors:")
+                print("❌ Error output:")
                 print(result.stderr)
-            return False, result.stdout + "\n" + result.stderr
+            if result.stdout:
+                print("📋 Standard output:")
+                print(result.stdout)
+            return False
             
     except subprocess.TimeoutExpired:
-        print("⏰ Test script timed out after 5 minutes")
-        return False, "TIMEOUT"
+        print_status(f"⏰ {description} timed out after 5 minutes", "ERROR")
+        return False
     except Exception as e:
-        print(f"❌ Error running test script: {e}")
-        return False, str(e)
+        print_status(f"❌ Error running {description}: {e}", "ERROR")
+        return False
 
-def generate_test_report(results: dict):
+def generate_test_report(results):
     """Generate a comprehensive test report"""
-    print(f"\n{'='*80}")
-    print("📊 CELUMA API COMPREHENSIVE TEST REPORT")
-    print(f"{'='*80}")
+    print_header("CELUMA API COMPREHENSIVE TEST REPORT")
     print(f"📅 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # Summary
     total_tests = len(results)
-    passed_tests = sum(1 for result in results.values() if result['success'])
+    passed_tests = sum(1 for result in results.values() if result)
     failed_tests = total_tests - passed_tests
+    success_rate = (passed_tests / total_tests * 100) if total_tests > 0 else 0
     
-    print(f"\n📈 TEST SUMMARY:")
+    print(f"\n📊 TEST SUMMARY:")
     print(f"   Total test suites: {total_tests}")
     print(f"   ✅ Passed: {passed_tests}")
     print(f"   ❌ Failed: {failed_tests}")
-    print(f"   Success rate: {(passed_tests/total_tests)*100:.1f}%")
+    print(f"   Success rate: {success_rate:.1f}%")
     
-    # Detailed results
-    print(f"\n🔍 DETAILED RESULTS:")
+    print(f"\n📋 DETAILED RESULTS:")
     for test_name, result in results.items():
-        status = "✅ PASS" if result['success'] else "❌ FAIL"
-        print(f"   {status} {test_name}")
-        if not result['success']:
-            print(f"      Error: {result['error']}")
+        status = "✅ PASSED" if result else "❌ FAILED"
+        print(f"   {test_name}: {status}")
     
-    # Recommendations
-    print(f"\n💡 RECOMMENDATIONS:")
+    print(f"\n🎯 FINAL STATUS:")
     if failed_tests == 0:
-        print("   🎉 All tests passed! The API is working correctly.")
-        print("   💪 The system is ready for production use.")
+        print_status("🎉 ALL TESTS PASSED! The Celuma API is working perfectly!", "SUCCESS")
+        print("\n💡 Recommendations:")
+        print("   🚀 System is ready for production deployment")
+        print("   📊 Continue monitoring performance and error rates")
+        print("   🔄 Run tests regularly to maintain quality")
     elif failed_tests <= 2:
-        print("   ⚠️  Most tests passed. Review failed tests for minor issues.")
-        print("   🔧 Fix the identified issues before production deployment.")
+        print_status("⚠️ Most tests passed, but some issues were found", "WARNING")
+        print("\n💡 Recommendations:")
+        print("   🔍 Review failed tests to identify minor issues")
+        print("   🧪 Fix issues and re-run specific test suites")
+        print("   ✅ System may be ready for production after fixes")
     else:
-        print("   ❌ Multiple tests failed. The API has significant issues.")
-        print("   🚨 Do not deploy to production until all issues are resolved.")
+        print_status("❌ Multiple test failures indicate significant issues", "ERROR")
+        print("\n💡 Recommendations:")
+        print("   🚨 System has significant issues requiring immediate attention")
+        print("   🔧 Fix critical issues before proceeding")
+        print("   🧪 Re-run tests after fixes to verify resolution")
     
-    # Performance insights
-    if 'performance' in results and results['performance']['success']:
-        print(f"\n⚡ PERFORMANCE INSIGHTS:")
-        output = results['performance']['output']
-        if "Excellent performance" in output:
-            print("   🚀 API performance is excellent!")
-        elif "Good performance" in output:
-            print("   ✅ API performance is good.")
-        elif "Moderate performance" in output:
-            print("   ⚠️  API performance is moderate. Consider optimizations.")
-        else:
-            print("   ❌ API performance needs improvement.")
-    
-    # Validation insights
-    if 'validation' in results and results['validation']['success']:
-        print(f"\n🔍 VALIDATION INSIGHTS:")
-        output = results['validation']['output']
-        if "Correctly returned 404" in output and "Correctly returned 422" in output:
-            print("   ✅ API validation is working correctly.")
-        else:
-            print("   ⚠️  Some validation tests may need attention.")
-    
-    print(f"\n{'='*80}")
+    return success_rate == 100
 
 def main():
-    """Run all test suites"""
-    print("🚀 CELUMA API COMPREHENSIVE TESTING SUITE")
-    print("=" * 80)
-    print(f"📅 Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    """Main test runner function"""
+    start_time = datetime.now()
+    
+    print_header("CELUMA API COMPREHENSIVE TESTING SUITE")
+    print(f"📅 Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Define test suites
     test_suites = {
-        "test_endpoints.py": "Complete Flow Tests",
-        "test_validation_errors.py": "Validation and Error Handling Tests", 
-        "test_performance.py": "Performance Tests"
+        "Complete Flow Tests": "test_endpoints.py",
+        "Validation & Error Tests": "test_validation_errors.py", 
+        "Performance Tests": "test_performance.py",
+        "Logout Functionality Tests": "test_auth_logout.py"
     }
     
+    # Run all test suites
     results = {}
-    
-    # Run each test suite
-    for script_name, description in test_suites.items():
-        success, output = run_test_script(script_name, description)
-        results[description] = {
-            'success': success,
-            'output': output,
-            'error': output if not success else None
-        }
+    for description, script_name in test_suites.items():
+        success = run_test_script(script_name, description)
+        results[description] = success
         
-        # Small delay between tests
-        time.sleep(1)
+        # Add separator between tests
+        if description != list(test_suites.keys())[-1]:
+            print("\n" + "-" * 80)
     
     # Generate comprehensive report
-    generate_test_report(results)
+    all_passed = generate_test_report(results)
     
-    # Final status
-    total_tests = len(results)
-    passed_tests = sum(1 for result in results.values() if result['success'])
+    # Final summary
+    end_time = datetime.now()
+    duration = end_time - start_time
     
-    print(f"\n🎯 FINAL STATUS:")
-    if passed_tests == total_tests:
-        print("   🎉 ALL TESTS PASSED! The Celuma API is working perfectly!")
-        return 0
-    else:
-        print(f"   ⚠️  {failed_tests} out of {total_tests} test suites failed.")
-        print("   🔧 Please review the failed tests above and fix the issues.")
-        return 1
+    print(f"\n⏱️ Total testing duration: {duration}")
+    print(f"🏁 Testing completed at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Exit with appropriate code for CI systems
+    sys.exit(0 if all_passed else 1)
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.exit(exit_code)
+    try:
+        main()
+    except KeyboardInterrupt:
+        print_status("\n⚠️ Testing interrupted by user", "WARNING")
+        sys.exit(1)
+    except Exception as e:
+        print_status(f"❌ Unexpected error during testing: {e}", "ERROR")
+        sys.exit(1)

@@ -31,3 +31,18 @@ class UserBranch(BaseModel, table=True):
     # Relationships
     user: AppUser = Relationship(back_populates="branches")
     branch: "Branch" = Relationship(back_populates="users")
+
+class BlacklistedToken(BaseModel, table=True):
+    """Model for storing blacklisted JWT tokens"""
+    __tablename__ = "blacklisted_token"
+    
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    token: str = Field(max_length=1000, index=True, unique=True)
+    user_id: UUID = Field(foreign_key="app_user.id")
+    expires_at: datetime = Field()
+    blacklisted_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    user: AppUser = Relationship()

@@ -25,6 +25,9 @@ test-all: test ## Alias for running all tests
 test-flow: ## Run complete flow tests only
 	cd tests && python test_endpoints.py
 
+test-logout: ## Run authentication logout tests only
+	cd tests && python test_auth_logout.py
+
 test-validation: ## Run validation tests only
 	cd tests && python test_validation_errors.py
 
@@ -33,6 +36,9 @@ test-performance: ## Run performance tests only
 
 test-cleanup: ## Run test data cleanup analysis
 	cd tests && python cleanup_test_data.py
+
+cleanup-tokens: ## Clean up expired blacklisted tokens
+	python -m app.core.cleanup
 
 test-interactive: ## Run interactive test menu
 	python run_tests.py

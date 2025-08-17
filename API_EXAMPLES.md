@@ -40,6 +40,18 @@ curl -H "Authorization: Bearer $TOKEN" \
   http://localhost:8000/api/v1/auth/me
 ```
 
+### User Logout
+```bash
+# Logout and invalidate the current token
+curl -X POST "http://localhost:8000/api/v1/auth/logout" \
+  -H "Authorization: Bearer $TOKEN"
+
+# After logout, the token cannot be used again
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/v1/auth/me
+# This will return 401 Unauthorized
+```
+
 ## 🏢 Tenant Management Examples
 
 ### Create a New Tenant

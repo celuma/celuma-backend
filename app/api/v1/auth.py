@@ -3,9 +3,10 @@ from fastapi.security import HTTPBearer
 from jose import jwt, JWTError
 from sqlmodel import select, Session
 from app.core.db import get_session
-from app.models.user import AppUser
-from app.core.security import hash_password, verify_password, create_jwt
+from app.models.user import AppUser, BlacklistedToken
+from app.core.security import hash_password, verify_password, create_jwt, decode_jwt
 from app.core.config import settings
+from datetime import datetime
 
 router = APIRouter(prefix="/auth")
 scheme = HTTPBearer()
@@ -22,10 +23,16 @@ def register(email: str, password: str, full_name: str, role: str, tenant_id: st
 
 def current_user(token=Depends(scheme), session: Session = Depends(get_session)):
     try:
+        # Check if token is blacklisted
+        blacklisted = session.exec(select(BlacklistedToken).where(BlacklistedToken.token == token.credentials)).first()
+        if blacklisted:
+            raise HTTPException(401, "Token has been revoked")
+        
         payload = jwt.decode(token.credentials, settings.jwt_secret, algorithms=["HS256"])
         uid = payload["sub"]
     except JWTError:
         raise HTTPException(401, "Invalid token")
+    
     u = session.get(AppUser, uid)
     if not u or not u.is_active:
         raise HTTPException(401, "Inactive user")
@@ -37,6 +44,43 @@ def login(email: str, password: str, tenant_id: str, session: Session = Depends(
     if not u or not verify_password(password, u.hashed_password):
         raise HTTPException(401, "Invalid credentials")
     return {"access_token": create_jwt(sub=str(u.id)), "token_type": "bearer"}
+
+@router.post("/logout")
+def logout(token: str = Depends(scheme), session: Session = Depends(get_session)):
+    """Logout user by blacklisting the current token"""
+    try:
+        # Decode token to get user ID and expiration
+        payload = decode_jwt(token.credentials)
+        if not payload:
+            raise HTTPException(401, "Invalid token")
+        
+        user_id = payload.get("sub")
+        exp_timestamp = payload.get("exp")
+        
+        if not user_id or not exp_timestamp:
+            raise HTTPException(401, "Invalid token payload")
+        
+        # Check if token is already blacklisted
+        existing_blacklist = session.exec(select(BlacklistedToken).where(BlacklistedToken.token == token.credentials)).first()
+        if existing_blacklist:
+            return {"message": "Token already revoked"}
+        
+        # Create blacklisted token record
+        expires_at = datetime.fromtimestamp(exp_timestamp)
+        blacklisted_token = BlacklistedToken(
+            token=token.credentials,
+            user_id=user_id,
+            expires_at=expires_at
+        )
+        
+        session.add(blacklisted_token)
+        session.commit()
+        
+        return {"message": "Logout successful", "token_revoked": True}
+        
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(500, f"Logout failed: {str(e)}")
 
 @router.get("/me")
 def me(user: AppUser = Depends(current_user)):

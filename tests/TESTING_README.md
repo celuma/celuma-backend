@@ -19,6 +19,17 @@ This directory contains a comprehensive testing suite to verify the functionalit
 - ✅ Payment creation
 - ✅ Verification of all created entities
 
+### 2. `test_auth_logout.py` - Authentication Logout Tests
+**Purpose:** Verifies that the logout functionality works correctly.
+
+**Features:**
+- ✅ User registration and login
+- ✅ Token authentication verification
+- ✅ Logout endpoint functionality
+- ✅ Token blacklisting verification
+- ✅ Double logout handling
+- ✅ Blacklisted token access prevention
+
 **Usage:**
 ```bash
 python test_endpoints.py
@@ -45,7 +56,7 @@ python test_endpoints.py
 🎉 All tests passed! The complete flow is working correctly!
 ```
 
-### 2. `test_validation_errors.py` - Validation and Error Handling Tests
+### 3. `test_validation_errors.py` - Validation and Error Handling Tests
 **Purpose:** Verifies that the API correctly handles error cases and validations.
 
 **Features:**
@@ -75,7 +86,7 @@ python test_validation_errors.py
 ✅ Validation error tests completed!
 ```
 
-### 3. `test_performance.py` - Performance Tests
+### 4. `test_performance.py` - Performance Tests
 **Purpose:** Measures the performance of API endpoints.
 
 **Features:**
@@ -106,7 +117,7 @@ python test_performance.py
    💡 Consider implementing caching for frequently accessed data
 ```
 
-### 4. `cleanup_test_data.py` - Test Data Analysis
+### 5. `cleanup_test_data.py` - Test Data Analysis
 **Purpose:** Analyzes and reports on test data that would be deleted.
 
 **Features:**
@@ -143,7 +154,7 @@ python cleanup_test_data.py
 ⚠️  Note: No actual deletion occurs - DELETE endpoints not implemented
 ```
 
-### 5. `run_all_tests.py` - Master Test Runner
+### 6. `run_all_tests.py` - Master Test Runner
 **Purpose:** Orchestrates all test suites and generates a comprehensive report.
 
 **Features:**
@@ -203,6 +214,7 @@ make test
 
 # Run specific test suites
 make test-flow          # Complete flow tests
+make test-logout        # Authentication logout tests
 make test-validation    # Validation and error handling
 make test-performance   # Performance tests
 make test-cleanup       # Test data analysis
@@ -220,6 +232,7 @@ python run_all_tests.py
 
 # Run individual test suites
 python test_endpoints.py
+python test_auth_logout.py
 python test_validation_errors.py
 python test_performance.py
 python cleanup_test_data.py
@@ -232,11 +245,12 @@ python run_tests.py
 
 # Select from menu:
 # 1. Complete Flow Tests
-# 2. Validation & Error Tests
-# 3. Performance Tests
-# 4. Test Data Cleanup
-# 5. Run All Tests
-# 6. Exit
+# 2. Authentication Logout Tests
+# 3. Validation & Error Tests
+# 4. Performance Tests
+# 5. Test Data Cleanup
+# 6. Run All Tests
+# 7. Exit
 ```
 
 ## 📊 Understanding Test Results

@@ -98,6 +98,22 @@ http://localhost:8000
 }
 ```
 
+#### POST `/api/v1/auth/logout`
+**Description**: Logout user and invalidate current token  
+**Authentication**: Bearer token required  
+**Response**:
+```json
+{
+  "message": "Logout successful",
+  "token_revoked": true
+}
+```
+
+**Notes**:
+- The current token is immediately blacklisted and cannot be used again
+- Attempting to use a blacklisted token will return 401 Unauthorized
+- Multiple logout attempts with the same token will return "Token already revoked"
+
 ### Tenant Management
 
 #### GET `/api/v1/tenants/`
