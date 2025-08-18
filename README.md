@@ -83,6 +83,7 @@ python test_performance.py
 - [Database Schema](DATABASE_README.md) - Database design and migrations
 - [Testing Guide](tests/TESTING_README.md) - Comprehensive testing documentation
 - [API Examples](API_EXAMPLES.md) - Usage examples and patterns
+- **[Deployment Guide](DEPLOYMENT_README.md)** - Complete deployment documentation
 
 ## 🏗️ Architecture
 
@@ -106,9 +107,41 @@ python test_performance.py
 - Report generation
 - Billing system
 
-## 🔧 Development
+## 🗄️ Database Management
 
-### Project Structure
+### Automatic Migrations
+The system automatically handles database migrations on startup:
+- **Development**: `docker-compose up --build` runs migrations automatically
+- **Production**: `docker-compose.prod.yml` includes initialization service
+- **Remote DB**: All deployment options include automatic migration execution
+
+### Manual Migration Management
+```bash
+# Check current migration status
+alembic current
+
+# Create new migration (after model changes)
+alembic revision --autogenerate -m "Description of changes"
+
+# Apply migrations manually
+alembic upgrade head
+
+# Rollback to previous migration
+alembic downgrade -1
+```
+
+### Database Cleanup
+```bash
+# Complete cleanup (removes all data)
+./cleanup.sh
+
+# This removes:
+# - All containers
+# - Database volumes
+# - Dangling images
+```
+
+## 🔧 Development
 ```
 celuma-backend/
 ├── app/                    # Main application code
@@ -135,6 +168,17 @@ make test                 # Run all tests
 make clean                # Clean up containers and data
 ```
 
+### Available Scripts
+```bash
+# Database Management
+./init_db.sh             # Initialize database and run migrations
+./cleanup.sh              # Complete system cleanup
+
+# Deployment
+./deploy_remote.sh        # Deploy single container with remote database
+./start.sh                # Start API with database checks (used in containers)
+```
+
 ### API Endpoints
 - **Health**: `GET /api/v1/health`
 - **Authentication**: `POST /api/v1/auth/login`, `POST /api/v1/auth/register`
@@ -147,20 +191,52 @@ make clean                # Clean up containers and data
 
 ## 🚀 Deployment
 
-### Production
+### Development Environment (Local Database)
 ```bash
-# Use production compose file
-docker-compose -f docker-compose.prod.yml up -d
+# Start with local PostgreSQL database
+docker-compose up --build
+
+# This automatically:
+# 1. Creates PostgreSQL database
+# 2. Runs all Alembic migrations
+# 3. Starts the API server
+```
+
+### Production Environment (Local Database)
+```bash
+# Use production compose file with local database
+docker-compose -f docker-compose.prod.yml up --build
+
+# This includes:
+# - Database initialization service
+# - Automatic migrations
+# - Production-ready configuration
+```
+
+### Remote Database Deployment
+```bash
+# Option 1: Using docker-compose with remote database
+export DATABASE_URL="postgresql://user:pass@host:5432/dbname"
+export JWT_SECRET="your-secret-key"
+docker-compose -f docker-compose.remote.yml up --build
+
+# Option 2: Deploy single container with remote database
+export DATABASE_URL="postgresql://user:pass@host:5432/dbname"
+export JWT_SECRET="your-secret-key"
+./deploy_remote.sh
 ```
 
 ### Environment Variables
-Create a `.env` file with:
+Create a `.env` file or set environment variables:
 ```env
-APP_NAME=celuma
-ENV=prod
-DATABASE_URL=postgresql+psycopg2://user:pass@host:port/db
-JWT_SECRET=your-secret-key
+# Required
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
+JWT_SECRET=your-super-secret-jwt-key
+
+# Optional (with defaults)
 JWT_EXPIRES_MIN=480
+APP_NAME=celuma
+ENV=production
 ```
 
 ## 📊 Monitoring

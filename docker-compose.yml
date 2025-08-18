@@ -8,6 +8,16 @@ services:
     ports: ["5432:5432"]
     volumes: ["pgdata:/var/lib/postgresql/data"]
 
+  db-init:
+    build: .
+    env_file: .env
+    command: bash init_db.sh
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+    restart: "no"
+
   api:
     build: .
     env_file: .env
@@ -16,7 +26,7 @@ services:
       - .:/app
     ports: ["8000:8000"]
     depends_on:
-      - db
+      - db-init
 
 volumes:
   pgdata:

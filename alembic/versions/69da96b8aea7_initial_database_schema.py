@@ -1,19 +1,20 @@
-"""Complete database schema with multi-tenant support
+"""Initial database schema
 
-Revision ID: d34b82b6375e
-Revises: d658dd09308e
-Create Date: 2025-08-17 16:16:13.166661
+Revision ID: 69da96b8aea7
+Revises: 
+Create Date: 2025-08-17 18:48:07.335644
 
 """
 from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+import sqlmodel
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'd34b82b6375e'
-down_revision: Union[str, Sequence[str], None] = 'd658dd09308e'
+revision: str = '69da96b8aea7'
+down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -24,18 +25,19 @@ def upgrade() -> None:
     op.create_table('tenant',
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('name', sa.String(length=255), nullable=False),
-    sa.Column('legal_name', sa.String(length=500), nullable=True),
-    sa.Column('tax_id', sa.String(length=50), nullable=True),
+    sa.Column('name', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=False),
+    sa.Column('legal_name', sqlmodel.sql.sqltypes.AutoString(length=500), nullable=True),
+    sa.Column('tax_id', sqlmodel.sql.sqltypes.AutoString(length=50), nullable=True),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_table('app_user',
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('tenant_id', sa.Uuid(), nullable=False),
-    sa.Column('email', sa.String(length=255), nullable=False),
-    sa.Column('full_name', sa.String(length=255), nullable=False),
+    sa.Column('email', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=False),
+    sa.Column('full_name', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=False),
     sa.Column('role', sa.Enum('ADMIN', 'PATHOLOGIST', 'LAB_TECH', 'ASSISTANT', 'BILLING', 'VIEWER', name='userrole'), nullable=False),
+    sa.Column('hashed_password', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=False),
     sa.Column('is_active', sa.Boolean(), nullable=False),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenant.id'], ),
     sa.PrimaryKeyConstraint('id')
@@ -45,15 +47,15 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('tenant_id', sa.Uuid(), nullable=False),
-    sa.Column('code', sa.String(length=50), nullable=False),
-    sa.Column('name', sa.String(length=255), nullable=False),
-    sa.Column('timezone', sa.String(length=100), nullable=False),
-    sa.Column('address_line1', sa.String(length=255), nullable=True),
-    sa.Column('address_line2', sa.String(length=255), nullable=True),
-    sa.Column('city', sa.String(length=100), nullable=True),
-    sa.Column('state', sa.String(length=100), nullable=True),
-    sa.Column('postal_code', sa.String(length=20), nullable=True),
-    sa.Column('country', sa.String(length=2), nullable=False),
+    sa.Column('code', sqlmodel.sql.sqltypes.AutoString(length=50), nullable=False),
+    sa.Column('name', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=False),
+    sa.Column('timezone', sqlmodel.sql.sqltypes.AutoString(length=100), nullable=False),
+    sa.Column('address_line1', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=True),
+    sa.Column('address_line2', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=True),
+    sa.Column('city', sqlmodel.sql.sqltypes.AutoString(length=100), nullable=True),
+    sa.Column('state', sqlmodel.sql.sqltypes.AutoString(length=100), nullable=True),
+    sa.Column('postal_code', sqlmodel.sql.sqltypes.AutoString(length=20), nullable=True),
+    sa.Column('country', sqlmodel.sql.sqltypes.AutoString(length=2), nullable=False),
     sa.Column('is_active', sa.Boolean(), nullable=False),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenant.id'], ),
     sa.PrimaryKeyConstraint('id')
@@ -64,29 +66,41 @@ def upgrade() -> None:
     sa.Column('tenant_id', sa.Uuid(), nullable=False),
     sa.Column('branch_id', sa.Uuid(), nullable=True),
     sa.Column('actor_user_id', sa.Uuid(), nullable=True),
-    sa.Column('action', sa.String(length=255), nullable=False),
-    sa.Column('entity_type', sa.String(length=100), nullable=False),
+    sa.Column('action', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=False),
+    sa.Column('entity_type', sqlmodel.sql.sqltypes.AutoString(length=100), nullable=False),
     sa.Column('entity_id', sa.Uuid(), nullable=False),
     sa.Column('old_values', sa.JSON(), nullable=True),
     sa.Column('new_values', sa.JSON(), nullable=True),
-    sa.Column('ip_address', sa.String(length=45), nullable=True),
+    sa.Column('ip_address', sqlmodel.sql.sqltypes.AutoString(length=45), nullable=True),
     sa.ForeignKeyConstraint(['actor_user_id'], ['app_user.id'], ),
     sa.ForeignKeyConstraint(['branch_id'], ['branch.id'], ),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenant.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
-    op.create_table('patient',
-    sa.Column('created_at', sa.DateTime(), nullable=False),
+    op.create_table('blacklisted_token',
     sa.Column('id', sa.Uuid(), nullable=False),
+    sa.Column('token', sqlmodel.sql.sqltypes.AutoString(length=1000), nullable=False),
+    sa.Column('user_id', sa.Uuid(), nullable=False),
+    sa.Column('expires_at', sa.DateTime(), nullable=False),
+    sa.Column('blacklisted_at', sa.DateTime(), nullable=False),
+    sa.Column('created_at', sa.DateTime(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), nullable=False),
+    sa.ForeignKeyConstraint(['user_id'], ['app_user.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_blacklisted_token_token'), 'blacklisted_token', ['token'], unique=True)
+    op.create_table('patient',
     sa.Column('tenant_id', sa.Uuid(), nullable=False),
     sa.Column('branch_id', sa.Uuid(), nullable=False),
-    sa.Column('patient_code', sa.String(length=100), nullable=False),
-    sa.Column('first_name', sa.String(length=255), nullable=False),
-    sa.Column('last_name', sa.String(length=255), nullable=False),
+    sa.Column('created_at', sa.DateTime(), nullable=False),
+    sa.Column('id', sa.Uuid(), nullable=False),
+    sa.Column('patient_code', sqlmodel.sql.sqltypes.AutoString(length=100), nullable=False),
+    sa.Column('first_name', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=False),
+    sa.Column('last_name', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=False),
     sa.Column('dob', sa.Date(), nullable=True),
-    sa.Column('sex', sa.String(length=10), nullable=True),
-    sa.Column('phone', sa.String(length=20), nullable=True),
-    sa.Column('email', sa.String(length=255), nullable=True),
+    sa.Column('sex', sqlmodel.sql.sqltypes.AutoString(length=10), nullable=True),
+    sa.Column('phone', sqlmodel.sql.sqltypes.AutoString(length=20), nullable=True),
+    sa.Column('email', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=True),
     sa.ForeignKeyConstraint(['branch_id'], ['branch.id'], ),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenant.id'], ),
     sa.PrimaryKeyConstraint('id')
@@ -94,14 +108,14 @@ def upgrade() -> None:
     op.create_table('storage_object',
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('provider', sa.String(length=50), nullable=False),
-    sa.Column('region', sa.String(length=100), nullable=False),
-    sa.Column('bucket', sa.String(length=255), nullable=False),
-    sa.Column('object_key', sa.String(length=1000), nullable=False),
-    sa.Column('version_id', sa.String(length=255), nullable=True),
-    sa.Column('etag', sa.String(length=255), nullable=True),
-    sa.Column('sha256_hex', sa.String(length=64), nullable=True),
-    sa.Column('content_type', sa.String(length=255), nullable=True),
+    sa.Column('provider', sqlmodel.sql.sqltypes.AutoString(length=50), nullable=False),
+    sa.Column('region', sqlmodel.sql.sqltypes.AutoString(length=100), nullable=False),
+    sa.Column('bucket', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=False),
+    sa.Column('object_key', sqlmodel.sql.sqltypes.AutoString(length=1000), nullable=False),
+    sa.Column('version_id', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=True),
+    sa.Column('etag', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=True),
+    sa.Column('sha256_hex', sqlmodel.sql.sqltypes.AutoString(length=64), nullable=True),
+    sa.Column('content_type', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=True),
     sa.Column('size_bytes', sa.Integer(), nullable=True),
     sa.Column('created_by', sa.Uuid(), nullable=True),
     sa.ForeignKeyConstraint(['created_by'], ['app_user.id'], ),
@@ -120,10 +134,10 @@ def upgrade() -> None:
     sa.Column('tenant_id', sa.Uuid(), nullable=False),
     sa.Column('branch_id', sa.Uuid(), nullable=False),
     sa.Column('patient_id', sa.Uuid(), nullable=False),
-    sa.Column('order_code', sa.String(length=100), nullable=False),
+    sa.Column('order_code', sqlmodel.sql.sqltypes.AutoString(length=100), nullable=False),
     sa.Column('status', sa.Enum('RECEIVED', 'PROCESSING', 'DIAGNOSIS', 'REVIEW', 'RELEASED', 'CLOSED', 'CANCELLED', name='orderstatus'), nullable=False),
-    sa.Column('requested_by', sa.String(length=255), nullable=True),
-    sa.Column('notes', sa.String(), nullable=True),
+    sa.Column('requested_by', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=True),
+    sa.Column('notes', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('billed_lock', sa.Boolean(), nullable=False),
     sa.Column('created_by', sa.Uuid(), nullable=True),
     sa.ForeignKeyConstraint(['branch_id'], ['branch.id'], ),
@@ -138,9 +152,9 @@ def upgrade() -> None:
     sa.Column('tenant_id', sa.Uuid(), nullable=False),
     sa.Column('branch_id', sa.Uuid(), nullable=False),
     sa.Column('order_id', sa.Uuid(), nullable=False),
-    sa.Column('invoice_number', sa.String(length=100), nullable=False),
+    sa.Column('invoice_number', sqlmodel.sql.sqltypes.AutoString(length=100), nullable=False),
     sa.Column('amount_total', sa.Numeric(precision=12, scale=2), nullable=False),
-    sa.Column('currency', sa.String(length=3), nullable=False),
+    sa.Column('currency', sqlmodel.sql.sqltypes.AutoString(length=3), nullable=False),
     sa.Column('status', sa.Enum('PENDING', 'PAID', 'FAILED', 'REFUNDED', 'PARTIAL', name='paymentstatus'), nullable=False),
     sa.Column('issued_at', sa.DateTime(), nullable=False),
     sa.ForeignKeyConstraint(['branch_id'], ['branch.id'], ),
@@ -155,8 +169,8 @@ def upgrade() -> None:
     sa.Column('branch_id', sa.Uuid(), nullable=False),
     sa.Column('order_id', sa.Uuid(), nullable=False),
     sa.Column('status', sa.Enum('DRAFT', 'IN_REVIEW', 'APPROVED', 'PUBLISHED', 'RETRACTED', name='reportstatus'), nullable=False),
-    sa.Column('title', sa.String(length=500), nullable=True),
-    sa.Column('diagnosis_text', sa.String(), nullable=True),
+    sa.Column('title', sqlmodel.sql.sqltypes.AutoString(length=500), nullable=True),
+    sa.Column('diagnosis_text', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('published_at', sa.DateTime(), nullable=True),
     sa.Column('created_by', sa.Uuid(), nullable=True),
     sa.ForeignKeyConstraint(['branch_id'], ['branch.id'], ),
@@ -170,12 +184,12 @@ def upgrade() -> None:
     sa.Column('tenant_id', sa.Uuid(), nullable=False),
     sa.Column('branch_id', sa.Uuid(), nullable=False),
     sa.Column('order_id', sa.Uuid(), nullable=False),
-    sa.Column('sample_code', sa.String(length=100), nullable=False),
+    sa.Column('sample_code', sqlmodel.sql.sqltypes.AutoString(length=100), nullable=False),
     sa.Column('type', sa.Enum('SANGRE', 'BIOPSIA', 'LAMINILLA', 'TEJIDO', 'OTRO', name='sampletype'), nullable=False),
     sa.Column('state', sa.Enum('RECEIVED', 'PROCESSING', 'DIAGNOSIS', 'REVIEW', 'RELEASED', 'CLOSED', 'CANCELLED', name='orderstatus'), nullable=False),
     sa.Column('collected_at', sa.DateTime(), nullable=True),
     sa.Column('received_at', sa.DateTime(), nullable=True),
-    sa.Column('notes', sa.String(), nullable=True),
+    sa.Column('notes', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.ForeignKeyConstraint(['branch_id'], ['branch.id'], ),
     sa.ForeignKeyConstraint(['order_id'], ['lab_order.id'], ),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenant.id'], ),
@@ -188,7 +202,7 @@ def upgrade() -> None:
     sa.Column('branch_id', sa.Uuid(), nullable=False),
     sa.Column('invoice_id', sa.Uuid(), nullable=False),
     sa.Column('amount_paid', sa.Numeric(precision=12, scale=2), nullable=False),
-    sa.Column('method', sa.String(length=100), nullable=True),
+    sa.Column('method', sqlmodel.sql.sqltypes.AutoString(length=100), nullable=True),
     sa.Column('paid_at', sa.DateTime(), nullable=False),
     sa.ForeignKeyConstraint(['branch_id'], ['branch.id'], ),
     sa.ForeignKeyConstraint(['invoice_id'], ['invoice.id'], ),
@@ -202,7 +216,7 @@ def upgrade() -> None:
     sa.Column('version_no', sa.Integer(), nullable=False),
     sa.Column('pdf_storage_id', sa.Uuid(), nullable=False),
     sa.Column('html_storage_id', sa.Uuid(), nullable=True),
-    sa.Column('changelog', sa.String(), nullable=True),
+    sa.Column('changelog', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('authored_by', sa.Uuid(), nullable=True),
     sa.Column('authored_at', sa.DateTime(), nullable=False),
     sa.Column('is_current', sa.Boolean(), nullable=False),
@@ -219,7 +233,7 @@ def upgrade() -> None:
     sa.Column('branch_id', sa.Uuid(), nullable=False),
     sa.Column('sample_id', sa.Uuid(), nullable=False),
     sa.Column('storage_id', sa.Uuid(), nullable=False),
-    sa.Column('label', sa.String(length=255), nullable=True),
+    sa.Column('label', sqlmodel.sql.sqltypes.AutoString(length=255), nullable=True),
     sa.Column('is_primary', sa.Boolean(), nullable=False),
     sa.Column('created_by', sa.Uuid(), nullable=True),
     sa.ForeignKeyConstraint(['branch_id'], ['branch.id'], ),
@@ -232,28 +246,18 @@ def upgrade() -> None:
     op.create_table('sample_image_rendition',
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('sample_image_id', sa.Uuid(), nullable=False),
-    sa.Column('kind', sa.String(length=50), nullable=False),
+    sa.Column('kind', sqlmodel.sql.sqltypes.AutoString(length=50), nullable=False),
     sa.Column('storage_id', sa.Uuid(), nullable=False),
     sa.ForeignKeyConstraint(['sample_image_id'], ['sample_image.id'], ),
     sa.ForeignKeyConstraint(['storage_id'], ['storage_object.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
-    op.drop_index(op.f('ix_user_email'), table_name='user')
-    op.drop_table('user')
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     """Downgrade schema."""
     # ### commands auto generated by Alembic - please adjust! ###
-    op.create_table('user',
-    sa.Column('id', sa.INTEGER(), autoincrement=True, nullable=False),
-    sa.Column('email', sa.VARCHAR(), autoincrement=False, nullable=False),
-    sa.Column('hashed_password', sa.VARCHAR(), autoincrement=False, nullable=False),
-    sa.Column('is_active', sa.BOOLEAN(), autoincrement=False, nullable=False),
-    sa.PrimaryKeyConstraint('id', name=op.f('user_pkey'))
-    )
-    op.create_index(op.f('ix_user_email'), 'user', ['email'], unique=True)
     op.drop_table('sample_image_rendition')
     op.drop_table('sample_image')
     op.drop_table('report_version')
@@ -265,6 +269,8 @@ def downgrade() -> None:
     op.drop_table('user_branch')
     op.drop_table('storage_object')
     op.drop_table('patient')
+    op.drop_index(op.f('ix_blacklisted_token_token'), table_name='blacklisted_token')
+    op.drop_table('blacklisted_token')
     op.drop_table('audit_log')
     op.drop_table('branch')
     op.drop_index(op.f('ix_app_user_email'), table_name='app_user')

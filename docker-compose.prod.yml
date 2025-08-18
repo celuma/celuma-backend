@@ -11,6 +11,19 @@ services:
     volumes: ["pgdata:/var/lib/postgresql/data"]
     restart: unless-stopped
 
+  db-init:
+    image: ghcr.io/celuma/celuma-backend:latest
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/celumadb
+      - JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
+      - JWT_EXPIRES_MIN=480
+      - APP_NAME=celuma
+      - ENV=production
+      - DB_HOST=db
+      - DB_PORT=5432
+    command: bash init_db.sh
+    restart: "no"
+
   api:
     image: ghcr.io/celuma/celuma-backend:latest
     environment:
@@ -23,7 +36,7 @@ services:
       - DB_PORT=5432
     ports: ["8000:8000"]
     depends_on:
-      - db
+      - db-init
     restart: unless-stopped
 
 volumes:

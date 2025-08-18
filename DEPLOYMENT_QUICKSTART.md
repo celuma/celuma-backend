@@ -1,0 +1,76 @@
+# 🚀 Celuma Backend - Quick Deployment Reference
+
+Quick reference for common deployment scenarios.
+
+## 🧪 Development (Local Database)
+
+```bash
+# Start everything with automatic migrations
+docker-compose up --build
+
+# API: http://localhost:8000
+# Database: localhost:5432
+```
+
+## 🏭 Production (Local Database)
+
+```bash
+# Production with local database
+docker-compose -f docker-compose.prod.yml up --build -d
+```
+
+## 🌐 Remote Database
+
+### Option 1: Docker Compose
+```bash
+export DATABASE_URL="postgresql://user:pass@host:5432/dbname"
+export JWT_SECRET="your-secret-key"
+docker-compose -f docker-compose.remote.yml up --build -d
+```
+
+### Option 2: Single Container
+```bash
+export DATABASE_URL="postgresql://user:pass@host:5432/dbname"
+export JWT_SECRET="your-secret-key"
+./deploy_remote.sh
+```
+
+## 🗄️ Database Management
+
+```bash
+# Check migration status
+alembic current
+
+# Create new migration
+alembic revision --autogenerate -m "Description"
+
+# Apply migrations
+alembic upgrade head
+
+# Complete cleanup
+./cleanup.sh
+```
+
+## 🔧 Environment Variables
+
+```bash
+# Required
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
+JWT_SECRET=your-secret-key
+
+# Optional
+JWT_EXPIRES_MIN=480
+APP_NAME=celuma
+ENV=production
+```
+
+## 📚 Full Documentation
+
+- **[Complete Deployment Guide](DEPLOYMENT_README.md)** - Detailed deployment documentation
+- **[Main README](README.md)** - Project overview and setup
+- **[API Documentation](API_ENDPOINTS.md)** - API reference
+- **[Testing Guide](tests/TESTING_README.md)** - Testing documentation
+
+---
+
+**For detailed information, see [DEPLOYMENT_README.md](DEPLOYMENT_README.md)**
