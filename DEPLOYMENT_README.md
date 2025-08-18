@@ -354,6 +354,9 @@ docker logs celuma-backend-api-1
 docker exec celuma-backend-db-1 psql -U postgres -d celumadb -c "\dt"
 docker exec celuma-backend-api-1 alembic current
 
+# If migrations don't run automatically
+docker-compose exec api alembic upgrade head
+
 # Container management
 docker-compose up --build
 docker-compose down
