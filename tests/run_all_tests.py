@@ -33,8 +33,10 @@ def run_test_script(script_name, description):
     print(f"⏰ Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     try:
+        # Run from the tests directory
         result = subprocess.run([sys.executable, script_name], 
-                              capture_output=True, text=True, timeout=300)
+                              capture_output=True, text=True, timeout=300,
+                              cwd="tests")
         
         if result.returncode == 0:
             print_status(f"✅ {description} completed successfully", "SUCCESS")
@@ -75,7 +77,8 @@ def run_cleanup_scripts():
         try:
             print(f"\n🔧 Running {description}...")
             result = subprocess.run([sys.executable, script_name], 
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, text=True, timeout=60,
+                                  cwd="tests")
             
             if result.returncode == 0:
                 print_status(f"✅ {description} completed", "SUCCESS")
