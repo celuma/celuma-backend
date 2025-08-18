@@ -52,7 +52,8 @@ def create_test_tenant():
     try:
         tenant_name = f"Test Logout Tenant {int(time.time())}"
         
-        response = requests.post(f"{API_BASE_URL}/api/v1/tenants?name={tenant_name}")
+        data = {"name": tenant_name}
+        response = requests.post(f"{API_BASE_URL}/api/v1/tenants/", json=data)
         if response.status_code == 200:
             tenant = response.json()
             print_status(f"Created test tenant: {tenant['name']}", "SUCCESS")
@@ -67,15 +68,16 @@ def create_test_tenant():
 def create_test_user(tenant_id):
     """Create a test user for authentication tests"""
     try:
+        data = {
+            "email": TEST_EMAIL,
+            "password": TEST_PASSWORD,
+            "full_name": TEST_FULL_NAME,
+            "role": TEST_ROLE,
+            "tenant_id": tenant_id
+        }
         response = requests.post(
             f"{API_BASE_URL}/api/v1/auth/register",
-            params={
-                "email": TEST_EMAIL,
-                "password": TEST_PASSWORD,
-                "full_name": TEST_FULL_NAME,
-                "role": TEST_ROLE,
-                "tenant_id": tenant_id
-            }
+            json=data
         )
         if response.status_code == 200:
             user = response.json()
@@ -91,20 +93,26 @@ def create_test_user(tenant_id):
 def test_user_login(tenant_id):
     """Test user login and get access token"""
     try:
+        data = {
+            "email": TEST_EMAIL,
+            "password": TEST_PASSWORD,
+            "tenant_id": tenant_id
+        }
         response = requests.post(
             f"{API_BASE_URL}/api/v1/auth/login",
-            params={
-                "email": TEST_EMAIL,
-                "password": TEST_PASSWORD,
-                "tenant_id": tenant_id
-            }
+            json=data
         )
         if response.status_code == 200:
-            login_response = response.json()
-            print_status("User login successful", "SUCCESS")
-            return login_response.get("access_token")
+            login_data = response.json()
+            access_token = login_data.get('access_token')
+            if access_token:
+                print_status(f"User login successful, got access token", "SUCCESS")
+                return access_token
+            else:
+                print_status("Login response missing access token", "ERROR")
+                return None
         else:
-            print_status(f"Login failed: {response.status_code}", "ERROR")
+            print_status(f"Login failed with status {response.status_code}", "ERROR")
             return None
     except Exception as e:
         print_status(f"Error during login: {e}", "ERROR")

@@ -4,6 +4,7 @@ from app.core.db import get_session
 from app.models.report import Report, ReportVersion
 from app.models.laboratory import LabOrder
 from app.models.tenant import Tenant, Branch
+from app.schemas.report import ReportCreate, ReportResponse, ReportDetailResponse, ReportVersionCreate, ReportVersionResponse
 
 router = APIRouter(prefix="/reports")
 
@@ -19,76 +20,68 @@ def list_reports(session: Session = Depends(get_session)):
         "branch_id": str(r.branch_id)
     } for r in reports]
 
-@router.post("/")
-def create_report(
-    tenant_id: str,
-    branch_id: str,
-    order_id: str,
-    title: str = None,
-    diagnosis_text: str = None,
-    created_by: str = None,
-    session: Session = Depends(get_session)
-):
+@router.post("/", response_model=ReportResponse)
+def create_report(report_data: ReportCreate, session: Session = Depends(get_session)):
     """Create a new report"""
     # Verify tenant, branch, and order exist
-    tenant = session.get(Tenant, tenant_id)
+    tenant = session.get(Tenant, report_data.tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
     
-    branch = session.get(Branch, branch_id)
+    branch = session.get(Branch, report_data.branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
     
-    order = session.get(LabOrder, order_id)
+    order = session.get(LabOrder, report_data.order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     
     # Check if report already exists for this order
     existing_report = session.exec(
-        select(Report).where(Report.order_id == order_id)
+        select(Report).where(Report.order_id == report_data.order_id)
     ).first()
     
     if existing_report:
         raise HTTPException(400, "Report already exists for this order")
     
     report = Report(
-        tenant_id=tenant_id,
-        branch_id=branch_id,
-        order_id=order_id,
-        title=title,
-        diagnosis_text=diagnosis_text,
-        created_by=created_by
+        tenant_id=report_data.tenant_id,
+        branch_id=report_data.branch_id,
+        order_id=report_data.order_id,
+        title=report_data.title,
+        diagnosis_text=report_data.diagnosis_text,
+        created_by=report_data.created_by
     )
     
     session.add(report)
     session.commit()
     session.refresh(report)
     
-    return {
-        "id": str(report.id),
-        "status": report.status,
-        "order_id": str(report.order_id),
-        "tenant_id": str(report.tenant_id),
-        "branch_id": str(report.branch_id)
-    }
+    return ReportResponse(
+        id=str(report.id),
+        status=report.status,
+        order_id=str(report.order_id),
+        tenant_id=str(report.tenant_id),
+        branch_id=str(report.branch_id)
+    )
 
-@router.get("/{report_id}")
+@router.get("/{report_id}", response_model=ReportDetailResponse)
 def get_report(report_id: str, session: Session = Depends(get_session)):
     """Get report details"""
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
     
-    return {
-        "id": str(report.id),
-        "status": report.status,
-        "order_id": str(report.order_id),
-        "tenant_id": str(report.tenant_id),
-        "branch_id": str(report.branch_id),
-        "title": report.title,
-        "diagnosis_text": report.diagnosis_text,
-        "published_at": report.published_at
-    }
+    return ReportDetailResponse(
+        id=str(report.id),
+        status=report.status,
+        order_id=str(report.order_id),
+        tenant_id=str(report.tenant_id),
+        branch_id=str(report.branch_id),
+        title=report.title,
+        diagnosis_text=report.diagnosis_text,
+        published_at=report.published_at
+    )
 
 @router.get("/versions/")
 def list_report_versions(session: Session = Depends(get_session)):
@@ -101,27 +94,19 @@ def list_report_versions(session: Session = Depends(get_session)):
         "is_current": v.is_current
     } for v in versions]
 
-@router.post("/versions/")
-def create_report_version(
-    report_id: str,
-    version_no: int,
-    pdf_storage_id: str,
-    html_storage_id: str = None,
-    changelog: str = None,
-    authored_by: str = None,
-    session: Session = Depends(get_session)
-):
+@router.post("/versions/", response_model=ReportVersionResponse)
+def create_report_version(version_data: ReportVersionCreate, session: Session = Depends(get_session)):
     """Create a new report version"""
     # Verify report exists
-    report = session.get(Report, report_id)
+    report = session.get(Report, version_data.report_id)
     if not report:
         raise HTTPException(404, "Report not found")
     
     # Check if version number already exists for this report
     existing_version = session.exec(
         select(ReportVersion).where(
-            ReportVersion.report_id == report_id,
-            ReportVersion.version_no == version_no
+            ReportVersion.report_id == version_data.report_id,
+            ReportVersion.version_no == version_data.version_no
         )
     ).first()
     
@@ -129,21 +114,21 @@ def create_report_version(
         raise HTTPException(400, "Version number already exists for this report")
     
     version = ReportVersion(
-        report_id=report_id,
-        version_no=version_no,
-        pdf_storage_id=pdf_storage_id,
-        html_storage_id=html_storage_id,
-        changelog=changelog,
-        authored_by=authored_by
+        report_id=version_data.report_id,
+        version_no=version_data.version_no,
+        pdf_storage_id=version_data.pdf_storage_id,
+        html_storage_id=version_data.html_storage_id,
+        changelog=version_data.changelog,
+        authored_by=version_data.authored_by
     )
     
     session.add(version)
     session.commit()
     session.refresh(version)
     
-    return {
-        "id": str(version.id),
-        "version_no": version.version_no,
-        "report_id": str(version.report_id),
-        "is_current": version.is_current
-    }
+    return ReportVersionResponse(
+        id=str(version.id),
+        version_no=version.version_no,
+        report_id=str(version.report_id),
+        is_current=version.is_current
+    )

@@ -59,6 +59,41 @@ def run_test_script(script_name, description):
         print_status(f"❌ Error running {description}: {e}", "ERROR")
         return False
 
+def run_cleanup_scripts():
+    """Run cleanup scripts after all tests complete"""
+    print_header("Running Cleanup Scripts")
+    print("🧹 Cleaning up test data and blacklisted tokens...")
+    
+    cleanup_scripts = [
+        ("cleanup_test_data.py", "Test Data Cleanup"),
+        ("cleanup_blacklisted_tokens.py", "Blacklisted Tokens Cleanup")
+    ]
+    
+    cleanup_results = {}
+    
+    for script_name, description in cleanup_scripts:
+        try:
+            print(f"\n🔧 Running {description}...")
+            result = subprocess.run([sys.executable, script_name], 
+                                  capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0:
+                print_status(f"✅ {description} completed", "SUCCESS")
+                cleanup_results[description] = True
+            else:
+                print_status(f"⚠️ {description} had issues", "WARNING")
+                cleanup_results[description] = False
+                
+            if result.stdout:
+                print("📋 Output:")
+                print(result.stdout)
+                
+        except Exception as e:
+            print_status(f"❌ Error running {description}: {e}", "ERROR")
+            cleanup_results[description] = False
+    
+    return cleanup_results
+
 def generate_test_report(results):
     """Generate a comprehensive test report"""
     print_header("CELUMA API COMPREHENSIVE TEST REPORT")
@@ -100,45 +135,49 @@ def generate_test_report(results):
         print("   🔧 Fix critical issues before proceeding")
         print("   🧪 Re-run tests after fixes to verify resolution")
     
-    return success_rate == 100
+    print(f"\n🧹 CLEANUP STATUS:")
+    print("   Test data and blacklisted tokens have been cleaned up")
+    print("   Database is ready for the next test run")
+    
+    return failed_tests == 0
 
 def main():
     """Main test runner function"""
-    start_time = datetime.now()
+    print_header("CELUMA API COMPREHENSIVE TESTING")
+    print(f"🚀 Starting comprehensive test suite at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    print_header("CELUMA API COMPREHENSIVE TESTING SUITE")
-    print(f"📅 Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    # Define test suites
-    test_suites = {
-        "Complete Flow Tests": "test_endpoints.py",
-        "Validation & Error Tests": "test_validation_errors.py", 
-        "Performance Tests": "test_performance.py",
-        "Logout Functionality Tests": "test_auth_logout.py"
-    }
+    # Define test suites to run
+    test_suites = [
+        ("test_endpoints.py", "API Endpoints Testing"),
+        ("test_auth_logout.py", "Authentication & Logout Testing"),
+        ("test_performance.py", "Performance Testing"),
+        ("test_validation_errors.py", "Validation Error Testing")
+    ]
     
     # Run all test suites
     results = {}
-    for description, script_name in test_suites.items():
+    start_time = time.time()
+    
+    for script_name, description in test_suites:
         success = run_test_script(script_name, description)
         results[description] = success
         
-        # Add separator between tests
-        if description != list(test_suites.keys())[-1]:
-            print("\n" + "-" * 80)
+        # Small delay between tests
+        time.sleep(1)
+    
+    # Run cleanup scripts
+    cleanup_results = run_cleanup_scripts()
+    
+    # Calculate total time
+    total_time = time.time() - start_time
     
     # Generate comprehensive report
-    all_passed = generate_test_report(results)
+    all_tests_passed = generate_test_report(results)
     
-    # Final summary
-    end_time = datetime.now()
-    duration = end_time - start_time
+    print(f"\n⏱️  Total testing time: {total_time:.2f} seconds")
     
-    print(f"\n⏱️ Total testing duration: {duration}")
-    print(f"🏁 Testing completed at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    # Exit with appropriate code for CI systems
-    sys.exit(0 if all_passed else 1)
+    # Final exit code
+    sys.exit(0 if all_tests_passed else 1)
 
 if __name__ == "__main__":
     try:

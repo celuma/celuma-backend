@@ -6,20 +6,22 @@ from app.core.db import get_session
 from app.models.user import AppUser, BlacklistedToken
 from app.core.security import hash_password, verify_password, create_jwt, decode_jwt
 from app.core.config import settings
+from app.schemas.auth import UserRegister, UserLogin, UserResponse, LoginResponse, LogoutResponse, UserProfile
 from datetime import datetime
 
 router = APIRouter(prefix="/auth")
 scheme = HTTPBearer()
 
-@router.post("/register")
-def register(email: str, password: str, full_name: str, role: str, tenant_id: str, session: Session = Depends(get_session)):
-    if session.exec(select(AppUser).where(AppUser.email == email, AppUser.tenant_id == tenant_id)).first():
+@router.post("/register", response_model=UserResponse)
+def register(user_data: UserRegister, session: Session = Depends(get_session)):
+    """Register a new user"""
+    if session.exec(select(AppUser).where(AppUser.email == user_data.email, AppUser.tenant_id == user_data.tenant_id)).first():
         raise HTTPException(400, "Email already registered for this tenant")
-    u = AppUser(email=email, full_name=full_name, role=role, tenant_id=tenant_id, hashed_password=hash_password(password))
+    u = AppUser(email=user_data.email, full_name=user_data.full_name, role=user_data.role, tenant_id=user_data.tenant_id, hashed_password=hash_password(user_data.password))
     session.add(u)
     session.commit()
     session.refresh(u)
-    return {"id": str(u.id), "email": u.email, "full_name": u.full_name, "role": u.role}
+    return UserResponse(id=str(u.id), email=u.email, full_name=u.full_name, role=u.role)
 
 def current_user(token=Depends(scheme), session: Session = Depends(get_session)):
     try:
@@ -38,14 +40,15 @@ def current_user(token=Depends(scheme), session: Session = Depends(get_session))
         raise HTTPException(401, "Inactive user")
     return u
 
-@router.post("/login")
-def login(email: str, password: str, tenant_id: str, session: Session = Depends(get_session)):
-    u = session.exec(select(AppUser).where(AppUser.email == email, AppUser.tenant_id == tenant_id)).first()
-    if not u or not verify_password(password, u.hashed_password):
+@router.post("/login", response_model=LoginResponse)
+def login(credentials: UserLogin, session: Session = Depends(get_session)):
+    """Login user with email and password"""
+    u = session.exec(select(AppUser).where(AppUser.email == credentials.email, AppUser.tenant_id == credentials.tenant_id)).first()
+    if not u or not verify_password(credentials.password, u.hashed_password):
         raise HTTPException(401, "Invalid credentials")
-    return {"access_token": create_jwt(sub=str(u.id)), "token_type": "bearer"}
+    return LoginResponse(access_token=create_jwt(sub=str(u.id)), token_type="bearer")
 
-@router.post("/logout")
+@router.post("/logout", response_model=LogoutResponse)
 def logout(token: str = Depends(scheme), session: Session = Depends(get_session)):
     """Logout user by blacklisting the current token"""
     try:
@@ -63,7 +66,7 @@ def logout(token: str = Depends(scheme), session: Session = Depends(get_session)
         # Check if token is already blacklisted
         existing_blacklist = session.exec(select(BlacklistedToken).where(BlacklistedToken.token == token.credentials)).first()
         if existing_blacklist:
-            return {"message": "Token already revoked"}
+            return LogoutResponse(message="Token already revoked", token_revoked=False)
         
         # Create blacklisted token record
         expires_at = datetime.fromtimestamp(exp_timestamp)
@@ -76,12 +79,19 @@ def logout(token: str = Depends(scheme), session: Session = Depends(get_session)
         session.add(blacklisted_token)
         session.commit()
         
-        return {"message": "Logout successful", "token_revoked": True}
+        return LogoutResponse(message="Logout successful", token_revoked=True)
         
     except Exception as e:
         session.rollback()
         raise HTTPException(500, f"Logout failed: {str(e)}")
 
-@router.get("/me")
+@router.get("/me", response_model=UserProfile)
 def me(user: AppUser = Depends(current_user)):
-    return {"id": str(user.id), "email": user.email, "full_name": user.full_name, "role": user.role, "tenant_id": str(user.tenant_id)}
+    """Get current user profile"""
+    return UserProfile(
+        id=str(user.id), 
+        email=user.email, 
+        full_name=user.full_name, 
+        role=user.role, 
+        tenant_id=str(user.tenant_id)
+    )

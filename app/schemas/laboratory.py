@@ -1,0 +1,52 @@
+from pydantic import BaseModel
+from typing import Optional
+
+class LabOrderCreate(BaseModel):
+    """Schema for creating a laboratory order"""
+    tenant_id: str
+    branch_id: str
+    patient_id: str
+    order_code: str
+    requested_by: Optional[str] = None
+    notes: Optional[str] = None
+    created_by: Optional[str] = None
+
+class LabOrderResponse(BaseModel):
+    """Schema for laboratory order response"""
+    id: str
+    order_code: str
+    status: str
+    patient_id: str
+    tenant_id: str
+    branch_id: str
+
+class LabOrderDetailResponse(BaseModel):
+    """Schema for detailed laboratory order response"""
+    id: str
+    order_code: str
+    status: str
+    patient_id: str
+    tenant_id: str
+    branch_id: str
+    requested_by: Optional[str] = None
+    notes: Optional[str] = None
+    billed_lock: Optional[bool] = None
+
+class SampleCreate(BaseModel):
+    """Schema for creating a sample"""
+    tenant_id: str
+    branch_id: str
+    order_id: str
+    sample_code: str
+    type: str
+    notes: Optional[str] = None
+
+class SampleResponse(BaseModel):
+    """Schema for sample response"""
+    id: str
+    sample_code: str
+    type: str
+    state: str
+    order_id: str
+    tenant_id: str
+    branch_id: str

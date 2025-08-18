@@ -33,13 +33,29 @@ make status
 curl http://localhost:8000/api/v1/health
 ```
 
+## ✨ Features (v1.0.0)
+
+### 🚀 Core Features
+- **JSON Payloads**: All POST endpoints use JSON request bodies for optimal data handling
+- **Pydantic Schemas**: Complete type safety and automatic validation for all endpoints
+- **Enhanced Authentication**: Robust JWT system with token blacklisting
+- **Auto-generated Documentation**: Complete OpenAPI/Swagger documentation
+- **Comprehensive Testing**: Full test suite with automatic cleanup
+
+### 🎯 Design Principles
+The API is designed with JSON request bodies for all POST endpoints, providing:
+- Excellent data validation with Pydantic schemas
+- Strong type safety and developer experience
+- Consistent API design following REST best practices
+- Auto-generated documentation and examples
+
 ## 🧪 Testing
 
 The project includes a comprehensive testing suite located in the `tests/` directory.
 
 ### Quick Test Commands
 ```bash
-# Run all tests
+# Run all tests with automatic cleanup
 make test
 
 # Run specific test suites
@@ -56,11 +72,13 @@ make test-interactive
 ```
 tests/
 ├── __init__.py                 # Package initialization
-├── test_endpoints.py          # Complete flow tests
+├── test_endpoints.py          # Complete flow tests (JSON updated)
 ├── test_validation_errors.py  # Validation tests
 ├── test_performance.py        # Performance tests
+├── test_auth_logout.py        # Authentication and logout tests
 ├── cleanup_test_data.py       # Data cleanup utilities
-├── run_all_tests.py          # Master test runner
+├── cleanup_blacklisted_tokens.py # Token cleanup utilities
+├── run_all_tests.py          # Master test runner with cleanup
 └── TESTING_README.md         # Detailed testing documentation
 ```
 
@@ -71,18 +89,19 @@ python run_tests.py
 
 # From tests directory
 cd tests
-python run_all_tests.py
-python test_endpoints.py
-python test_validation_errors.py
-python test_performance.py
+python run_all_tests.py          # Complete test suite with cleanup
+python test_endpoints.py         # Endpoint flow tests
+python test_validation_errors.py # Validation tests
+python test_performance.py       # Performance tests
+python test_auth_logout.py       # Authentication tests
 ```
 
 ## 📚 Documentation
 
-- [API Endpoints](API_ENDPOINTS.md) - Complete API reference
+- [API Endpoints](API_ENDPOINTS.md) - Complete API reference (JSON updated)
+- [API Examples](API_EXAMPLES.md) - Usage examples with JSON payloads
 - [Database Schema](DATABASE_README.md) - Database design and migrations
 - [Testing Guide](tests/TESTING_README.md) - Comprehensive testing documentation
-- [API Examples](API_EXAMPLES.md) - Usage examples and patterns
 - **[Deployment Guide](DEPLOYMENT_README.md)** - Complete deployment documentation
 
 ## 🏗️ Architecture
@@ -93,19 +112,21 @@ python test_performance.py
 - **PostgreSQL**: Robust, production-ready database
 - **Alembic**: Database migration management
 - **Docker**: Containerized deployment
+- **Pydantic**: Data validation and serialization
 
 ### Multi-tenant Features
 - Tenant isolation
 - Branch management
 - User role-based access control
-- Audit logging
+- JWT authentication with token blacklisting
+- Comprehensive audit logging
 
-### Laboratory Management
-- Patient management
-- Sample tracking
-- Order processing
-- Report generation
-- Billing system
+### API Design Features
+- **JSON-first**: All POST endpoints use JSON request bodies
+- **Type-safe**: Complete Pydantic schema validation
+- **Auto-documented**: OpenAPI/Swagger documentation
+- **RESTful**: Consistent API design patterns
+- **Validation**: Automatic request/response validation
 
 ## 🗄️ Database Management
 

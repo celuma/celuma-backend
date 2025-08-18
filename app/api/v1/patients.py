@@ -3,6 +3,7 @@ from sqlmodel import select, Session
 from app.core.db import get_session
 from app.models.patient import Patient
 from app.models.tenant import Tenant, Branch
+from app.schemas.patient import PatientCreate, PatientResponse, PatientDetailResponse
 
 router = APIRouter(prefix="/patients")
 
@@ -19,34 +20,23 @@ def list_patients(session: Session = Depends(get_session)):
         "branch_id": str(p.branch_id)
     } for p in patients]
 
-@router.post("/")
-def create_patient(
-    tenant_id: str,
-    branch_id: str,
-    patient_code: str,
-    first_name: str,
-    last_name: str,
-    dob: str = None,
-    sex: str = None,
-    phone: str = None,
-    email: str = None,
-    session: Session = Depends(get_session)
-):
+@router.post("/", response_model=PatientResponse)
+def create_patient(patient_data: PatientCreate, session: Session = Depends(get_session)):
     """Create a new patient"""
     # Verify tenant and branch exist
-    tenant = session.get(Tenant, tenant_id)
+    tenant = session.get(Tenant, patient_data.tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
     
-    branch = session.get(Branch, branch_id)
+    branch = session.get(Branch, patient_data.branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
     
     # Check if patient_code is unique for this tenant
     existing_patient = session.exec(
         select(Patient).where(
-            Patient.patient_code == patient_code,
-            Patient.tenant_id == tenant_id
+            Patient.patient_code == patient_data.patient_code,
+            Patient.tenant_id == patient_data.tenant_id
         )
     ).first()
     
@@ -54,46 +44,46 @@ def create_patient(
         raise HTTPException(400, "Patient code already exists for this tenant")
     
     patient = Patient(
-        tenant_id=tenant_id,
-        branch_id=branch_id,
-        patient_code=patient_code,
-        first_name=first_name,
-        last_name=last_name,
-        dob=dob,
-        sex=sex,
-        phone=phone,
-        email=email
+        tenant_id=patient_data.tenant_id,
+        branch_id=patient_data.branch_id,
+        patient_code=patient_data.patient_code,
+        first_name=patient_data.first_name,
+        last_name=patient_data.last_name,
+        dob=patient_data.dob,
+        sex=patient_data.sex,
+        phone=patient_data.phone,
+        email=patient_data.email
     )
     
     session.add(patient)
     session.commit()
     session.refresh(patient)
     
-    return {
-        "id": str(patient.id),
-        "patient_code": patient.patient_code,
-        "first_name": patient.first_name,
-        "last_name": patient.last_name,
-        "tenant_id": str(patient.tenant_id),
-        "branch_id": str(patient.branch_id)
-    }
+    return PatientResponse(
+        id=str(patient.id),
+        patient_code=patient.patient_code,
+        first_name=patient.first_name,
+        last_name=patient.last_name,
+        tenant_id=str(patient.tenant_id),
+        branch_id=str(patient.branch_id)
+    )
 
-@router.get("/{patient_id}")
+@router.get("/{patient_id}", response_model=PatientDetailResponse)
 def get_patient(patient_id: str, session: Session = Depends(get_session)):
     """Get patient details"""
     patient = session.get(Patient, patient_id)
     if not patient:
         raise HTTPException(404, "Patient not found")
     
-    return {
-        "id": str(patient.id),
-        "patient_code": patient.patient_code,
-        "first_name": patient.first_name,
-        "last_name": patient.last_name,
-        "dob": patient.dob,
-        "sex": patient.sex,
-        "phone": patient.phone,
-        "email": patient.email,
-        "tenant_id": str(patient.tenant_id),
-        "branch_id": str(patient.branch_id)
-    }
+    return PatientDetailResponse(
+        id=str(patient.id),
+        patient_code=patient.patient_code,
+        first_name=patient.first_name,
+        last_name=patient.last_name,
+        dob=patient.dob,
+        sex=patient.sex,
+        phone=patient.phone,
+        email=patient.email,
+        tenant_id=str(patient.tenant_id),
+        branch_id=str(patient.branch_id)
+    )

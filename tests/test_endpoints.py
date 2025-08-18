@@ -61,7 +61,7 @@ def test_create_tenant():
             "legal_name": "Test Legal Name API",
             "tax_id": "123456789"
         }
-        response = requests.post(f"{BASE_URL}/api/v1/tenants/", params=data)
+        response = requests.post(f"{BASE_URL}/api/v1/tenants/", json=data)
         print(f"✅ Create tenant: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
@@ -88,7 +88,7 @@ def test_create_branch():
             "state": "CDMX",
             "country": "MX"
         }
-        response = requests.post(f"{BASE_URL}/api/v1/branches/", params=data)
+        response = requests.post(f"{BASE_URL}/api/v1/branches/", json=data)
         print(f"✅ Create branch: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
@@ -110,15 +110,15 @@ def test_create_patient():
         data = {
             "tenant_id": test_data.tenant_id,
             "branch_id": test_data.branch_id,
-            "patient_code": "P002",
-            "first_name": "Jane",
-            "last_name": "Smith",
-            "dob": "1985-05-15",
-            "sex": "F",
-            "phone": "555-9876",
-            "email": "jane.smith@example.com"
+            "patient_code": "P001_API",
+            "first_name": "John",
+            "last_name": "Doe",
+            "dob": "1990-01-01",
+            "sex": "M",
+            "phone": "555-1234",
+            "email": "john.doe@test.com"
         }
-        response = requests.post(f"{BASE_URL}/api/v1/patients/", params=data)
+        response = requests.post(f"{BASE_URL}/api/v1/patients/", json=data)
         print(f"✅ Create patient: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
@@ -130,10 +130,10 @@ def test_create_patient():
         print("❌ Create patient: Connection failed")
         return False
 
-def test_create_order():
+def test_create_laboratory_order():
     """Test creating a laboratory order"""
     if not test_data.tenant_id or not test_data.branch_id or not test_data.patient_id:
-        print("❌ Create order: Missing required IDs")
+        print("❌ Create order: No tenant, branch, or patient ID available")
         return False
     
     try:
@@ -141,11 +141,12 @@ def test_create_order():
             "tenant_id": test_data.tenant_id,
             "branch_id": test_data.branch_id,
             "patient_id": test_data.patient_id,
-            "order_code": "ORD002",
-            "requested_by": "Dr. Johnson",
-            "notes": "Complete blood count and chemistry panel"
+            "order_code": "ORD001_API",
+            "requested_by": "Dr. Smith",
+            "notes": "Test order for API testing",
+            "created_by": "test_user"
         }
-        response = requests.post(f"{BASE_URL}/api/v1/laboratory/orders/", params=data)
+        response = requests.post(f"{BASE_URL}/api/v1/laboratory/orders/", json=data)
         print(f"✅ Create order: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
@@ -160,7 +161,7 @@ def test_create_order():
 def test_create_sample():
     """Test creating a sample"""
     if not test_data.tenant_id or not test_data.branch_id or not test_data.order_id:
-        print("❌ Create sample: Missing required IDs")
+        print("❌ Create sample: No tenant, branch, or order ID available")
         return False
     
     try:
@@ -168,11 +169,11 @@ def test_create_sample():
             "tenant_id": test_data.tenant_id,
             "branch_id": test_data.branch_id,
             "order_id": test_data.order_id,
-            "sample_code": "SAMP002",
+            "sample_code": "SAMP001_API",
             "type": "SANGRE",
-            "notes": "Blood sample for CBC and chemistry"
+            "notes": "Test sample for API testing"
         }
-        response = requests.post(f"{BASE_URL}/api/v1/laboratory/samples/", params=data)
+        response = requests.post(f"{BASE_URL}/api/v1/laboratory/samples/", json=data)
         print(f"✅ Create sample: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
@@ -187,7 +188,7 @@ def test_create_sample():
 def test_create_report():
     """Test creating a report"""
     if not test_data.tenant_id or not test_data.branch_id or not test_data.order_id:
-        print("❌ Create report: Missing required IDs")
+        print("❌ Create report: No tenant, branch, or order ID available")
         return False
     
     try:
@@ -195,10 +196,11 @@ def test_create_report():
             "tenant_id": test_data.tenant_id,
             "branch_id": test_data.branch_id,
             "order_id": test_data.order_id,
-            "title": "Complete Blood Count Report",
-            "diagnosis_text": "Normal CBC results, all parameters within reference range"
+            "title": "Test Report API",
+            "diagnosis_text": "Test diagnosis for API testing",
+            "created_by": "test_user"
         }
-        response = requests.post(f"{BASE_URL}/api/v1/reports/", params=data)
+        response = requests.post(f"{BASE_URL}/api/v1/reports/", json=data)
         print(f"✅ Create report: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
@@ -213,7 +215,7 @@ def test_create_report():
 def test_create_invoice():
     """Test creating an invoice"""
     if not test_data.tenant_id or not test_data.branch_id or not test_data.order_id:
-        print("❌ Create invoice: Missing required IDs")
+        print("❌ Create invoice: No tenant, branch, or order ID available")
         return False
     
     try:
@@ -221,17 +223,17 @@ def test_create_invoice():
             "tenant_id": test_data.tenant_id,
             "branch_id": test_data.branch_id,
             "order_id": test_data.order_id,
-            "invoice_number": "INV002",
-            "amount_total": 2500.00,
+            "invoice_number": "INV001_API",
+            "amount_total": 1500.00,
             "currency": "MXN"
         }
-        response = requests.post(f"{BASE_URL}/api/v1/billing/invoices/", params=data)
+        response = requests.post(f"{BASE_URL}/api/v1/billing/invoices/", json=data)
         print(f"✅ Create invoice: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
             test_data.invoice_id = data.get('id')
             print(f"   Invoice ID: {test_data.invoice_id}")
-            print(f"   Amount: {data.get('amount_total')} {data.get('currency')}")
+            print(f"   Invoice Number: {data.get('invoice_number')}")
         return response.status_code == 200
     except requests.exceptions.ConnectionError:
         print("❌ Create invoice: Connection failed")
@@ -240,7 +242,7 @@ def test_create_invoice():
 def test_create_payment():
     """Test creating a payment"""
     if not test_data.tenant_id or not test_data.branch_id or not test_data.invoice_id:
-        print("❌ Create payment: Missing required IDs")
+        print("❌ Create payment: No tenant, branch, or invoice ID available")
         return False
     
     try:
@@ -248,146 +250,213 @@ def test_create_payment():
             "tenant_id": test_data.tenant_id,
             "branch_id": test_data.branch_id,
             "invoice_id": test_data.invoice_id,
-            "amount_paid": 2500.00,
+            "amount_paid": 1500.00,
             "method": "credit_card"
         }
-        response = requests.post(f"{BASE_URL}/api/v1/billing/payments/", params=data)
+        response = requests.post(f"{BASE_URL}/api/v1/billing/payments/", json=data)
         print(f"✅ Create payment: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
             test_data.payment_id = data.get('id')
             print(f"   Payment ID: {test_data.payment_id}")
-            print(f"   Amount Paid: {data.get('amount_paid')}")
+            print(f"   Amount: {data.get('amount_paid')}")
         return response.status_code == 200
     except requests.exceptions.ConnectionError:
         print("❌ Create payment: Connection failed")
         return False
 
-def test_list_all_entities():
-    """Test listing all entities to verify the complete flow"""
-    print("\n📋 Verifying all entities in the system:")
+def test_user_registration():
+    """Test user registration"""
+    if not test_data.tenant_id:
+        print("❌ User registration: No tenant ID available")
+        return False
     
     try:
-        # List tenants
-        response = requests.get(f"{BASE_URL}/api/v1/tenants/")
+        data = {
+            "email": "testuser@test.com",
+            "password": "testpass123",
+            "full_name": "Test User",
+            "role": "admin",
+            "tenant_id": test_data.tenant_id
+        }
+        response = requests.post(f"{BASE_URL}/api/v1/auth/register", json=data)
+        print(f"✅ User registration: {response.status_code}")
         if response.status_code == 200:
-            tenants = response.json()
-            print(f"   📊 Tenants: {len(tenants)}")
-        
-        # List branches
-        response = requests.get(f"{BASE_URL}/api/v1/branches/")
-        if response.status_code == 200:
-            branches = response.json()
-            print(f"   📊 Branches: {len(branches)}")
-        
-        # List patients
-        response = requests.get(f"{BASE_URL}/api/v1/patients/")
-        if response.status_code == 200:
-            patients = response.json()
-            print(f"   📊 Patients: {len(patients)}")
-        
-        # List orders
-        response = requests.get(f"{BASE_URL}/api/v1/laboratory/orders/")
-        if response.status_code == 200:
-            orders = response.json()
-            print(f"   📊 Orders: {len(orders)}")
-        
-        # List samples
-        response = requests.get(f"{BASE_URL}/api/v1/laboratory/samples/")
-        if response.status_code == 200:
-            samples = response.json()
-            print(f"   📊 Samples: {len(samples)}")
-        
-        # List reports
-        response = requests.get(f"{BASE_URL}/api/v1/reports/")
-        if response.status_code == 200:
-            reports = response.json()
-            print(f"   📊 Reports: {len(reports)}")
-        
-        # List invoices
-        response = requests.get(f"{BASE_URL}/api/v1/billing/invoices/")
-        if response.status_code == 200:
-            invoices = response.json()
-            print(f"   📊 Invoices: {len(invoices)}")
-        
-        # List payments
-        response = requests.get(f"{BASE_URL}/api/v1/billing/payments/")
-        if response.status_code == 200:
-            payments = response.json()
-            print(f"   📊 Payments: {len(payments)}")
-        
-        return True
-    except Exception as e:
-        print(f"❌ Error listing entities: {e}")
+            data = response.json()
+            test_data.user_id = data.get('id')
+            print(f"   User ID: {test_data.user_id}")
+            print(f"   Email: {data.get('email')}")
+        return response.status_code == 200
+    except requests.exceptions.ConnectionError:
+        print("❌ User registration: Connection failed")
         return False
 
-def main():
-    """Run all endpoint tests"""
-    print("🚀 Testing Celuma API Complete Flow")
+def test_user_login():
+    """Test user login"""
+    try:
+        data = {
+            "email": "testuser@test.com",
+            "password": "testpass123",
+            "tenant_id": test_data.tenant_id
+        }
+        response = requests.post(f"{BASE_URL}/api/v1/auth/login", json=data)
+        print(f"✅ User login: {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
+            test_data.access_token = data.get('access_token')
+            print(f"   Access Token: {test_data.access_token[:20]}...")
+        return response.status_code == 200
+    except requests.exceptions.ConnectionError:
+        print("❌ User login: Connection failed")
+        return False
+
+def test_get_user_profile():
+    """Test getting user profile with authentication"""
+    if not test_data.access_token:
+        print("❌ Get user profile: No access token available")
+        return False
+    
+    try:
+        headers = {"Authorization": f"Bearer {test_data.access_token}"}
+        response = requests.get(f"{BASE_URL}/api/v1/auth/me", headers=headers)
+        print(f"✅ Get user profile: {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
+            print(f"   User ID: {data.get('id')}")
+            print(f"   Email: {data.get('email')}")
+            print(f"   Role: {data.get('role')}")
+        return response.status_code == 200
+    except requests.exceptions.ConnectionError:
+        print("❌ Get user profile: Connection failed")
+        return False
+
+def test_list_endpoints():
+    """Test list endpoints"""
+    try:
+        # Test list tenants
+        response = requests.get(f"{BASE_URL}/api/v1/tenants/")
+        print(f"✅ List tenants: {response.status_code}")
+        
+        # Test list branches
+        response = requests.get(f"{BASE_URL}/api/v1/branches/")
+        print(f"✅ List branches: {response.status_code}")
+        
+        # Test list patients
+        response = requests.get(f"{BASE_URL}/api/v1/patients/")
+        print(f"✅ List patients: {response.status_code}")
+        
+        # Test list orders
+        response = requests.get(f"{BASE_URL}/api/v1/laboratory/orders/")
+        print(f"✅ List orders: {response.status_code}")
+        
+        # Test list samples
+        response = requests.get(f"{BASE_URL}/api/v1/laboratory/samples/")
+        print(f"✅ List samples: {response.status_code}")
+        
+        # Test list reports
+        response = requests.get(f"{BASE_URL}/api/v1/reports/")
+        print(f"✅ List reports: {response.status_code}")
+        
+        # Test list invoices
+        response = requests.get(f"{BASE_URL}/api/v1/billing/invoices/")
+        print(f"✅ List invoices: {response.status_code}")
+        
+        # Test list payments
+        response = requests.get(f"{BASE_URL}/api/v1/billing/payments/")
+        print(f"✅ List payments: {response.status_code}")
+        
+        return True
+    except requests.exceptions.ConnectionError:
+        print("❌ List endpoints: Connection failed")
+        return False
+
+def test_get_details():
+    """Test get detail endpoints"""
+    try:
+        # Test get tenant details
+        if test_data.tenant_id:
+            response = requests.get(f"{BASE_URL}/api/v1/tenants/{test_data.tenant_id}")
+            print(f"✅ Get tenant details: {response.status_code}")
+        
+        # Test get branch details
+        if test_data.branch_id:
+            response = requests.get(f"{BASE_URL}/api/v1/branches/{test_data.branch_id}")
+            print(f"✅ Get branch details: {response.status_code}")
+        
+        # Test get patient details
+        if test_data.patient_id:
+            response = requests.get(f"{BASE_URL}/api/v1/patients/{test_data.patient_id}")
+            print(f"✅ Get patient details: {response.status_code}")
+        
+        # Test get order details
+        if test_data.order_id:
+            response = requests.get(f"{BASE_URL}/api/v1/laboratory/orders/{test_data.order_id}")
+            print(f"✅ Get order details: {response.status_code}")
+        
+        # Test get sample details
+        if test_data.sample_id:
+            response = requests.get(f"{BASE_URL}/api/v1/laboratory/samples/{test_data.sample_id}")
+            print(f"✅ Get sample details: {response.status_code}")
+        
+        # Test get report details
+        if test_data.report_id:
+            response = requests.get(f"{BASE_URL}/api/v1/reports/{test_data.report_id}")
+            print(f"✅ Get report details: {response.status_code}")
+        
+        # Test get invoice details
+        if test_data.invoice_id:
+            response = requests.get(f"{BASE_URL}/api/v1/billing/invoices/{test_data.invoice_id}")
+            print(f"✅ Get invoice details: {response.status_code}")
+        
+        return True
+    except requests.exceptions.ConnectionError:
+        print("❌ Get details: Connection failed")
+        return False
+
+def run_all_tests():
+    """Run all tests in sequence"""
+    print("🚀 Starting Celuma API Endpoint Tests")
     print("=" * 50)
     
-    # Basic endpoint tests
-    basic_tests = [
-        test_root_endpoint,
-        test_health_endpoint
+    tests = [
+        ("Root Endpoint", test_root_endpoint),
+        ("Health Endpoint", test_health_endpoint),
+        ("Create Tenant", test_create_tenant),
+        ("Create Branch", test_create_branch),
+        ("Create Patient", test_create_patient),
+        ("Create Laboratory Order", test_create_laboratory_order),
+        ("Create Sample", test_create_sample),
+        ("Create Report", test_create_report),
+        ("Create Invoice", test_create_invoice),
+        ("Create Payment", test_create_payment),
+        ("User Registration", test_user_registration),
+        ("User Login", test_user_login),
+        ("Get User Profile", test_get_user_profile),
+        ("List Endpoints", test_list_endpoints),
+        ("Get Details", test_get_details)
     ]
     
-    # Flow tests
-    flow_tests = [
-        test_create_tenant,
-        test_create_branch,
-        test_create_patient,
-        test_create_order,
-        test_create_sample,
-        test_create_report,
-        test_create_invoice,
-        test_create_payment
-    ]
+    passed = 0
+    total = len(tests)
     
-    # Run basic tests first
-    print("🔍 Running basic endpoint tests...")
-    basic_passed = 0
-    for test in basic_tests:
-        if test():
-            basic_passed += 1
-        print()
+    for test_name, test_func in tests:
+        print(f"\n🧪 Testing: {test_name}")
+        print("-" * 30)
+        if test_func():
+            passed += 1
+            print(f"✅ {test_name}: PASSED")
+        else:
+            print(f"❌ {test_name}: FAILED")
     
-    # Run flow tests
-    print("🔄 Running complete flow tests...")
-    flow_passed = 0
-    for test in flow_tests:
-        if test():
-            flow_passed += 1
-        print()
-    
-    # Verify all entities
-    test_list_all_entities()
-    
-    # Summary
     print("\n" + "=" * 50)
-    print(f"📊 Test Results:")
-    print(f"   Basic endpoints: {basic_passed}/{len(basic_tests)} working")
-    print(f"   Flow tests: {flow_passed}/{len(flow_tests)} working")
+    print(f"📊 Test Results: {passed}/{total} tests passed")
     
-    total_tests = len(basic_tests) + len(flow_tests)
-    total_passed = basic_passed + flow_passed
-    
-    print(f"   Total: {total_passed}/{total_tests} tests passed")
-    
-    if total_passed == total_tests:
-        print("🎉 All tests passed! The complete flow is working correctly!")
+    if passed == total:
+        print("🎉 All tests passed! The API is working correctly.")
     else:
-        print("⚠️  Some tests failed. Check the output above for details.")
+        print("⚠️  Some tests failed. Please check the API implementation.")
     
-    print(f"\n💡 Test data created:")
-    print(f"   Tenant ID: {test_data.tenant_id}")
-    print(f"   Branch ID: {test_data.branch_id}")
-    print(f"   Patient ID: {test_data.patient_id}")
-    print(f"   Order ID: {test_data.order_id}")
-    print(f"   Sample ID: {test_data.sample_id}")
-    print(f"   Report ID: {test_data.report_id}")
-    print(f"   Invoice ID: {test_data.invoice_id}")
-    print(f"   Payment ID: {test_data.payment_id}")
+    return passed == total
 
 if __name__ == "__main__":
-    main()
+    run_all_tests()

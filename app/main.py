@@ -23,7 +23,7 @@ app.include_router(billing_router, prefix="/api/v1")
 def root():
     return {
         "message": "Welcome to Celuma API",
-        "version": "2.0.0",
+        "version": "1.0.0",
         "features": [
             "Multi-tenant support",
             "Laboratory management",

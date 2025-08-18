@@ -1,31 +1,653 @@
-# Celuma API - Complete Endpoints Reference
+# Celuma API Endpoints
 
-This document provides a comprehensive reference for all available API endpoints in the Celuma system.
+Complete reference for all available API endpoints in the Celuma laboratory management system.
 
-## 🔗 Base URL
+## 🚀 JSON-First API Design
 
+**All POST endpoints use JSON request bodies for optimal data handling and validation.**
+
+### Benefits of JSON Payloads
+- ✅ **Excellent Data Validation**: Pydantic schemas provide automatic validation
+- ✅ **Type Safety**: Strong typing for all request and response data
+- ✅ **Consistent API Design**: All endpoints follow the same pattern
+- ✅ **Superior Developer Experience**: Clear data structure and validation errors
+- ✅ **Auto-generated Documentation**: OpenAPI/Swagger documentation with examples
+
+### Design Principles
+The API is designed with JSON request bodies for all POST endpoints, providing:
+- Excellent data validation with Pydantic schemas
+- Strong type safety and developer experience
+- Consistent API design following REST best practices
+- Auto-generated documentation and examples
+
+## 🔐 Authentication Endpoints
+
+### POST /api/v1/auth/register
+**Register a new user**
+
+**Request Body:**
+```json
+{
+  "email": "user@example.com",
+  "password": "securepassword123",
+  "full_name": "John Doe",
+  "role": "admin",
+  "tenant_id": "tenant-uuid-here"
+}
 ```
-http://localhost:8000
+
+**Response:**
+```json
+{
+  "id": "user-uuid",
+  "email": "user@example.com",
+  "full_name": "John Doe",
+  "role": "admin"
+}
 ```
 
-## 📚 Interactive Documentation
+### POST /api/v1/auth/login
+**Authenticate user and get access token**
 
-- **Swagger UI**: `/docs`
-- **ReDoc**: `/redoc`
-- **OpenAPI JSON**: `/openapi.json`
+**Request Body:**
+```json
+{
+  "email": "user@example.com",
+  "password": "securepassword123",
+  "tenant_id": "tenant-uuid-here"
+}
+```
 
-## 🏥 API Endpoints
+**Response:**
+```json
+{
+  "access_token": "jwt-token-here",
+  "token_type": "bearer"
+}
+```
 
-### Health & Status
+### POST /api/v1/auth/logout
+**Logout user and blacklist token**
 
-#### GET `/`
-**Description**: Root endpoint with system information  
-**Response**: System overview and version information
+**Headers:** `Authorization: Bearer <token>`
 
+**Response:**
+```json
+{
+  "message": "Logout successful",
+  "token_revoked": true
+}
+```
+
+### GET /api/v1/auth/me
+**Get current user profile**
+
+**Headers:** `Authorization: Bearer <token>`
+
+**Response:**
+```json
+{
+  "id": "user-uuid",
+  "email": "user@example.com",
+  "full_name": "John Doe",
+  "role": "admin",
+  "tenant_id": "tenant-uuid-here"
+}
+```
+
+## 🏢 Tenant Management
+
+### POST /api/v1/tenants/
+**Create a new tenant**
+
+**Request Body:**
+```json
+{
+  "name": "Acme Laboratories",
+  "legal_name": "Acme Laboratories Inc.",
+  "tax_id": "123456789"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "tenant-uuid",
+  "name": "Acme Laboratories",
+  "legal_name": "Acme Laboratories Inc."
+}
+```
+
+### GET /api/v1/tenants/
+**List all tenants**
+
+**Response:**
+```json
+[
+  {
+    "id": "tenant-uuid",
+    "name": "Acme Laboratories",
+    "legal_name": "Acme Laboratories Inc."
+  }
+]
+```
+
+### GET /api/v1/tenants/{tenant_id}
+**Get tenant details**
+
+**Response:**
+```json
+{
+  "id": "tenant-uuid",
+  "name": "Acme Laboratories",
+  "legal_name": "Acme Laboratories Inc.",
+  "tax_id": "123456789"
+}
+```
+
+### GET /api/v1/tenants/{tenant_id}/branches
+**List branches for a specific tenant**
+
+**Response:**
+```json
+[
+  {
+    "id": "branch-uuid",
+    "name": "Main Branch",
+    "code": "MAIN",
+    "city": "Mexico City"
+  }
+]
+```
+
+### GET /api/v1/tenants/{tenant_id}/users
+**List users for a specific tenant**
+
+**Response:**
+```json
+[
+  {
+    "id": "user-uuid",
+    "email": "user@example.com",
+    "full_name": "John Doe",
+    "role": "admin"
+  }
+]
+```
+
+## 🏥 Branch Management
+
+### POST /api/v1/branches/
+**Create a new branch**
+
+**Request Body:**
+```json
+{
+  "tenant_id": "tenant-uuid-here",
+  "code": "MAIN",
+  "name": "Main Branch",
+  "city": "Mexico City",
+  "state": "CDMX",
+  "country": "MX"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "branch-uuid",
+  "name": "Main Branch",
+  "code": "MAIN",
+  "tenant_id": "tenant-uuid-here"
+}
+```
+
+### GET /api/v1/branches/
+**List all branches**
+
+**Response:**
+```json
+[
+  {
+    "id": "branch-uuid",
+    "name": "Main Branch",
+    "code": "MAIN",
+    "city": "Mexico City",
+    "tenant_id": "tenant-uuid-here"
+  }
+]
+```
+
+### GET /api/v1/branches/{branch_id}
+**Get branch details**
+
+**Response:**
+```json
+{
+  "id": "branch-uuid",
+  "name": "Main Branch",
+  "code": "MAIN",
+  "city": "Mexico City",
+  "state": "CDMX",
+  "country": "MX",
+  "tenant_id": "tenant-uuid-here"
+}
+```
+
+### GET /api/v1/branches/{branch_id}/users
+**List users for a specific branch**
+
+**Response:**
+```json
+[
+  {
+    "id": "user-uuid",
+    "email": "user@example.com",
+    "full_name": "John Doe",
+    "role": "admin"
+  }
+]
+```
+
+## 👥 Patient Management
+
+### POST /api/v1/patients/
+**Create a new patient**
+
+**Request Body:**
+```json
+{
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here",
+  "patient_code": "P001",
+  "first_name": "John",
+  "last_name": "Doe",
+  "dob": "1990-01-01",
+  "sex": "M",
+  "phone": "555-1234",
+  "email": "john.doe@example.com"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "patient-uuid",
+  "patient_code": "P001",
+  "first_name": "John",
+  "last_name": "Doe",
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here"
+}
+```
+
+### GET /api/v1/patients/
+**List all patients**
+
+**Response:**
+```json
+[
+  {
+    "id": "patient-uuid",
+    "patient_code": "P001",
+    "first_name": "John",
+    "last_name": "Doe",
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here"
+  }
+]
+```
+
+### GET /api/v1/patients/{patient_id}
+**Get patient details**
+
+**Response:**
+```json
+{
+  "id": "patient-uuid",
+  "patient_code": "P001",
+  "first_name": "John",
+  "last_name": "Doe",
+  "dob": "1990-01-01",
+  "sex": "M",
+  "phone": "555-1234",
+  "email": "john.doe@example.com",
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here"
+}
+```
+
+## 🧪 Laboratory Management
+
+### POST /api/v1/laboratory/orders/
+**Create a new laboratory order**
+
+**Request Body:**
+```json
+{
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here",
+  "patient_id": "patient-uuid-here",
+  "order_code": "ORD001",
+  "requested_by": "Dr. Smith",
+  "notes": "Complete blood count requested"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "order-uuid",
+  "order_code": "ORD001",
+  "status": "RECEIVED",
+  "patient_id": "patient-uuid-here",
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here"
+}
+```
+
+### GET /api/v1/laboratory/orders/
+**List all laboratory orders**
+
+**Response:**
+```json
+[
+  {
+    "id": "order-uuid",
+    "order_code": "ORD001",
+    "status": "RECEIVED",
+    "patient_id": "patient-uuid-here",
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here"
+  }
+]
+```
+
+### GET /api/v1/laboratory/orders/{order_id}
+**Get laboratory order details**
+
+**Response:**
+```json
+{
+  "id": "order-uuid",
+  "order_code": "ORD001",
+  "status": "RECEIVED",
+  "patient_id": "patient-uuid-here",
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here",
+  "requested_by": "Dr. Smith",
+  "notes": "Complete blood count requested",
+  "billed_lock": false
+}
+```
+
+### POST /api/v1/laboratory/samples/
+**Create a new sample**
+
+**Request Body:**
+```json
+{
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here",
+  "order_id": "order-uuid-here",
+  "sample_code": "SAMP001",
+  "type": "SANGRE",
+  "notes": "Blood sample for CBC"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "sample-uuid",
+  "sample_code": "SAMP001",
+  "type": "SANGRE",
+  "state": "RECEIVED",
+  "order_id": "order-uuid-here",
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here"
+}
+```
+
+### GET /api/v1/laboratory/samples/
+**List all samples**
+
+**Response:**
+```json
+[
+  {
+    "id": "sample-uuid",
+    "sample_code": "SAMP001",
+    "type": "SANGRE",
+    "state": "RECEIVED",
+    "order_id": "order-uuid-here",
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here"
+  }
+]
+```
+
+## 📋 Report Management
+
+### POST /api/v1/reports/
+**Create a new report**
+
+**Request Body:**
+```json
+{
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here",
+  "order_id": "order-uuid-here",
+  "title": "Blood Test Report",
+  "diagnosis_text": "Normal blood count results"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "report-uuid",
+  "status": "DRAFT",
+  "order_id": "order-uuid-here",
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here"
+}
+```
+
+### GET /api/v1/reports/
+**List all reports**
+
+**Response:**
+```json
+[
+  {
+    "id": "report-uuid",
+    "status": "DRAFT",
+    "order_id": "order-uuid-here",
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here"
+  }
+]
+```
+
+### GET /api/v1/reports/{report_id}
+**Get report details**
+
+**Response:**
+```json
+{
+  "id": "report-uuid",
+  "status": "DRAFT",
+  "order_id": "order-uuid-here",
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here",
+  "title": "Blood Test Report",
+  "diagnosis_text": "Normal blood count results",
+  "published_at": null
+}
+```
+
+### POST /api/v1/reports/versions/
+**Create a new report version**
+
+**Request Body:**
+```json
+{
+  "report_id": "report-uuid-here",
+  "version_no": 1,
+  "pdf_storage_id": "storage-uuid-here",
+  "html_storage_id": "storage-uuid-here",
+  "changelog": "Initial report version",
+  "authored_by": "user-uuid-here"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "version-uuid",
+  "version_no": 1,
+  "report_id": "report-uuid-here",
+  "is_current": true
+}
+```
+
+### GET /api/v1/reports/versions/
+**List all report versions**
+
+**Response:**
+```json
+[
+  {
+    "id": "version-uuid",
+    "version_no": 1,
+    "report_id": "report-uuid-here",
+    "is_current": true
+  }
+]
+```
+
+## 💰 Billing Management
+
+### POST /api/v1/billing/invoices/
+**Create a new invoice**
+
+**Request Body:**
+```json
+{
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here",
+  "order_id": "order-uuid-here",
+  "invoice_number": "INV001",
+  "amount_total": 1500.00,
+  "currency": "MXN"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "invoice-uuid",
+  "invoice_number": "INV001",
+  "amount_total": 1500.0,
+  "currency": "MXN",
+  "status": "PENDING",
+  "order_id": "order-uuid-here",
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here"
+}
+```
+
+### GET /api/v1/billing/invoices/
+**List all invoices**
+
+**Response:**
+```json
+[
+  {
+    "id": "invoice-uuid",
+    "invoice_number": "INV001",
+    "amount_total": 1500.0,
+    "currency": "MXN",
+    "status": "PENDING",
+    "order_id": "order-uuid-here",
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here"
+  }
+]
+```
+
+### GET /api/v1/billing/invoices/{invoice_id}
+**Get invoice details**
+
+**Response:**
+```json
+{
+  "id": "invoice-uuid",
+  "invoice_number": "INV001",
+  "amount_total": 1500.0,
+  "currency": "MXN",
+  "status": "PENDING",
+  "order_id": "order-uuid-here",
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here",
+  "issued_at": "2025-08-18T01:50:51.386774"
+}
+```
+
+### POST /api/v1/billing/payments/
+**Create a new payment**
+
+**Request Body:**
+```json
+{
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here",
+  "invoice_id": "invoice-uuid-here",
+  "amount_paid": 1500.00,
+  "method": "credit_card"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "payment-uuid",
+  "amount_paid": 1500.0,
+  "method": "credit_card",
+  "invoice_id": "invoice-uuid-here",
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here"
+}
+```
+
+### GET /api/v1/billing/payments/
+**List all payments**
+
+**Response:**
+```json
+[
+  {
+    "id": "payment-uuid",
+    "amount_paid": 1500.0,
+    "method": "credit_card",
+    "invoice_id": "invoice-uuid-here",
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here"
+  }
+]
+```
+
+## 🔍 System Endpoints
+
+### GET /
+**Get system information**
+
+**Response:**
 ```json
 {
   "message": "Welcome to Celuma API",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "features": [
     "Multi-tenant support",
     "Laboratory management",
@@ -38,463 +660,115 @@ http://localhost:8000
 }
 ```
 
-#### GET `/api/v1/health`
-**Description**: Health check endpoint  
-**Response**: System health status
+### GET /api/v1/health
+**Health check endpoint**
 
+**Response:**
 ```json
 {
   "status": "ok"
 }
 ```
 
-### Authentication
-
-#### POST `/api/v1/auth/register`
-**Description**: User registration  
-**Parameters**:
-- `email` (string, required): User email address
-- `password` (string, required): User password
-- `full_name` (string, required): User full name
-- `role` (string, required): User role (admin, pathologist, lab_tech, assistant, billing, viewer)
-- `tenant_id` (string, required): Tenant UUID
-
-**Response**:
-```json
-{
-  "id": "uuid",
-  "email": "user@example.com",
-  "full_name": "John Doe",
-  "role": "admin"
-}
-```
-
-#### POST `/api/v1/auth/login`
-**Description**: User authentication  
-**Parameters**:
-- `email` (string, required): User email address
-- `password` (string, required): User password
-- `tenant_id` (string, required): Tenant UUID
-
-**Response**:
-```json
-{
-  "access_token": "jwt_token_here",
-  "token_type": "bearer"
-}
-```
-
-#### GET `/api/v1/auth/me`
-**Description**: Get current user information  
-**Authentication**: Bearer token required  
-**Response**:
-```json
-{
-  "id": "uuid",
-  "email": "user@example.com",
-  "full_name": "John Doe",
-  "role": "admin",
-  "tenant_id": "tenant_uuid"
-}
-```
-
-#### POST `/api/v1/auth/logout`
-**Description**: Logout user and invalidate current token  
-**Authentication**: Bearer token required  
-**Response**:
-```json
-{
-  "message": "Logout successful",
-  "token_revoked": true
-}
-```
-
-**Notes**:
-- The current token is immediately blacklisted and cannot be used again
-- Attempting to use a blacklisted token will return 401 Unauthorized
-- Multiple logout attempts with the same token will return "Token already revoked"
-
-### Tenant Management
-
-#### GET `/api/v1/tenants/`
-**Description**: List all tenants  
-**Response**: Array of tenant objects
-
-```json
-[
-  {
-    "id": "uuid",
-    "name": "Tenant Name",
-    "legal_name": "Legal Business Name"
-  }
-]
-```
-
-#### POST `/api/v1/tenants/`
-**Description**: Create a new tenant  
-**Parameters**:
-- `name` (string, required): Tenant name
-- `legal_name` (string, optional): Legal business name
-- `tax_id` (string, optional): Tax identification number
-
-**Response**: Created tenant object
-
-#### GET `/api/v1/tenants/{tenant_id}`
-**Description**: Get tenant details  
-**Parameters**:
-- `tenant_id` (string, required): Tenant UUID
-
-**Response**: Tenant object
-
-#### GET `/api/v1/tenants/{tenant_id}/branches`
-**Description**: List all branches for a specific tenant  
-**Parameters**:
-- `tenant_id` (string, required): Tenant UUID
-
-**Response**: Array of branch objects
-
-#### GET `/api/v1/tenants/{tenant_id}/users`
-**Description**: List all users for a specific tenant  
-**Parameters**:
-- `tenant_id` (string, required): Tenant UUID
-
-**Response**: Array of user objects
-
-### Branch Management
-
-#### GET `/api/v1/branches/`
-**Description**: List all branches  
-**Response**: Array of branch objects
-
-```json
-[
-  {
-    "id": "uuid",
-    "name": "Branch Name",
-    "code": "BRANCH_CODE",
-    "city": "Mexico City",
-    "tenant_id": "tenant_uuid"
-  }
-]
-```
-
-#### POST `/api/v1/branches/`
-**Description**: Create a new branch  
-**Parameters**:
-- `tenant_id` (string, required): Tenant UUID
-- `code` (string, required): Branch code (unique per tenant)
-- `name` (string, required): Branch name
-- `timezone` (string, optional): Timezone (default: "America/Mexico_City")
-- `address_line1` (string, optional): Street address
-- `city` (string, optional): City name
-- `state` (string, optional): State/province
-- `country` (string, optional): Country code (default: "MX")
-
-**Response**: Created branch object
-
-#### GET `/api/v1/branches/{branch_id}`
-**Description**: Get branch details  
-**Parameters**:
-- `branch_id` (string, required): Branch UUID
-
-**Response**: Branch object
-
-#### GET `/api/v1/branches/{branch_id}/users`
-**Description**: List all users for a specific branch  
-**Parameters**:
-- `branch_id` (string, required): Branch UUID
-
-**Response**: Array of user objects
-
-### Patient Management
-
-#### GET `/api/v1/patients/`
-**Description**: List all patients  
-**Response**: Array of patient objects
-
-```json
-[
-  {
-    "id": "uuid",
-    "patient_code": "P001",
-    "first_name": "John",
-    "last_name": "Doe",
-    "tenant_id": "tenant_uuid",
-    "branch_id": "branch_uuid"
-  }
-]
-```
-
-#### POST `/api/v1/patients/`
-**Description**: Create a new patient  
-**Parameters**:
-- `tenant_id` (string, required): Tenant UUID
-- `branch_id` (string, required): Branch UUID
-- `patient_code` (string, required): Patient code (unique per tenant)
-- `first_name` (string, required): Patient first name
-- `last_name` (string, required): Patient last name
-- `dob` (string, optional): Date of birth (YYYY-MM-DD)
-- `sex` (string, optional): Gender (M/F)
-- `phone` (string, optional): Phone number
-- `email` (string, optional): Email address
-
-**Response**: Created patient object
-
-#### GET `/api/v1/patients/{patient_id}`
-**Description**: Get patient details  
-**Parameters**:
-- `patient_id` (string, required): Patient UUID
-
-**Response**: Patient object with full details
-
-### Laboratory Management
-
-#### GET `/api/v1/laboratory/orders/`
-**Description**: List all laboratory orders  
-**Response**: Array of order objects
-
-```json
-[
-  {
-    "id": "uuid",
-    "order_code": "ORD001",
-    "status": "RECEIVED",
-    "patient_id": "patient_uuid",
-    "tenant_id": "tenant_uuid",
-    "branch_id": "branch_uuid"
-  }
-]
-```
-
-#### POST `/api/v1/laboratory/orders/`
-**Description**: Create a new laboratory order  
-**Parameters**:
-- `tenant_id` (string, required): Tenant UUID
-- `branch_id` (string, required): Branch UUID
-- `patient_id` (string, required): Patient UUID
-- `order_code` (string, required): Order code (unique per branch)
-- `requested_by` (string, optional): Requesting physician
-- `notes` (string, optional): Order notes
-- `created_by` (string, optional): User UUID who created the order
-
-**Response**: Created order object
-
-#### GET `/api/v1/laboratory/orders/{order_id}`
-**Description**: Get order details  
-**Parameters**:
-- `order_id` (string, required): Order UUID
-
-**Response**: Order object with full details
-
-#### GET `/api/v1/laboratory/samples/`
-**Description**: List all samples  
-**Response**: Array of sample objects
-
-```json
-[
-  {
-    "id": "uuid",
-    "sample_code": "SAMP001",
-    "type": "SANGRE",
-    "state": "RECEIVED",
-    "order_id": "order_uuid",
-    "tenant_id": "tenant_uuid",
-    "branch_id": "branch_uuid"
-  }
-]
-```
-
-#### POST `/api/v1/laboratory/samples/`
-**Description**: Create a new sample  
-**Parameters**:
-- `tenant_id` (string, required): Tenant UUID
-- `branch_id` (string, required): Branch UUID
-- `order_id` (string, required): Order UUID
-- `sample_code` (string, required): Sample code (unique per order)
-- `type` (string, required): Sample type (SANGRE, BIOPSIA, LAMINILLA, TEJIDO, OTRO)
-- `notes` (string, optional): Sample notes
-
-**Response**: Created sample object
-
-### Report Management
-
-#### GET `/api/v1/reports/`
-**Description**: List all reports  
-**Response**: Array of report objects
-
-```json
-[
-  {
-    "id": "uuid",
-    "status": "DRAFT",
-    "order_id": "order_uuid",
-    "tenant_id": "tenant_uuid",
-    "branch_id": "branch_uuid"
-  }
-]
-```
-
-#### POST `/api/v1/reports/`
-**Description**: Create a new report  
-**Parameters**:
-- `tenant_id` (string, required): Tenant UUID
-- `branch_id` (string, required): Branch UUID
-- `order_id` (string, required): Order UUID
-- `title` (string, optional): Report title
-- `diagnosis_text` (string, optional): Diagnosis text
-- `created_by` (string, optional): User UUID who created the report
-
-**Response**: Created report object
-
-#### GET `/api/v1/reports/{report_id}`
-**Description**: Get report details  
-**Parameters**:
-- `report_id` (string, required): Report UUID
-
-**Response**: Report object with full details
-
-#### GET `/api/v1/reports/versions/`
-**Description**: List all report versions  
-**Response**: Array of version objects
-
-#### POST `/api/v1/reports/versions/`
-**Description**: Create a new report version  
-**Parameters**:
-- `report_id` (string, required): Report UUID
-- `version_no` (integer, required): Version number
-- `pdf_storage_id` (string, required): PDF storage object UUID
-- `html_storage_id` (string, optional): HTML storage object UUID
-- `changelog` (string, optional): Version changelog
-- `authored_by` (string, optional): User UUID who authored the version
-
-**Response**: Created version object
-
-### Billing Management
-
-#### GET `/api/v1/billing/invoices/`
-**Description**: List all invoices  
-**Response**: Array of invoice objects
-
-```json
-[
-  {
-    "id": "uuid",
-    "invoice_number": "INV001",
-    "amount_total": 1500.00,
-    "currency": "MXN",
-    "status": "PENDING",
-    "order_id": "order_uuid",
-    "tenant_id": "tenant_uuid",
-    "branch_id": "branch_uuid"
-  }
-]
-```
-
-#### POST `/api/v1/billing/invoices/`
-**Description**: Create a new invoice  
-**Parameters**:
-- `tenant_id` (string, required): Tenant UUID
-- `branch_id` (string, required): Branch UUID
-- `order_id` (string, required): Order UUID
-- `invoice_number` (string, required): Invoice number (unique per branch)
-- `amount_total` (float, required): Total invoice amount
-- `currency` (string, optional): Currency code (default: "MXN")
-
-**Response**: Created invoice object
-
-#### GET `/api/v1/billing/invoices/{invoice_id}`
-**Description**: Get invoice details  
-**Parameters**:
-- `invoice_id` (string, required): Invoice UUID
-
-**Response**: Invoice object with full details
-
-#### GET `/api/v1/billing/payments/`
-**Description**: List all payments  
-**Response**: Array of payment objects
-
-```json
-[
-  {
-    "id": "uuid",
-    "amount_paid": 1500.00,
-    "method": "transfer",
-    "invoice_id": "invoice_uuid",
-    "tenant_id": "tenant_uuid",
-    "branch_id": "branch_uuid"
-  }
-]
-```
-
-#### POST `/api/v1/billing/payments/`
-**Description**: Create a new payment  
-**Parameters**:
-- `tenant_id` (string, required): Tenant UUID
-- `branch_id` (string, required): Branch UUID
-- `invoice_id` (string, required): Invoice UUID
-- `amount_paid` (float, required): Payment amount
-- `method` (string, optional): Payment method
-
-**Response**: Created payment object
+## 📚 Data Models
+
+### Common Fields
+All entities include these common fields:
+- `id`: Unique identifier (UUID)
+- `tenant_id`: Associated tenant
+- `branch_id`: Associated branch (where applicable)
+- `created_at`: Creation timestamp
+- `updated_at`: Last update timestamp
+
+### Status Enums
+- **Order Status**: `RECEIVED`, `PROCESSING`, `COMPLETED`, `CANCELLED`
+- **Sample State**: `RECEIVED`, `PROCESSING`, `COMPLETED`, `DISCARDED`
+- **Report Status**: `DRAFT`, `REVIEW`, `PUBLISHED`, `ARCHIVED`
+- **Invoice Status**: `PENDING`, `PAID`, `OVERDUE`, `CANCELLED`
+- **User Role**: `admin`, `technician`, `doctor`, `receptionist`
 
 ## 🔐 Authentication
 
-Most endpoints require authentication using JWT Bearer tokens. Include the token in the Authorization header:
+### JWT Token Format
+All authenticated endpoints require a Bearer token in the Authorization header:
+```
+Authorization: Bearer <jwt_token>
+```
 
-```
-Authorization: Bearer <your_jwt_token>
-```
+### Token Expiration
+JWT tokens expire after 24 hours. Use the logout endpoint to invalidate tokens before expiration.
+
+### Token Blacklisting
+When users logout, their tokens are automatically blacklisted and cannot be used for subsequent requests.
 
 ## 📊 Response Formats
 
-### Success Response
-```json
-{
-  "id": "uuid",
-  "field1": "value1",
-  "field2": "value2"
-}
-```
+### Success Responses
+All successful responses return HTTP 200 status with JSON data matching the endpoint's response model.
 
-### Error Response
-```json
-{
-  "detail": "Error message description"
-}
-```
+### Error Responses
+- **400 Bad Request**: Invalid request data
+- **401 Unauthorized**: Missing or invalid authentication token
+- **403 Forbidden**: Insufficient permissions
+- **404 Not Found**: Resource not found
+- **422 Unprocessable Entity**: Validation errors
+- **500 Internal Server Error**: Server-side error
 
-### Validation Error Response
+### Validation Errors
+When validation fails, the API returns detailed error information:
 ```json
 {
   "detail": [
     {
-      "type": "missing",
-      "loc": ["body", "field_name"],
-      "msg": "Field required",
-      "input": null
+      "loc": ["body", "email"],
+      "msg": "invalid email format",
+      "type": "value_error.email"
     }
   ]
 }
 ```
 
-## 🚨 HTTP Status Codes
+## 🚀 Rate Limiting
 
-- **200**: Success
-- **201**: Created
-- **400**: Bad Request (validation errors)
-- **401**: Unauthorized (authentication required)
-- **404**: Not Found
-- **422**: Unprocessable Entity (validation errors)
-- **500**: Internal Server Error
+Currently, no rate limiting is implemented. However, it's recommended to:
+- Limit requests to reasonable frequencies
+- Implement exponential backoff for failed requests
+- Cache responses when appropriate
 
-## 🔄 Pagination
+## 📖 Additional Documentation
 
-Currently, list endpoints return all results. Pagination will be implemented in future versions.
+- [API Examples](API_EXAMPLES.md) - Usage examples and patterns
+- [Testing Guide](tests/TESTING_README.md) - Comprehensive testing documentation
+- [Database Schema](DATABASE_README.md) - Database design and migrations
+- [Swagger Documentation](http://localhost:8000/docs) - Interactive API documentation
 
-## 📝 Notes
+## 📚 API Usage Examples
 
-- All UUIDs are in standard UUID v4 format
-- Dates are in ISO 8601 format (YYYY-MM-DD)
-- Monetary amounts are stored as decimal numbers
-- Sample types and order statuses use predefined enum values
-- All endpoints support CORS for web applications
+### JSON Payload Format
+```bash
+# JSON Payload Format
+curl -X POST "http://localhost:8000/api/v1/tenants/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Acme Lab",
+    "legal_name": "Acme Lab Inc",
+    "tax_id": "123456789"
+  }'
+```
+
+### Python Implementation
+```python
+# Python JSON Implementation
+response = requests.post(
+    "http://localhost:8000/api/v1/tenants/",
+    json={
+        "name": "Acme Lab",
+        "legal_name": "Acme Lab Inc",
+        "tax_id": "123456789"
+    }
+)
+```
+
+---
+
+**Note: All POST endpoints use JSON request bodies for optimal data handling, validation, and consistent API design.**

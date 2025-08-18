@@ -1,64 +1,146 @@
-# Celuma API - Usage Examples and Patterns
+# Celuma API Usage Examples
 
-This document provides practical examples of how to use the Celuma API for common laboratory management tasks.
+This document provides comprehensive examples of how to use the Celuma API with JSON payloads.
 
-## 🚀 Getting Started
+## 🚀 JSON-First API Design
 
-### 1. Health Check
-```bash
-curl http://localhost:8000/api/v1/health
-```
+**All POST endpoints use JSON request bodies for optimal data handling and validation.**
 
-### 2. System Information
-```bash
-curl http://localhost:8000/
-```
+### Benefits of JSON Payloads
+- ✅ **Excellent Data Validation**: Pydantic schemas provide automatic validation
+- ✅ **Type Safety**: Strong typing for all request and response data
+- ✅ **Consistent API Design**: All endpoints follow the same pattern
+- ✅ **Superior Developer Experience**: Clear data structure and validation errors
+- ✅ **Auto-generated Documentation**: OpenAPI/Swagger documentation with examples
 
-## 🔐 Authentication Examples
+## 🔐 Authentication
 
 ### User Registration
 ```bash
 curl -X POST "http://localhost:8000/api/v1/auth/register" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "email=admin@lab.com&password=secure123&full_name=Admin%20User&role=admin&tenant_id=your-tenant-uuid"
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "securepassword123",
+    "full_name": "John Doe",
+    "role": "admin",
+    "tenant_id": "tenant-uuid-here"
+  }'
+```
+
+**Python Example:**
+```python
+import requests
+
+response = requests.post(
+    "http://localhost:8000/api/v1/auth/register",
+    json={
+        "email": "user@example.com",
+        "password": "securepassword123",
+        "full_name": "John Doe",
+        "role": "admin",
+        "tenant_id": "tenant-uuid-here"
+    }
+)
+
+if response.status_code == 200:
+    user_data = response.json()
+    print(f"User created: {user_data['email']}")
 ```
 
 ### User Login
 ```bash
 curl -X POST "http://localhost:8000/api/v1/auth/login" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "email=admin@lab.com&password=secure123&tenant_id=your-tenant-uuid"
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "securepassword123",
+    "tenant_id": "tenant-uuid-here"
+  }'
+```
+
+**Python Example:**
+```python
+response = requests.post(
+    "http://localhost:8000/api/v1/auth/login",
+    json={
+        "email": "user@example.com",
+        "password": "securepassword123",
+        "tenant_id": "tenant-uuid-here"
+    }
+)
+
+if response.status_code == 200:
+    auth_data = response.json()
+    access_token = auth_data['access_token']
+    print(f"Login successful, token: {access_token}")
 ```
 
 ### Using Authentication Token
 ```bash
-# Store the token from login response
-TOKEN="your_jwt_token_here"
-
-# Use the token for authenticated requests
-curl -H "Authorization: Bearer $TOKEN" \
+curl -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   http://localhost:8000/api/v1/auth/me
+```
+
+**Python Example:**
+```python
+headers = {"Authorization": f"Bearer {access_token}"}
+response = requests.get(
+    "http://localhost:8000/api/v1/auth/me",
+    headers=headers
+)
+
+if response.status_code == 200:
+    profile = response.json()
+    print(f"User profile: {profile['full_name']}")
 ```
 
 ### User Logout
 ```bash
-# Logout and invalidate the current token
 curl -X POST "http://localhost:8000/api/v1/auth/logout" \
-  -H "Authorization: Bearer $TOKEN"
-
-# After logout, the token cannot be used again
-curl -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8000/api/v1/auth/me
-# This will return 401 Unauthorized
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
 ```
 
-## 🏢 Tenant Management Examples
+**Python Example:**
+```python
+response = requests.post(
+    "http://localhost:8000/api/v1/auth/logout",
+    headers=headers
+)
 
-### Create a New Tenant
+if response.status_code == 200:
+    logout_data = response.json()
+    print(f"Logout successful: {logout_data['message']}")
+```
+
+## 🏢 Tenant Management
+
+### Create Tenant
 ```bash
 curl -X POST "http://localhost:8000/api/v1/tenants/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "name=Acme%20Laboratory&legal_name=Acme%20Lab%20Corp&tax_id=123456789"
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Acme Laboratories",
+    "legal_name": "Acme Laboratories Inc.",
+    "tax_id": "123456789"
+  }'
+```
+
+**Python Example:**
+```python
+response = requests.post(
+    "http://localhost:8000/api/v1/tenants/",
+    json={
+        "name": "Acme Laboratories",
+        "legal_name": "Acme Laboratories Inc.",
+        "tax_id": "123456789"
+    }
+)
+
+if response.status_code == 200:
+    tenant = response.json()
+    tenant_id = tenant['id']
+    print(f"Tenant created: {tenant['name']}")
 ```
 
 ### List All Tenants
@@ -66,42 +148,120 @@ curl -X POST "http://localhost:8000/api/v1/tenants/" \
 curl http://localhost:8000/api/v1/tenants/
 ```
 
+**Python Example:**
+```python
+response = requests.get("http://localhost:8000/api/v1/tenants/")
+if response.status_code == 200:
+    tenants = response.json()
+    for tenant in tenants:
+        print(f"- {tenant['name']} ({tenant['id']})")
+```
+
 ### Get Tenant Details
 ```bash
-curl http://localhost:8000/api/v1/tenants/tenant-uuid-here
+curl http://localhost:8000/api/v1/tenants/TENANT_UUID
 ```
 
-## 🏥 Branch Management Examples
+**Python Example:**
+```python
+response = requests.get(f"http://localhost:8000/api/v1/tenants/{tenant_id}")
+if response.status_code == 200:
+    tenant = response.json()
+    print(f"Tenant: {tenant['name']}")
+    print(f"Legal Name: {tenant['legal_name']}")
+    print(f"Tax ID: {tenant['tax_id']}")
+```
 
-### Create a New Branch
+## 🏥 Branch Management
+
+### Create Branch
 ```bash
 curl -X POST "http://localhost:8000/api/v1/branches/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "tenant_id=tenant-uuid&code=MAIN&name=Main%20Branch&city=Mexico%20City&state=CDMX&country=MX"
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "tenant-uuid-here",
+    "code": "MAIN",
+    "name": "Main Branch",
+    "city": "Mexico City",
+    "state": "CDMX",
+    "country": "MX"
+  }'
 ```
 
-### List All Branches
+**Python Example:**
+```python
+response = requests.post(
+    "http://localhost:8000/api/v1/branches/",
+    json={
+        "tenant_id": tenant_id,
+        "code": "MAIN",
+        "name": "Main Branch",
+        "city": "Mexico City",
+        "state": "CDMX",
+        "country": "MX"
+    }
+)
+
+if response.status_code == 200:
+    branch = response.json()
+    branch_id = branch['id']
+    print(f"Branch created: {branch['name']}")
+```
+
+### List Tenant Branches
 ```bash
-curl http://localhost:8000/api/v1/branches/
+curl http://localhost:8000/api/v1/tenants/TENANT_UUID/branches
 ```
 
-### Get Branch Details
-```bash
-curl http://localhost:8000/api/v1/branches/branch-uuid-here
+**Python Example:**
+```python
+response = requests.get(f"http://localhost:8000/api/v1/tenants/{tenant_id}/branches")
+if response.status_code == 200:
+    branches = response.json()
+    for branch in branches:
+        print(f"- {branch['name']} ({branch['code']})")
 ```
 
-### List Branches for a Specific Tenant
-```bash
-curl http://localhost:8000/api/v1/tenants/tenant-uuid/branches
-```
+## 👥 Patient Management
 
-## 👥 Patient Management Examples
-
-### Create a New Patient
+### Create Patient
 ```bash
 curl -X POST "http://localhost:8000/api/v1/patients/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "tenant_id=tenant-uuid&branch_id=branch-uuid&patient_code=P001&first_name=John&last_name=Doe&dob=1990-01-01&sex=M&phone=555-1234&email=john.doe@example.com"
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here",
+    "patient_code": "P001",
+    "first_name": "John",
+    "last_name": "Doe",
+    "dob": "1990-01-01",
+    "sex": "M",
+    "phone": "555-1234",
+    "email": "john.doe@example.com"
+  }'
+```
+
+**Python Example:**
+```python
+response = requests.post(
+    "http://localhost:8000/api/v1/patients/",
+    json={
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "patient_code": "P001",
+        "first_name": "John",
+        "last_name": "Doe",
+        "dob": "1990-01-01",
+        "sex": "M",
+        "phone": "555-1234",
+        "email": "john.doe@example.com"
+    }
+)
+
+if response.status_code == 200:
+    patient = response.json()
+    patient_id = patient['id']
+    print(f"Patient created: {patient['first_name']} {patient['last_name']}")
 ```
 
 ### List All Patients
@@ -109,49 +269,117 @@ curl -X POST "http://localhost:8000/api/v1/patients/" \
 curl http://localhost:8000/api/v1/patients/
 ```
 
-### Get Patient Details
-```bash
-curl http://localhost:8000/api/v1/patients/patient-uuid-here
+**Python Example:**
+```python
+response = requests.get("http://localhost:8000/api/v1/patients/")
+if response.status_code == 200:
+    patients = response.json()
+    for patient in patients:
+        print(f"- {patient['first_name']} {patient['last_name']} ({patient['patient_code']})")
 ```
 
-## 🧪 Laboratory Management Examples
+## 🧪 Laboratory Management
 
-### Create a Laboratory Order
+### Create Laboratory Order
 ```bash
 curl -X POST "http://localhost:8000/api/v1/laboratory/orders/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "tenant_id=tenant-uuid&branch_id=branch-uuid&patient_id=patient-uuid&order_code=ORD001&requested_by=Dr.%20Smith&notes=Complete%20blood%20count%20requested"
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here",
+    "patient_id": "patient-uuid-here",
+    "order_code": "ORD001",
+    "requested_by": "Dr. Smith",
+    "notes": "Complete blood count requested"
+  }'
 ```
 
-### List All Orders
-```bash
-curl http://localhost:8000/api/v1/laboratory/orders/
+**Python Example:**
+```python
+response = requests.post(
+    "http://localhost:8000/api/v1/laboratory/orders/",
+    json={
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "patient_id": patient_id,
+        "order_code": "ORD001",
+        "requested_by": "Dr. Smith",
+        "notes": "Complete blood count requested"
+    }
+)
+
+if response.status_code == 200:
+    order = response.json()
+    order_id = order['id']
+    print(f"Order created: {order['order_code']}")
 ```
 
-### Get Order Details
-```bash
-curl http://localhost:8000/api/v1/laboratory/orders/order-uuid-here
-```
-
-### Create a Sample
+### Create Sample
 ```bash
 curl -X POST "http://localhost:8000/api/v1/laboratory/samples/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "tenant_id=tenant-uuid&branch_id=branch-uuid&order_id=order-uuid&sample_code=SAMP001&type=SANGRE&notes=Blood%20sample%20for%20CBC"
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here",
+    "order_id": "order-uuid-here",
+    "sample_code": "SAMP001",
+    "type": "SANGRE",
+    "notes": "Blood sample for CBC"
+  }'
 ```
 
-### List All Samples
-```bash
-curl http://localhost:8000/api/v1/laboratory/samples/
+**Python Example:**
+```python
+response = requests.post(
+    "http://localhost:8000/api/v1/laboratory/samples/",
+    json={
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "order_id": order_id,
+        "sample_code": "SAMP001",
+        "type": "SANGRE",
+        "notes": "Blood sample for CBC"
+    }
+)
+
+if response.status_code == 200:
+    sample = response.json()
+    sample_id = sample['id']
+    print(f"Sample created: {sample['sample_code']}")
 ```
 
-## 📋 Report Management Examples
+## 📋 Report Management
 
-### Create a Report
+### Create Report
 ```bash
 curl -X POST "http://localhost:8000/api/v1/reports/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "tenant_id=tenant-uuid&branch_id=branch-uuid&order_id=order-uuid&title=Blood%20Test%20Report&diagnosis_text=Normal%20blood%20count%20results"
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here",
+    "order_id": "order-uuid-here",
+    "title": "Blood Test Report",
+    "diagnosis_text": "Normal blood count results"
+  }'
+```
+
+**Python Example:**
+```python
+response = requests.post(
+    "http://localhost:8000/api/v1/reports/",
+    json={
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "order_id": order_id,
+        "title": "Blood Test Report",
+        "diagnosis_text": "Normal blood count results"
+    }
+)
+
+if response.status_code == 200:
+    report = response.json()
+    report_id = report['id']
+    print(f"Report created: {report['title']}")
 ```
 
 ### List All Reports
@@ -159,472 +387,296 @@ curl -X POST "http://localhost:8000/api/v1/reports/" \
 curl http://localhost:8000/api/v1/reports/
 ```
 
-### Get Report Details
-```bash
-curl http://localhost:8000/api/v1/reports/report-uuid-here
+**Python Example:**
+```python
+response = requests.get("http://localhost:8000/api/v1/reports/")
+if response.status_code == 200:
+    reports = response.json()
+    for report in reports:
+        print(f"- {report['title']} (Status: {report['status']})")
 ```
 
-### Create Report Version
-```bash
-curl -X POST "http://localhost:8000/api/v1/reports/versions/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "report_id=report-uuid&version_no=1&pdf_storage_id=storage-uuid&changelog=Initial%20report%20version"
-```
+## 💰 Billing Management
 
-## 💰 Billing Management Examples
-
-### Create an Invoice
+### Create Invoice
 ```bash
 curl -X POST "http://localhost:8000/api/v1/billing/invoices/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "tenant_id=tenant-uuid&branch_id=branch-uuid&order_id=order-uuid&invoice_number=INV001&amount_total=1500.00&currency=MXN"
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here",
+    "order_id": "order-uuid-here",
+    "invoice_number": "INV001",
+    "amount_total": 1500.00,
+    "currency": "MXN"
+  }'
 ```
 
-### List All Invoices
-```bash
-curl http://localhost:8000/api/v1/billing/invoices/
+**Python Example:**
+```python
+response = requests.post(
+    "http://localhost:8000/api/v1/billing/invoices/",
+    json={
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "order_id": order_id,
+        "invoice_number": "INV001",
+        "amount_total": 1500.00,
+        "currency": "MXN"
+    }
+)
+
+if response.status_code == 200:
+    invoice = response.json()
+    invoice_id = invoice['id']
+    print(f"Invoice created: {invoice['invoice_number']}")
 ```
 
-### Get Invoice Details
-```bash
-curl http://localhost:8000/api/v1/billing/invoices/invoice-uuid-here
-```
-
-### Create a Payment
+### Create Payment
 ```bash
 curl -X POST "http://localhost:8000/api/v1/billing/payments/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "tenant_id=tenant-uuid&branch_id=branch-uuid&invoice_id=invoice-uuid&amount_paid=1500.00&method=credit_card"
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here",
+    "invoice_id": "invoice-uuid-here",
+    "amount_paid": 1500.00,
+    "method": "credit_card"
+  }'
 ```
 
-### List All Payments
+**Python Example:**
+```python
+response = requests.post(
+    "http://localhost:8000/api/v1/billing/payments/",
+    json={
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "invoice_id": invoice_id,
+        "amount_paid": 1500.00,
+        "method": "credit_card"
+    }
+)
+
+if response.status_code == 200:
+    payment = response.json()
+    print(f"Payment created: ${payment['amount_paid']}")
+```
+
+## 📚 API Usage Examples
+
+### JSON Payload Format
 ```bash
-curl http://localhost:8000/api/v1/billing/payments/
+# JSON Payload Format
+curl -X POST "http://localhost:8000/api/v1/tenants/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Acme Lab",
+    "legal_name": "Acme Lab Inc",
+    "tax_id": "123456789"
+  }'
 ```
 
-## 🔄 Complete Workflow Examples
-
-### Complete Laboratory Process Flow
-
-#### Step 1: Create Tenant and Branch
-```bash
-# Create tenant
-TENANT_RESPONSE=$(curl -s -X POST "http://localhost:8000/api/v1/tenants/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "name=Test%20Lab&legal_name=Test%20Laboratory%20Inc&tax_id=987654321")
-
-TENANT_ID=$(echo $TENANT_RESPONSE | jq -r '.id')
-
-# Create branch
-BRANCH_RESPONSE=$(curl -s -X POST "http://localhost:8000/api/v1/branches/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "tenant_id=$TENANT_ID&code=MAIN&name=Main%20Branch&city=Mexico%20City&state=CDMX&country=MX")
-
-BRANCH_ID=$(echo $BRANCH_RESPONSE | jq -r '.id')
+### Python Implementation
+```python
+# Python JSON Implementation
+response = requests.post(
+    "http://localhost:8000/api/v1/tenants/",
+    json={
+        "name": "Acme Lab",
+        "legal_name": "Acme Lab Inc",
+        "tax_id": "123456789"
+    }
+)
 ```
 
-#### Step 2: Create Patient
-```bash
-PATIENT_RESPONSE=$(curl -s -X POST "http://localhost:8000/api/v1/patients/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "tenant_id=$TENANT_ID&branch_id=$BRANCH_ID&patient_code=P001&first_name=Jane&last_name=Smith&dob=1985-05-15&sex=F&phone=555-9876&email=jane.smith@example.com")
+## 📊 Complete Flow Example
 
-PATIENT_ID=$(echo $PATIENT_RESPONSE | jq -r '.id')
-```
+Here's a complete example of creating a full laboratory workflow:
 
-#### Step 3: Create Laboratory Order
-```bash
-ORDER_RESPONSE=$(curl -s -X POST "http://localhost:8000/api/v1/laboratory/orders/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "tenant_id=$TENANT_ID&branch_id=$BRANCH_ID&patient_id=$PATIENT_ID&order_code=ORD001&requested_by=Dr.%20Johnson&notes=Complete%20blood%20count%20and%20chemistry%20panel")
-
-ORDER_ID=$(echo $ORDER_RESPONSE | jq -r '.id')
-```
-
-#### Step 4: Create Sample
-```bash
-SAMPLE_RESPONSE=$(curl -s -X POST "http://localhost:8000/api/v1/laboratory/samples/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "tenant_id=$TENANT_ID&branch_id=$BRANCH_ID&order_id=$ORDER_ID&sample_code=SAMP001&type=SANGRE&notes=Blood%20sample%20for%20CBC%20and%20chemistry")
-
-SAMPLE_ID=$(echo $SAMPLE_RESPONSE | jq -r '.id')
-```
-
-#### Step 5: Create Report
-```bash
-REPORT_RESPONSE=$(curl -s -X POST "http://localhost:8000/api/v1/reports/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "tenant_id=$TENANT_ID&branch_id=$BRANCH_ID&order_id=$ORDER_ID&title=Complete%20Blood%20Count%20Report&diagnosis_text=Normal%20CBC%20results%2C%20all%20parameters%20within%20reference%20range")
-
-REPORT_ID=$(echo $REPORT_RESPONSE | jq -r '.id')
-```
-
-#### Step 6: Create Invoice and Payment
-```bash
-# Create invoice
-INVOICE_RESPONSE=$(curl -s -X POST "http://localhost:8000/api/v1/billing/invoices/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "tenant_id=$TENANT_ID&branch_id=$BRANCH_ID&order_id=$ORDER_ID&invoice_number=INV001&amount_total=2500.00&currency=MXN")
-
-INVOICE_ID=$(echo $INVOICE_RESPONSE | jq -r '.id')
-
-# Create payment
-PAYMENT_RESPONSE=$(curl -s -X POST "http://localhost:8000/api/v1/billing/payments/" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "tenant_id=$TENANT_ID&branch_id=$BRANCH_ID&invoice_id=$INVOICE_ID&amount_paid=2500.00&method=credit_card")
-
-PAYMENT_ID=$(echo $PAYMENT_RESPONSE | jq -r '.id')
-```
-
-#### Step 7: Verify Complete Process
-```bash
-echo "Complete laboratory process created:"
-echo "Tenant ID: $TENANT_ID"
-echo "Branch ID: $BRANCH_ID"
-echo "Patient ID: $PATIENT_ID"
-echo "Order ID: $ORDER_ID"
-echo "Sample ID: $SAMPLE_ID"
-echo "Report ID: $REPORT_ID"
-echo "Invoice ID: $INVOICE_ID"
-echo "Payment ID: $PAYMENT_ID"
-```
-
-## 🐍 Python Examples
-
-### Basic API Client
 ```python
 import requests
 import json
 
-class CelumaAPI:
-    def __init__(self, base_url="http://localhost:8000"):
-        self.base_url = base_url
-        self.token = None
-    
-    def login(self, email, password, tenant_id):
-        """Authenticate user and get token"""
-        response = requests.post(f"{self.base_url}/api/v1/auth/login", 
-                               params={"email": email, "password": password, "tenant_id": tenant_id})
-        if response.status_code == 200:
-            self.token = response.json()["access_token"]
-            return True
-        return False
-    
-    def get_headers(self):
-        """Get headers with authentication token"""
-        if self.token:
-            return {"Authorization": f"Bearer {self.token}"}
-        return {}
-    
-    def create_tenant(self, name, legal_name=None, tax_id=None):
-        """Create a new tenant"""
-        data = {"name": name}
-        if legal_name:
-            data["legal_name"] = legal_name
-        if tax_id:
-            data["tax_id"] = tax_id
-        
-        response = requests.post(f"{self.base_url}/api/v1/tenants/", params=data)
-        return response.json() if response.status_code == 200 else None
-    
-    def create_branch(self, tenant_id, code, name, city=None, state=None):
-        """Create a new branch"""
-        data = {
-            "tenant_id": tenant_id,
-            "code": code,
-            "name": name
-        }
-        if city:
-            data["city"] = city
-        if state:
-            data["state"] = state
-        
-        response = requests.post(f"{self.base_url}/api/v1/branches/", params=data)
-        return response.json() if response.status_code == 200 else None
+# Base URL
+BASE_URL = "http://localhost:8000"
 
-# Usage example
-api = CelumaAPI()
+# 1. Create Tenant
+tenant_response = requests.post(
+    f"{BASE_URL}/api/v1/tenants/",
+    json={
+        "name": "Test Laboratory",
+        "legal_name": "Test Laboratory Inc",
+        "tax_id": "987654321"
+    }
+)
+tenant = tenant_response.json()
+tenant_id = tenant['id']
+print(f"✅ Tenant created: {tenant['name']}")
 
-# Create tenant and branch
-tenant = api.create_tenant("Test Lab", "Test Laboratory Inc", "123456789")
-if tenant:
-    branch = api.create_branch(tenant["id"], "MAIN", "Main Branch", "Mexico City", "CDMX")
-    print(f"Created tenant: {tenant['name']}")
-    print(f"Created branch: {branch['name']}")
-```
+# 2. Create Branch
+branch_response = requests.post(
+    f"{BASE_URL}/api/v1/branches/",
+    json={
+        "tenant_id": tenant_id,
+        "code": "MAIN",
+        "name": "Main Branch",
+        "city": "Mexico City",
+        "state": "CDMX",
+        "country": "MX"
+    }
+)
+branch = branch_response.json()
+branch_id = branch['id']
+print(f"✅ Branch created: {branch['name']}")
 
-### Complete Workflow in Python
-```python
-def create_complete_laboratory_workflow(api, lab_name, patient_name):
-    """Create a complete laboratory workflow"""
-    
-    # Step 1: Create tenant
-    tenant = api.create_tenant(lab_name, f"{lab_name} Inc", "123456789")
-    if not tenant:
-        print("Failed to create tenant")
-        return None
-    
-    # Step 2: Create branch
-    branch = api.create_branch(tenant["id"], "MAIN", "Main Branch", "Mexico City", "CDMX")
-    if not branch:
-        print("Failed to create branch")
-        return None
-    
-    # Step 3: Create patient
-    patient_data = {
-        "tenant_id": tenant["id"],
-        "branch_id": branch["id"],
+# 3. Create Patient
+patient_response = requests.post(
+    f"{BASE_URL}/api/v1/patients/",
+    json={
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
         "patient_code": "P001",
-        "first_name": patient_name.split()[0],
-        "last_name": patient_name.split()[1],
-        "dob": "1990-01-01",
-        "sex": "M",
-        "phone": "555-1234",
-        "email": f"{patient_name.lower().replace(' ', '.')}@example.com"
+        "first_name": "Jane",
+        "last_name": "Smith",
+        "dob": "1985-05-15",
+        "sex": "F",
+        "phone": "555-9876",
+        "email": "jane.smith@example.com"
     }
-    
-    patient = api.create_patient(**patient_data)
-    if not patient:
-        print("Failed to create patient")
-        return None
-    
-    print(f"✅ Complete workflow created for {lab_name}")
-    print(f"   Tenant: {tenant['name']}")
-    print(f"   Branch: {branch['name']}")
-    print(f"   Patient: {patient['first_name']} {patient['last_name']}")
-    
-    return {
-        "tenant": tenant,
-        "branch": branch,
-        "patient": patient
+)
+patient = patient_response.json()
+patient_id = patient['id']
+print(f"✅ Patient created: {patient['first_name']} {patient['last_name']}")
+
+# 4. Create Laboratory Order
+order_response = requests.post(
+    f"{BASE_URL}/api/v1/laboratory/orders/",
+    json={
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "patient_id": patient_id,
+        "order_code": "ORD001",
+        "requested_by": "Dr. Johnson",
+        "notes": "Complete blood count and chemistry panel"
     }
+)
+order = order_response.json()
+order_id = order['id']
+print(f"✅ Order created: {order['order_code']}")
 
-# Usage
-api = CelumaAPI()
-workflow = create_complete_laboratory_workflow(api, "Acme Lab", "John Doe")
+# 5. Create Sample
+sample_response = requests.post(
+    f"{BASE_URL}/api/v1/laboratory/samples/",
+    json={
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "order_id": order_id,
+        "sample_code": "SAMP001",
+        "type": "SANGRE",
+        "notes": "Blood sample for CBC and chemistry"
+    }
+)
+sample = sample_response.json()
+print(f"✅ Sample created: {sample['sample_code']}")
+
+# 6. Create Report
+report_response = requests.post(
+    f"{BASE_URL}/api/v1/reports/",
+    json={
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "order_id": order_id,
+        "title": "Blood Test Results",
+        "diagnosis_text": "Normal blood count and chemistry values"
+    }
+)
+report = report_response.json()
+print(f"✅ Report created: {report['title']}")
+
+# 7. Create Invoice
+invoice_response = requests.post(
+    f"{BASE_URL}/api/v1/billing/invoices/",
+    json={
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "order_id": order_id,
+        "invoice_number": "INV001",
+        "amount_total": 2500.00,
+        "currency": "MXN"
+    }
+)
+invoice = invoice_response.json()
+print(f"✅ Invoice created: {invoice['invoice_number']}")
+
+# 8. Create Payment
+payment_response = requests.post(
+    f"{BASE_URL}/api/v1/billing/payments/",
+    json={
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "invoice_id": invoice['id'],
+        "amount_paid": 2500.00,
+        "method": "credit_card"
+    }
+)
+payment = payment_response.json()
+print(f"✅ Payment created: ${payment['amount_paid']}")
+
+print("\n🎉 Complete laboratory workflow created successfully!")
 ```
 
-## 🔧 Error Handling Examples
+## 🔍 Error Handling
 
-### Handle Validation Errors
+### Validation Errors
+When sending invalid data, you'll receive detailed validation errors:
+
 ```python
-def create_tenant_with_error_handling(api, name, legal_name=None):
-    """Create tenant with proper error handling"""
-    try:
-        response = requests.post(f"{api.base_url}/api/v1/tenants/", 
-                               params={"name": name, "legal_name": legal_name})
-        
-        if response.status_code == 200:
-            return response.json()
-        elif response.status_code == 422:
-            errors = response.json()["detail"]
-            print("Validation errors:")
-            for error in errors:
-                print(f"  - {error['loc'][-1]}: {error['msg']}")
-        else:
-            print(f"Error: {response.status_code} - {response.text}")
-            
-    except requests.exceptions.RequestException as e:
-        print(f"Request failed: {e}")
-    
-    return None
-```
+# Invalid email format
+response = requests.post(
+    "http://localhost:8000/api/v1/patients/",
+    json={
+        "tenant_id": "invalid-uuid",
+        "branch_id": "invalid-uuid",
+        "patient_code": "P001",
+        "first_name": "John",
+        "last_name": "Doe",
+        "email": "invalid-email"  # Invalid email format
+    }
+)
 
-### Handle Authentication Errors
-```python
-def authenticated_request(api, endpoint, method="GET", **kwargs):
-    """Make authenticated request with error handling"""
-    if not api.token:
-        print("Not authenticated. Please login first.")
-        return None
-    
-    headers = api.get_headers()
-    try:
-        if method.upper() == "GET":
-            response = requests.get(f"{api.base_url}{endpoint}", headers=headers)
-        elif method.upper() == "POST":
-            response = requests.post(f"{api.base_url}{endpoint}", headers=headers, **kwargs)
-        
-        if response.status_code == 401:
-            print("Authentication failed. Token may have expired.")
-            api.token = None
-            return None
-        elif response.status_code == 200:
-            return response.json()
-        else:
-            print(f"Request failed: {response.status_code} - {response.text}")
-            
-    except requests.exceptions.RequestException as e:
-        print(f"Request failed: {e}")
-    
-    return None
-```
-
-## 📊 Data Validation Examples
-
-### Validate Required Fields
-```python
-def validate_tenant_data(name, legal_name=None, tax_id=None):
-    """Validate tenant data before API call"""
-    errors = []
-    
-    if not name or len(name.strip()) == 0:
-        errors.append("Tenant name is required")
-    elif len(name) > 255:
-        errors.append("Tenant name must be less than 255 characters")
-    
-    if legal_name and len(legal_name) > 500:
-        errors.append("Legal name must be less than 500 characters")
-    
-    if tax_id and len(tax_id) > 50:
-        errors.append("Tax ID must be less than 50 characters")
-    
-    return errors
-
-# Usage
-errors = validate_tenant_data("", "Very long legal name that exceeds the limit", "123")
-if errors:
+if response.status_code == 422:
+    errors = response.json()
     print("Validation errors:")
-    for error in errors:
-        print(f"  - {error}")
-else:
-    print("Data is valid")
+    for error in errors['detail']:
+        print(f"- {error['loc'][1]}: {error['msg']}")
 ```
 
-## 🚀 Performance Testing Examples
+### Common HTTP Status Codes
+- **200**: Success
+- **201**: Created
+- **400**: Bad Request (validation errors)
+- **401**: Unauthorized (missing or invalid token)
+- **403**: Forbidden (insufficient permissions)
+- **404**: Not Found
+- **422**: Unprocessable Entity (data validation failed)
+- **500**: Internal Server Error
 
-### Load Testing
-```python
-import time
-import concurrent.futures
+## 📚 Additional Resources
 
-def test_endpoint_performance(api, endpoint, iterations=100):
-    """Test endpoint performance"""
-    times = []
-    
-    for i in range(iterations):
-        start_time = time.time()
-        response = requests.get(f"{api.base_url}{endpoint}")
-        end_time = time.time()
-        
-        if response.status_code == 200:
-            times.append((end_time - start_time) * 1000)  # Convert to milliseconds
-        
-        # Small delay to avoid overwhelming the API
-        time.sleep(0.1)
-    
-    if times:
-        avg_time = sum(times) / len(times)
-        min_time = min(times)
-        max_time = max(times)
-        
-        print(f"Performance results for {endpoint}:")
-        print(f"  Average: {avg_time:.2f} ms")
-        print(f"  Min: {min_time:.2f} ms")
-        print(f"  Max: {max_time:.2f} ms")
-        print(f"  Successful requests: {len(times)}/{iterations}")
-    
-    return times
+- [API Endpoints](API_ENDPOINTS.md) - Complete endpoint reference
+- [Testing Guide](tests/TESTING_README.md) - Comprehensive testing documentation
+- [Database Schema](DATABASE_README.md) - Database design and migrations
+- [Swagger Documentation](http://localhost:8000/docs) - Interactive API documentation
 
-# Test multiple endpoints concurrently
-def test_all_endpoints_performance(api):
-    """Test performance of all main endpoints"""
-    endpoints = [
-        "/api/v1/health",
-        "/api/v1/tenants/",
-        "/api/v1/branches/",
-        "/api/v1/patients/"
-    ]
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(test_endpoint_performance, api, endpoint): endpoint 
-                  for endpoint in endpoints}
-        
-        for future in concurrent.futures.as_completed(futures):
-            endpoint = futures[future]
-            try:
-                result = future.result()
-                print(f"Completed performance test for {endpoint}")
-            except Exception as e:
-                print(f"Performance test failed for {endpoint}: {e}")
-```
+## 🚀 Getting Started
 
-## 📝 Best Practices
+1. **Start the API**: `docker-compose up -d`
+2. **Check Health**: `curl http://localhost:8000/api/v1/health`
+3. **View Documentation**: Open `http://localhost:8000/docs` in your browser
+4. **Run Examples**: Use the examples above to test the API
+5. **Run Tests**: Execute the comprehensive test suite
 
-### 1. Always Handle Errors
-```python
-# Good
-try:
-    response = api.create_tenant("Lab Name")
-    if response:
-        print("Tenant created successfully")
-    else:
-        print("Failed to create tenant")
-except Exception as e:
-    print(f"Error: {e}")
+---
 
-# Bad
-response = api.create_tenant("Lab Name")
-print("Tenant created successfully")  # May fail silently
-```
-
-### 2. Use Environment Variables
-```python
-import os
-
-API_BASE_URL = os.getenv("CELUMA_API_URL", "http://localhost:8000")
-API_USERNAME = os.getenv("CELUMA_USERNAME")
-API_PASSWORD = os.getenv("CELUMA_PASSWORD")
-```
-
-### 3. Implement Retry Logic
-```python
-import time
-from functools import wraps
-
-def retry_on_failure(max_retries=3, delay=1):
-    """Decorator to retry failed requests"""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            for attempt in range(max_retries):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    if attempt == max_retries - 1:
-                        raise e
-                    print(f"Attempt {attempt + 1} failed, retrying in {delay} seconds...")
-                    time.sleep(delay)
-            return None
-        return wrapper
-    return decorator
-
-@retry_on_failure(max_retries=3, delay=2)
-def create_tenant_with_retry(api, name):
-    """Create tenant with automatic retry on failure"""
-    return api.create_tenant(name)
-```
-
-### 4. Log All API Calls
-```python
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-def log_api_call(func):
-    """Decorator to log API calls"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        logger.info(f"Calling {func.__name__} with args: {args}, kwargs: {kwargs}")
-        try:
-            result = func(*args, **kwargs)
-            logger.info(f"API call {func.__name__} successful")
-            return result
-        except Exception as e:
-            logger.error(f"API call {func.__name__} failed: {e}")
-            raise
-    return wrapper
-```
-
-These examples provide a comprehensive guide to using the Celuma API effectively. Remember to always handle errors gracefully, implement proper authentication, and follow the established patterns for consistent API usage.
+**The Celuma API is designed with JSON-first architecture, providing comprehensive validation, type safety, and automatic documentation generation.**

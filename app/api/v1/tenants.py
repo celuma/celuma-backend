@@ -4,6 +4,7 @@ from app.core.db import get_session
 from app.models.tenant import Tenant
 from app.models.user import AppUser
 from app.api.v1.auth import current_user
+from app.schemas.tenant import TenantCreate, TenantResponse, TenantDetailResponse
 
 router = APIRouter(prefix="/tenants")
 
@@ -13,22 +14,22 @@ def list_tenants(session: Session = Depends(get_session)):
     tenants = session.exec(select(Tenant)).all()
     return [{"id": str(t.id), "name": t.name, "legal_name": t.legal_name} for t in tenants]
 
-@router.post("/")
-def create_tenant(name: str, legal_name: str = None, tax_id: str = None, session: Session = Depends(get_session)):
+@router.post("/", response_model=TenantResponse)
+def create_tenant(tenant_data: TenantCreate, session: Session = Depends(get_session)):
     """Create a new tenant"""
-    tenant = Tenant(name=name, legal_name=legal_name, tax_id=tax_id)
+    tenant = Tenant(name=tenant_data.name, legal_name=tenant_data.legal_name, tax_id=tenant_data.tax_id)
     session.add(tenant)
     session.commit()
     session.refresh(tenant)
-    return {"id": str(tenant.id), "name": tenant.name, "legal_name": tenant.legal_name}
+    return TenantResponse(id=str(tenant.id), name=tenant.name, legal_name=tenant.legal_name)
 
-@router.get("/{tenant_id}")
+@router.get("/{tenant_id}", response_model=TenantDetailResponse)
 def get_tenant(tenant_id: str, session: Session = Depends(get_session)):
     """Get tenant details"""
     tenant = session.get(Tenant, tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
-    return {"id": str(tenant.id), "name": tenant.name, "legal_name": tenant.legal_name}
+    return TenantDetailResponse(id=str(tenant.id), name=tenant.name, legal_name=tenant.legal_name, tax_id=tenant.tax_id)
 
 @router.get("/{tenant_id}/branches")
 def list_tenant_branches(tenant_id: str, session: Session = Depends(get_session)):

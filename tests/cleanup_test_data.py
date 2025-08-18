@@ -24,16 +24,21 @@ def get_all_entities():
             ("orders", "/api/v1/laboratory/orders/"),
             ("patients", "/api/v1/patients/"),
             ("branches", "/api/v1/branches/"),
-            ("tenants", "/api/v1/tenants/")
+            ("tenants", "/api/v1/tenants/"),
+            ("users", "/api/v1/auth/users")  # Note: This endpoint might not exist yet
         ]
         
         for name, endpoint in endpoints:
-            response = requests.get(f"{BASE_URL}{endpoint}")
-            if response.status_code == 200:
-                entities[name] = response.json()
-                print(f"📊 Found {len(entities[name])} {name}")
-            else:
-                print(f"❌ Failed to get {name}: {response.status_code}")
+            try:
+                response = requests.get(f"{BASE_URL}{endpoint}")
+                if response.status_code == 200:
+                    entities[name] = response.json()
+                    print(f"📊 Found {len(entities[name])} {name}")
+                else:
+                    print(f"⚠️  Endpoint {endpoint} not available (status: {response.status_code})")
+                    entities[name] = []
+            except Exception as e:
+                print(f"⚠️  Could not access {endpoint}: {e}")
                 entities[name] = []
         
         return entities
@@ -54,6 +59,7 @@ def cleanup_entities(entities: Dict[str, List]):
         "orders",
         "patients",
         "branches",
+        "users",
         "tenants"
     ]
     
@@ -76,6 +82,35 @@ def cleanup_entities(entities: Dict[str, List]):
     
     print(f"\n📊 Total entities that would be deleted: {total_deleted}")
     print("💡 Note: DELETE endpoints are not implemented yet, so no actual deletion occurred")
+
+def cleanup_blacklisted_tokens():
+    """Clean up blacklisted tokens from logout tests"""
+    print("\n🔒 Checking for blacklisted tokens...")
+    
+    try:
+        # This would require a direct database cleanup or a cleanup endpoint
+        # For now, we'll just inform about the cleanup process
+        print("💡 Blacklisted tokens cleanup would happen here")
+        print("   - These are created during logout tests")
+        print("   - They should be cleaned up to prevent database bloat")
+        print("   - Consider implementing a cleanup endpoint or scheduled task")
+        
+    except Exception as e:
+        print(f"⚠️  Could not check blacklisted tokens: {e}")
+
+def cleanup_test_users():
+    """Clean up test users created during testing"""
+    print("\n👥 Checking for test users...")
+    
+    try:
+        # This would require user management endpoints
+        print("💡 Test users cleanup would happen here")
+        print("   - Test users are created during authentication tests")
+        print("   - They should be cleaned up after tests complete")
+        print("   - Consider implementing user deletion endpoints")
+        
+    except Exception as e:
+        print(f"⚠️  Could not check test users: {e}")
 
 def main():
     """Main cleanup function"""
@@ -106,9 +141,14 @@ def main():
     # Cleanup
     cleanup_entities(entities)
     
+    # Additional cleanup tasks
+    cleanup_blacklisted_tokens()
+    cleanup_test_users()
+    
     print("\n" + "=" * 40)
     print("✅ Cleanup analysis completed!")
     print("💡 To implement actual deletion, add DELETE endpoints to the API")
+    print("💡 Consider implementing scheduled cleanup tasks for test data")
 
 if __name__ == "__main__":
     main()

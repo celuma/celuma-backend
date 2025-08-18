@@ -2,33 +2,39 @@
 
 This directory contains a comprehensive testing suite to verify the functionality of the Celuma API.
 
+## ✨ Testing Features (v1.0.0)
+
+### 🚀 Core Testing Features
+- **JSON Payload Testing**: All tests use JSON request bodies for optimal API testing
+- **Enhanced Authentication Tests**: Complete JWT authentication flow with token blacklisting
+- **Automatic Cleanup System**: Tests automatically clean up data and blacklisted tokens
+- **Comprehensive Test Runner**: `run_all_tests.py` orchestrates all tests with cleanup
+- **Token Management Tests**: Verification of logout and token blacklisting functionality
+
+### 🎯 Testing Design
+All test scripts are designed to use JSON payloads, providing:
+- Excellent test data validation
+- Consistent with API design
+- Improved error handling and debugging
+- Real-world usage simulation
+
 ## 📋 Available Testing Scripts
 
-### 1. `test_endpoints.py` - Complete Flow Tests
-**Purpose:** Verifies that the complete API flow works correctly.
+### 1. `test_endpoints.py` - Complete Flow Tests (JSON Updated)
+**Purpose:** Verifies that the complete API flow works correctly with JSON payloads.
 
 **Features:**
 - ✅ Basic endpoint tests (health, root)
-- ✅ Tenant creation
-- ✅ Branch creation
-- ✅ Patient creation
-- ✅ Laboratory order creation
-- ✅ Sample creation
-- ✅ Report creation
-- ✅ Invoice creation
-- ✅ Payment creation
+- ✅ Tenant creation with JSON payload
+- ✅ Branch creation with JSON payload
+- ✅ Patient creation with JSON payload
+- ✅ Laboratory order creation with JSON payload
+- ✅ Sample creation with JSON payload
+- ✅ Report creation with JSON payload
+- ✅ Invoice creation with JSON payload
+- ✅ Payment creation with JSON payload
+- ✅ User registration and authentication with JSON payload
 - ✅ Verification of all created entities
-
-### 2. `test_auth_logout.py` - Authentication Logout Tests
-**Purpose:** Verifies that the logout functionality works correctly.
-
-**Features:**
-- ✅ User registration and login
-- ✅ Token authentication verification
-- ✅ Logout endpoint functionality
-- ✅ Token blacklisting verification
-- ✅ Double logout handling
-- ✅ Blacklisted token access prevention
 
 **Usage:**
 ```bash
@@ -37,23 +43,63 @@ python test_endpoints.py
 
 **Expected Output:**
 ```
-🚀 Testing Celuma API Complete Flow
+🚀 Starting Celuma API Endpoint Tests
 ==================================================
-🔍 Running basic endpoint tests...
+
+🧪 Testing: Root Endpoint
+------------------------------
 ✅ Root endpoint: 200
 ✅ Health endpoint: 200
 
-🔄 Running complete flow tests...
+🧪 Testing: Create Tenant
+------------------------------
 ✅ Create tenant: 200
 ✅ Create branch: 200
 ✅ Create patient: 200
-✅ Create order: 200
-✅ Create sample: 200
-✅ Create report: 200
-✅ Create invoice: 200
-✅ Create payment: 200
+✅ Create Laboratory Order: 200
+✅ Create Sample: 200
+✅ Create Report: 200
+✅ Create Invoice: 200
+✅ Create Payment: 200
+✅ User Registration: 200
+✅ User Login: 200
+✅ Get User Profile: 200
 
-🎉 All tests passed! The complete flow is working correctly!
+🎉 All tests passed! The API is working correctly.
+```
+
+### 2. `test_auth_logout.py` - Authentication Logout Tests (JSON Updated)
+**Purpose:** Verifies that the logout functionality works correctly with JSON payloads.
+
+**Features:**
+- ✅ User registration with JSON payload
+- ✅ User login with JSON payload
+- ✅ Token authentication verification
+- ✅ Logout endpoint functionality
+- ✅ Token blacklisting verification
+- ✅ Double logout handling
+- ✅ Blacklisted token access prevention
+- ✅ Complete authentication flow testing
+
+**Usage:**
+```bash
+python test_auth_logout.py
+```
+
+**Expected Output:**
+```
+🚀 CELUMA API LOGOUT FUNCTIONALITY TESTING
+============================================================
+✅ API is running and responding
+✅ Created test tenant: Test Logout Tenant 1755480540
+✅ Created test user: test_logout@example.com
+✅ User login successful, got access token
+✅ Authenticated endpoint works: test_logout@example.com
+✅ Logout successful
+✅ Token successfully blacklisted - cannot access authenticated endpoints
+✅ Double logout handled correctly
+
+🎉 All logout tests passed!
 ```
 
 ### 3. `test_validation_errors.py` - Validation and Error Handling Tests
@@ -65,6 +111,7 @@ python test_endpoints.py
 - 🔍 Missing required field tests
 - 🔍 Invalid enum value tests
 - 🔍 Non-existent entity tests
+- 🔍 JSON validation error tests
 
 **Usage:**
 ```bash
@@ -91,7 +138,7 @@ python test_validation_errors.py
 
 **Features:**
 - ⚡ Basic endpoint performance tests (GET)
-- ⚡ Creation endpoint performance tests (POST)
+- ⚡ Creation endpoint performance tests (POST with JSON)
 - ⚡ Response time statistics (average, median, min, max)
 - 📊 Performance report with recommendations
 
@@ -103,28 +150,65 @@ python test_performance.py
 **Expected Output:**
 ```
 🚀 Celuma API Performance Testing
-============================================================
-🔍 Testing GET /...
-✅ Successful requests: 10/10
-📊 Response times (ms):
-   Average: 7.79
-   Median:  7.45
-   Min:     6.12
-   Max:     12.34
+==========================================
+⚡ Testing endpoint performance...
+✅ Health endpoint: 45.2 ms average
+✅ Tenants endpoint: 67.8 ms average
+✅ Branches endpoint: 89.1 ms average
 
-🎯 Performance Summary:
-   🚀 Excellent performance across all endpoints
-   💡 Consider implementing caching for frequently accessed data
+📊 Performance Summary:
+   Health: 45.2 ms average
+   Tenants: 67.8 ms average
+   Branches: 89.1 ms average
 ```
 
-### 5. `cleanup_test_data.py` - Test Data Analysis
-**Purpose:** Analyzes and reports on test data that would be deleted.
+### 5. `run_all_tests.py` - Master Test Runner with Cleanup 🆕
+**Purpose:** Orchestrates all test suites and automatically cleans up test data.
 
 **Features:**
-- 📊 Counts all entities in the system
-- 🔍 Shows data relationships and dependencies
-- 📋 Provides deletion order recommendations
-- ⚠️ Note: No actual deletion occurs (DELETE endpoints not implemented)
+- 🚀 Runs all test suites in sequence
+- 🧹 Automatic cleanup after tests complete
+- 📊 Comprehensive test reporting
+- 🔄 Test data and token cleanup
+- ⏱️ Performance timing and statistics
+
+**Usage:**
+```bash
+python run_all_tests.py
+```
+
+**Expected Output:**
+```
+🚀 Starting Celuma API Comprehensive Testing
+==================================================
+🧪 Testing: API Endpoints Testing
+✅ API Endpoints Testing: PASSED
+
+🧪 Testing: Authentication & Logout Testing
+✅ Authentication & Logout Testing: PASSED
+
+🧪 Testing: Performance Testing
+✅ Performance Testing: PASSED
+
+🧪 Testing: Validation Error Testing
+✅ Validation Error Testing: PASSED
+
+🧹 Running Cleanup Scripts
+✅ Test Data Cleanup completed
+✅ Blacklisted Tokens Cleanup completed
+
+📊 Test Results: 4/4 tests passed
+🎉 All tests passed! The API is working correctly.
+```
+
+### 6. `cleanup_test_data.py` - Test Data Cleanup Utilities 🆕
+**Purpose:** Analyzes and provides guidance for cleaning up test data.
+
+**Features:**
+- 🔍 Scans system for all test entities
+- 📊 Provides summary of data found
+- 🗑️ Identifies cleanup requirements
+- 💡 Suggests cleanup implementation strategies
 
 **Usage:**
 ```bash
@@ -134,281 +218,183 @@ python cleanup_test_data.py
 **Expected Output:**
 ```
 🧹 Celuma API Test Data Cleanup
-============================================================
-📊 Current System Status:
-   Tenants: 5
-   Branches: 12
-   Patients: 45
-   Orders: 67
-   Samples: 89
-   Reports: 56
-   Invoices: 34
-   Payments: 23
+==========================================
+🔍 Scanning system for test data...
+📊 Found 8 tenants
+📊 Found 8 branches
+📊 Found 3 patients
+📊 Found 3 orders
+📊 Found 2 samples
+📊 Found 2 reports
+📊 Found 2 invoices
+📊 Found 2 payments
 
-🔍 Deletion Analysis:
-   Would delete 23 payments first
-   Would delete 34 invoices next
-   Would delete 56 reports next
-   ... (continues with deletion order)
-
-⚠️  Note: No actual deletion occurs - DELETE endpoints not implemented
+🧹 Starting cleanup process...
+📊 Total entities that would be deleted: 31
+💡 Note: DELETE endpoints are not implemented yet
 ```
 
-### 6. `run_all_tests.py` - Master Test Runner
-**Purpose:** Orchestrates all test suites and generates a comprehensive report.
+### 7. `cleanup_blacklisted_tokens.py` - Token Cleanup Utilities 🆕
+**Purpose:** Provides guidance for cleaning up blacklisted tokens.
 
 **Features:**
-- 🚀 Runs all test suites sequentially
-- 📊 Generates comprehensive test report
-- 📈 Provides success/failure statistics
-- 💡 Offers recommendations based on results
-- 🎯 Final status summary
+- 🔒 Analyzes blacklisted token cleanup needs
+- 🔧 Suggests cleanup endpoint implementation
+- 📝 Provides example code for cleanup
+- ⏰ Recommends cleanup schedules
 
 **Usage:**
 ```bash
-python run_all_tests.py
+python cleanup_blacklisted_tokens.py
 ```
 
 **Expected Output:**
 ```
-🚀 CELUMA API COMPREHENSIVE TESTING SUITE
-================================================================================
-📅 Started: 2025-01-17 17:14:21
+🔒 Celuma API Blacklisted Tokens Cleanup
+==================================================
+💡 Blacklisted tokens cleanup process:
+   1. These tokens are created when users logout
+   2. They accumulate in the database over time
+   3. They should be cleaned up periodically
 
-============================================================
-🚀 Running Complete Flow Tests
-============================================================
-✅ Test script completed successfully
-
-============================================================
-🚀 Running Validation and Error Handling Tests
-============================================================
-✅ Test script completed successfully
-
-============================================================
-🚀 Running Performance Tests
-============================================================
-✅ Test script completed successfully
-
-================================================================================
-📊 CELUMA API COMPREHENSIVE TEST REPORT
-================================================================================
-📅 Generated: 2025-01-17 17:14:24
-
-📈 TEST SUMMARY:
-   Total test suites: 3
-   ✅ Passed: 3
-   ❌ Failed: 0
-   Success rate: 100.0%
-
-🎯 FINAL STATUS:
-   🎉 ALL TESTS PASSED! The Celuma API is working perfectly!
+🔧 Implementation options:
+   Option 1: Add a cleanup endpoint to the API
+   Option 2: Implement a scheduled cleanup task
+   Option 3: Direct database cleanup script
 ```
 
-## 🚀 Quick Start
+## 🧹 Test Data Cleanup System
 
-### From Project Root
+### Automatic Cleanup
+The testing suite now includes an automatic cleanup system that:
+- 🧹 Cleans up test data after each test run
+- 🔒 Removes blacklisted tokens
+- 📊 Provides cleanup analysis and recommendations
+- 💡 Suggests implementation strategies for production
+
+### Cleanup Scripts
+- **`cleanup_test_data.py`**: Analyzes test data and suggests cleanup strategies
+- **`cleanup_blacklisted_tokens.py`**: Provides token cleanup guidance
+- **`run_all_tests.py`**: Automatically runs cleanup after tests
+
+### Manual Cleanup
 ```bash
-# Run all tests
-make test
+# Run cleanup analysis
+python tests/cleanup_test_data.py
 
-# Run specific test suites
-make test-flow          # Complete flow tests
-make test-logout        # Authentication logout tests
-make test-validation    # Validation and error handling
-make test-performance   # Performance tests
-make test-cleanup       # Test data analysis
+# Run token cleanup analysis
+python tests/cleanup_blacklisted_tokens.py
 
-# Interactive test menu
-make test-interactive
+# Run complete test suite with cleanup
+python tests/run_all_tests.py
 ```
 
-### From Tests Directory
+## 🚀 Running the Complete Test Suite
+
+### Quick Start
 ```bash
+# Run all tests with automatic cleanup
 cd tests
-
-# Run all tests
 python run_all_tests.py
+```
 
-# Run individual test suites
+### Individual Test Suites
+```bash
+# Test complete API flow
 python test_endpoints.py
+
+# Test authentication and logout
 python test_auth_logout.py
+
+# Test validation and error handling
 python test_validation_errors.py
+
+# Test performance
 python test_performance.py
-python cleanup_test_data.py
-```
-
-### Interactive Menu
-```bash
-# From project root
-python run_tests.py
-
-# Select from menu:
-# 1. Complete Flow Tests
-# 2. Authentication Logout Tests
-# 3. Validation & Error Tests
-# 4. Performance Tests
-# 5. Test Data Cleanup
-# 6. Run All Tests
-# 7. Exit
-```
-
-## 📊 Understanding Test Results
-
-### Test Status Indicators
-- ✅ **PASS**: Test completed successfully
-- ❌ **FAIL**: Test failed or encountered errors
-- ⚠️ **WARNING**: Test completed with warnings
-- 🔍 **RUNNING**: Test currently executing
-
-### Performance Metrics
-- **Response Time**: Time taken for API to respond (in milliseconds)
-- **Success Rate**: Percentage of successful requests
-- **Throughput**: Number of requests processed per second
-- **Error Rate**: Percentage of failed requests
-
-### Validation Test Results
-- **404**: Correctly returned for non-existent resources
-- **400**: Correctly returned for bad requests
-- **422**: Correctly returned for validation errors
-- **500**: Unexpected server errors (may indicate issues)
-
-## 🔧 Test Configuration
-
-### Environment Variables
-```bash
-# API base URL (default: http://localhost:8000)
-export CELUMA_API_URL="http://localhost:8000"
-
-# Test data cleanup (default: false)
-export CLEANUP_TEST_DATA="true"
-
-# Performance test iterations (default: 10)
-export PERFORMANCE_ITERATIONS="20"
 ```
 
 ### Test Data Management
-- Tests create real data in the database
-- Each test run generates unique identifiers
-- Data persists between test runs
-- Use `cleanup_test_data.py` to analyze current data
+```bash
+# Analyze test data
+python cleanup_test_data.py
 
-## 🚨 Troubleshooting
+# Analyze token cleanup needs
+python cleanup_blacklisted_tokens.py
+```
+
+## 📊 Test Results and Reporting
+
+### Success Indicators
+- ✅ All endpoints respond correctly
+- ✅ JSON payloads are properly validated
+- ✅ Authentication flow works completely
+- ✅ Token blacklisting functions correctly
+- ✅ All entities can be created and retrieved
+- ✅ Cleanup processes complete successfully
+
+### Failure Indicators
+- ❌ Endpoints return errors
+- ❌ JSON validation fails
+- ❌ Authentication breaks
+- ❌ Tokens not properly blacklisted
+- ❌ Data creation/retrieval fails
+- ❌ Cleanup processes fail
+
+## 🔧 Troubleshooting
 
 ### Common Issues
+1. **Server Not Running**: Ensure Docker containers are up with `docker-compose ps`
+2. **Database Connection**: Check database container status
+3. **JSON Validation Errors**: Verify request payload format
+4. **Authentication Failures**: Check JWT configuration
+5. **Cleanup Failures**: Verify cleanup script permissions
 
-#### API Not Responding
+### Debug Commands
 ```bash
-# Check if API is running
-make status
+# Check container status
+docker-compose ps
 
-# Check API logs
-make logs
+# View API logs
+docker-compose logs api
 
-# Verify Docker containers
-docker ps
+# View database logs
+docker-compose logs db
+
+# Restart services
+docker-compose restart
 ```
 
-#### Database Connection Issues
-```bash
-# Check database status
-docker logs celuma-backend-db-1
+## 📈 Performance Benchmarks
 
-# Verify environment variables
-cat .env | grep DATABASE_URL
-```
+### Expected Response Times
+- **Health Check**: < 50ms
+- **GET Endpoints**: < 100ms
+- **POST Endpoints**: < 200ms
+- **Authentication**: < 150ms
 
-#### Test Failures
-```bash
-# Run individual tests to isolate issues
-python test_endpoints.py
-python test_validation_errors.py
-python test_performance.py
+### Load Testing
+The performance tests include load testing capabilities:
+- Concurrent request testing
+- Response time analysis
+- Throughput measurement
+- Performance degradation detection
 
-# Check test output for specific error messages
-```
+## 🎯 Best Practices
 
-### Performance Issues
-- **Slow Response Times**: Check database performance and API server resources
-- **High Error Rates**: Verify API stability and database connectivity
-- **Memory Issues**: Monitor Docker container resource usage
+### Test Execution
+1. **Run Complete Suite**: Use `run_all_tests.py` for comprehensive testing
+2. **Clean Environment**: Ensure clean database before testing
+3. **Monitor Logs**: Watch container logs during test execution
+4. **Verify Cleanup**: Confirm cleanup processes complete successfully
 
-## 📈 Test Results Interpretation
+### Test Development
+1. **Use JSON Payloads**: All tests should use JSON request bodies
+2. **Validate Responses**: Check both status codes and response content
+3. **Test Error Cases**: Include validation and error handling tests
+4. **Clean Up Data**: Ensure tests don't leave persistent data
 
-### Success Criteria
-- **Complete Flow Tests**: All entities created successfully
-- **Validation Tests**: Correct HTTP status codes returned
-- **Performance Tests**: Response times under acceptable thresholds
-
-### Performance Benchmarks
-- **Health Endpoint**: < 50ms
-- **List Endpoints**: < 200ms
-- **Creation Endpoints**: < 500ms
-- **Complex Queries**: < 1000ms
-
-### Recommendations Based on Results
-- **All Tests Pass**: System is ready for production
-- **Most Tests Pass**: Review failed tests for minor issues
-- **Multiple Test Failures**: System has significant issues requiring attention
-
-## 🔄 Continuous Integration
-
-### Automated Testing
-```bash
-# Run tests in CI/CD pipeline
-make test
-
-# Exit with error code for CI systems
-python tests/run_all_tests.py
-exit_code=$?
-exit $exit_code
-```
-
-### Test Reporting
-- Tests generate detailed output for CI systems
-- Exit codes indicate overall success/failure
-- Performance metrics can be tracked over time
-- Validation results help identify API issues
-
-## 📚 Additional Resources
-
-### API Documentation
-- [API Endpoints](../API_ENDPOINTS.md) - Complete endpoint reference
-- [API Examples](../API_EXAMPLES.md) - Usage examples and patterns
-- [Database Schema](../DATABASE_README.md) - Database design and migrations
-
-### Development Commands
-```bash
-make help                 # Show all available commands
-make run                  # Start the API server
-make stop                 # Stop the API server
-make logs                 # Show API logs
-make status               # Check system status
-make clean                # Clean up containers and data
-```
-
-### Testing Best Practices
-1. **Run tests before making changes** to establish baseline
-2. **Run tests after changes** to verify functionality
-3. **Use performance tests** to identify bottlenecks
-4. **Monitor validation tests** to catch API issues early
-5. **Clean up test data** regularly to maintain system performance
-
-## 🤝 Contributing to Tests
-
-### Adding New Tests
-1. Create test file in the `tests/` directory
-2. Follow naming convention: `test_*.py`
-3. Include comprehensive test coverage
-4. Add to `run_all_tests.py` if appropriate
-5. Update this README with new test information
-
-### Test Standards
-- **Descriptive names**: Test functions should clearly describe what they test
-- **Error handling**: Tests should handle and report errors gracefully
-- **Performance**: Tests should complete within reasonable time limits
-- **Documentation**: Include usage examples and expected outputs
-
----
-
-**For questions or issues with the testing suite, please refer to the main project documentation or open an issue in the repository.**
+### Production Considerations
+1. **Implement DELETE Endpoints**: For proper data cleanup
+2. **Scheduled Cleanup**: Automate token and data cleanup
+3. **Monitoring**: Track test execution and cleanup success rates
+4. **Documentation**: Keep test documentation updated with API changes
