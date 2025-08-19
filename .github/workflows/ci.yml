@@ -35,6 +35,15 @@ jobs:
         run: |
           docker build -t celuma-backend .
       
+      - name: Create .env file
+        run: |
+          cat > .env << EOF
+          DATABASE_URL=${{ vars.DATABASE_URL }}
+          JWT_SECRET=${{ vars.JWT_SECRET }}
+          JWT_EXPIRES_MIN=${{ vars.JWT_EXPIRES_MIN }}
+          EOF
+          cat .env
+      
       - name: Start services
         run: |
           docker compose up -d
