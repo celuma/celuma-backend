@@ -4,6 +4,10 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ vars.DATABASE_URL }}
+      JWT_SECRET: ${{ vars.JWT_SECRET }}
+      JWT_EXPIRES_MIN: ${{ vars.JWT_EXPIRES_MIN }}
     steps:
       - uses: actions/checkout@v4
       
