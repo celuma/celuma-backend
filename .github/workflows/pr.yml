@@ -1,0 +1,96 @@
+name: pr
+
+on:
+  pull_request:
+    branches:
+      - main
+
+# Prevents duplicate builds from multiple pushes on the same PR
+concurrency:
+  group: pr-${{ github.event.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ vars.DATABASE_URL }}
+      JWT_SECRET: ${{ vars.JWT_SECRET }}
+      JWT_EXPIRES_MIN: ${{ vars.JWT_EXPIRES_MIN }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      
+      - name: Install dependencies
+        run: make install
+        shell: bash
+      
+      - name: Run unit tests
+        run: make test-unit
+        shell: bash
+
+  docker-pr-build:
+    runs-on: ubuntu-latest
+    needs: test
+    # Only runs if tests passed
+    if: needs.test.result == 'success'
+    
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Login to GHCR
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Always build and push for testing
+      - name: Build & Push Docker image for PR testing
+        id: buildpush
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # PR tags for testing
+          tags: |
+            ghcr.io/${{ github.repository }}:pr-${{ github.event.number }}-${{ github.sha }}
+            ghcr.io/${{ github.repository }}:pr-${{ github.event.number }}-latest
+          labels: |
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.ref=${{ github.ref }}
+            org.opencontainers.image.title=PR-${{ github.event.number }}-Test-Image
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Output in job summary which tag to use for testing the image
+      - name: Output image reference
+        run: |
+          echo "### 🐳 PR Docker Image for Testing" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Use these tags to test the PR code:**" >> $GITHUB_STEP_SUMMARY
+          echo "- \`ghcr.io/${{ github.repository }}:pr-${{ github.event.number }}-${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`ghcr.io/${{ github.repository }}:pr-${{ github.event.number }}-latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Docker run command:**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "docker run -p 8000:8000 ghcr.io/${{ github.repository }}:pr-${{ github.event.number }}-latest" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
