@@ -21,12 +21,15 @@ jobs:
       
       - name: Setup environment
         run: make setup
+        shell: bash
       
       - name: Install dependencies
         run: make install
+        shell: bash
       
       - name: Run unit tests
         run: make test-unit
+        shell: bash
       
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
@@ -55,5 +58,6 @@ jobs:
           IMAGE=ghcr.io/${{ github.repository }}:$(git rev-parse --short HEAD)
           docker tag celuma-backend $IMAGE
           docker push $IMAGE
+        shell: bash
         env:
           DOCKER_BUILDKIT: 1
