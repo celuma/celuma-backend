@@ -1,12 +1,15 @@
-fastapi
-uvicorn[standard]
-sqlmodel
-sqlalchemy
-alembic
-pydantic-settings
-psycopg2-binary
-python-jose[cryptography]
-passlib[bcrypt]
-python-multipart
-pytest
-email-validator
+fastapi==0.116.*
+uvicorn[standard]==0.35.*
+sqlmodel==0.0.*
+sqlalchemy==2.0.*
+alembic==1.16.*
+pydantic-settings==2.10.*
+psycopg2-binary==2.9.*
+python-jose[cryptography]==3.5.*
+passlib[bcrypt]==1.7.*
+python-multipart==0.0.*
+email-validator==2.2.*
+
+# Testing
+pytest==8.4.1
+pytest-cov==6.2.1

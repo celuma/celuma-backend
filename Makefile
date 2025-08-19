@@ -1,26 +1,23 @@
-.PHONY: help setup install test build run clean
+.PHONY: help setup install test-unit build clean
 
 help: ## Show this help message
 	@echo "Celuma API - Available Commands:"
 	@echo ""
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-setup: ## Setup virtual environment and load environment variables
+setup: ## Setup virtual environment
 	python -m venv .venv
 	@echo "Virtual environment created. Activate it with: source .venv/bin/activate"
 
 install: ## Install dependencies
 	source .venv/bin/activate && pip install -r requirements.txt
 
-test: ## Run all tests
-	source .venv/bin/activate && cd tests && python run_all_tests.py
+test-unit: ## Run unit tests with coverage
+	source .venv/bin/activate && pytest --cov=app --cov-branch --cov-report=xml --cov-report=term-missing --cov-report=html
 
-build: ## Build Docker container
+build: ## Build Docker image
 	docker build -t celuma-backend .
 
-run: ## Run the API server
-	docker-compose up -d
-
-clean: ## Clean up containers and images
-	docker-compose down -v
+clean: ## Clean up Docker images and containers
 	docker system prune -f
+	docker image rm celuma-backend 2>/dev/null || true

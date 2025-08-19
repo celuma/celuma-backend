@@ -19,60 +19,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
       
-      - name: Setup virtual environment
-        run: |
-          python -m venv .venv
-          source .venv/bin/activate
-          python -m pip install --upgrade pip
+      - name: Setup environment
+        run: make setup
       
       - name: Install dependencies
-        run: |
-          source .venv/bin/activate
-          pip install -r requirements.txt
-          pip install pytest pytest-cov
+        run: make install
       
-      - name: Build Docker image
-        run: |
-          docker build -t celuma-backend .
-      
-      - name: Create .env file
-        run: |
-          cat > .env << EOF
-          DATABASE_URL=${{ vars.DATABASE_URL }}
-          JWT_SECRET=${{ vars.JWT_SECRET }}
-          JWT_EXPIRES_MIN=${{ vars.JWT_EXPIRES_MIN }}
-          EOF
-          cat .env
-      
-      - name: Start services
-        run: |
-          docker compose up -d
-          # Wait for services to be ready
-          sleep 30
-          # Check if API is responding
-          curl -f http://localhost:8000/api/v1/health || exit 1
-      
-      - name: Run tests against running service
-        run: |
-          source .venv/bin/activate
-          cd tests && python run_all_tests.py
-      
-      - name: Run tests with coverage
-        run: |
-          source .venv/bin/activate
-          pytest --cov=app --cov-report=xml
+      - name: Run unit tests
+        run: make test-unit
       
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
         with:
           file: ./coverage.xml
           fail_ci_if_error: false
-      
-      - name: Cleanup services
-        if: always()
-        run: |
-          docker compose down -v
-          docker system prune -f
 
   docker-build:
     runs-on: ubuntu-latest
@@ -91,8 +51,9 @@ jobs:
       
       - name: Build and push Docker image
         run: |
+          make build
           IMAGE=ghcr.io/${{ github.repository }}:$(git rev-parse --short HEAD)
-          docker build -t $IMAGE .
+          docker tag celuma-backend $IMAGE
           docker push $IMAGE
         env:
           DOCKER_BUILDKIT: 1
