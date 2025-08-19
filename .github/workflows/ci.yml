@@ -105,5 +105,5 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Image tags:**" >> $GITHUB_STEP_SUMMARY
           echo "- \`ghcr.io/${{ github.repository }}:${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`ghcr.io/${{ github.repository }}:${{ github.ref_name#v}}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`ghcr.io/${{ github.repository }}:${{ env.RELEASE_TAG }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`ghcr.io/${{ github.repository }}:latest\`" >> $GITHUB_STEP_SUMMARY
