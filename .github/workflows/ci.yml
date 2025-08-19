@@ -19,10 +19,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
       
-      - name: Setup environment
-        run: make setup
-        shell: bash
-      
       - name: Install dependencies
         run: make install
         shell: bash
