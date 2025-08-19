@@ -6,14 +6,14 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 setup: ## Setup virtual environment
-	python -m venv .venv
+	python3 -m venv .venv
 	@echo "Virtual environment created. Activate it with: source .venv/bin/activate"
 
 install: ## Install dependencies
-	source .venv/bin/activate && pip install -r requirements.txt
+	python3 -m pip install -r requirements.txt
 
 test-unit: ## Run unit tests with coverage
-	source .venv/bin/activate && pytest --cov=app --cov-branch --cov-report=xml --cov-report=term-missing --cov-report=html
+	python3 -m pytest --cov=app --cov-branch --cov-report=xml --cov-report=term-missing --cov-report=html
 
 build: ## Build Docker image
 	docker build -t celuma-backend .
