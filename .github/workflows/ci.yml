@@ -86,7 +86,14 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.ref=${{ github.ref }}
             org.opencontainers.image.title=Release-${{ github.ref_name }}
-            org.opencontainers.image.version=${{ github.ref_name#v}}
+            ghcr.io/${{ github.repository }}:${{ steps.release_version.outputs.version }} # 1.0.0
+            ghcr.io/${{ github.repository }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.ref=${{ github.ref }}
+            org.opencontainers.image.title=Release-${{ github.ref_name }}
+            org.opencontainers.image.version=${{ steps.release_version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
