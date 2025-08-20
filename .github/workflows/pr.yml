@@ -5,6 +5,11 @@ on:
     branches:
       - main
 
+# Prevents duplicate builds from multiple pushes on the same PR
+concurrency:
+  group: pr-${{ github.event.number }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
