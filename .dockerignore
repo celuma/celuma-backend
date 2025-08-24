@@ -1,0 +1,39 @@
+# VCS
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+
+# Coverage / test outputs
+htmlcov/
+.coverage*
+.pytest_cache/
+/tests/
+
+# IDE / project files
+.idea/
+.vscode/
+*.code-workspace
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Misc
+.env
+.env.*
+*.log
+.DS_Store
+
+# Docker
+.dockerignore
+
+
