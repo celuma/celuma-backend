@@ -29,10 +29,10 @@ docker-compose up --build
 # Database will be available at: localhost:5432
 ```
 
-### 2. Production (Local Database)
+### 2. GHCR (Local Database)
 ```bash
 # Use production configuration
-docker-compose -f docker-compose.prod.yml up --build
+docker-compose -f docker-compose.ghcr.yml up --build
 ```
 
 ### 3. Remote Database
@@ -80,10 +80,10 @@ docker-compose down -v
 
 ## 🏭 Production Deployment
 
-### Production with Local Database
+### GHCR with Local Database
 ```bash
 # Use production compose file
-docker-compose -f docker-compose.prod.yml up --build -d
+docker-compose -f docker-compose.ghcr.yml up --build -d
 
 # This includes:
 # - Database initialization service

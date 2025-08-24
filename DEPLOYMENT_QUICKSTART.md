@@ -12,11 +12,11 @@ docker-compose up --build
 # Database: localhost:5432
 ```
 
-## 🏭 Production (Local Database)
+## 🏭 GHCR (Local Database)
 
 ```bash
-# Production with local database
-docker-compose -f docker-compose.prod.yml up --build -d
+# GHCR with local database
+docker-compose -f docker-compose.ghcr.yml up --build -d
 ```
 
 ## 🌐 Remote Database

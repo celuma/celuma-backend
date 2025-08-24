@@ -133,7 +133,7 @@ python test_auth_logout.py       # Authentication tests
 ### Automatic Migrations
 The system automatically handles database migrations on startup:
 - **Development**: `docker-compose up --build` runs migrations automatically
-- **Production**: `docker-compose.prod.yml` includes initialization service
+- **GHCR**: `docker-compose.ghcr.yml` includes initialization service
 - **Remote DB**: All deployment options include automatic migration execution
 
 ### Manual Migration Management
@@ -223,10 +223,10 @@ docker-compose up --build
 # 3. Starts the API server
 ```
 
-### Production Environment (Local Database)
+### GHCR Environment (Local Database)
 ```bash
-# Use production compose file with local database
-docker-compose -f docker-compose.prod.yml up --build
+# Use GHCR compose file with local database
+docker-compose -f docker-compose.ghcr.yml up --build
 
 # This includes:
 # - Database initialization service
