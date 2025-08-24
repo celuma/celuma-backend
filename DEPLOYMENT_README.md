@@ -42,7 +42,7 @@ export DATABASE_URL="postgresql://user:pass@host:5432/dbname"
 export JWT_SECRET="your-secret-key"
 
 # Deploy with remote database
-docker-compose -f docker-compose.remote.yml up --build
+docker-compose -f docker-compose.remote-db.yml up --build
 ```
 
 ## 🧪 Development Environment
@@ -108,7 +108,7 @@ export JWT_SECRET="your-super-secret-key"
 export ENV="production"
 
 # 2. Deploy using remote compose file
-docker-compose -f docker-compose.remote.yml up --build -d
+docker-compose -f docker-compose.remote-db.yml up --build -d
 
 # 3. Verify deployment
 docker ps

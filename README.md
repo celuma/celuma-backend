@@ -239,7 +239,7 @@ docker-compose -f docker-compose.ghcr.yml up --build
 # Option 1: Using docker-compose with remote database
 export DATABASE_URL="postgresql://user:pass@host:5432/dbname"
 export JWT_SECRET="your-secret-key"
-docker-compose -f docker-compose.remote.yml up --build
+docker-compose -f docker-compose.remote-db.yml up --build
 
 # Option 2: Deploy single container with remote database
 export DATABASE_URL="postgresql://user:pass@host:5432/dbname"
