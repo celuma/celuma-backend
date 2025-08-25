@@ -12,11 +12,11 @@ docker-compose up --build
 # Database: localhost:5432
 ```
 
-## 🏭 Production (Local Database)
+## 🏭 GHCR (Local Database)
 
 ```bash
-# Production with local database
-docker-compose -f docker-compose.prod.yml up --build -d
+# GHCR with local database
+docker-compose -f docker-compose.ghcr.yml up --build -d
 ```
 
 ## 🌐 Remote Database
@@ -25,7 +25,7 @@ docker-compose -f docker-compose.prod.yml up --build -d
 ```bash
 export DATABASE_URL="postgresql://user:pass@host:5432/dbname"
 export JWT_SECRET="your-secret-key"
-docker-compose -f docker-compose.remote.yml up --build -d
+docker-compose -f docker-compose.remote-db.yml up --build -d
 ```
 
 ### Option 2: Single Container

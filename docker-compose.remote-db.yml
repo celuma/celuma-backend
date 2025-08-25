@@ -1,4 +1,9 @@
 version: '3.8'
+# Purpose: Run API using GHCR image with a remote PostgreSQL database
+# Usage:
+#   export DATABASE_URL="postgresql://user:pass@host:5432/dbname"
+#   export JWT_SECRET="your-secret-key"
+#   docker compose -f docker-compose.remote-db.yml up -d
 
 services:
   db-init:

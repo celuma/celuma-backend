@@ -29,10 +29,10 @@ docker-compose up --build
 # Database will be available at: localhost:5432
 ```
 
-### 2. Production (Local Database)
+### 2. GHCR (Local Database)
 ```bash
 # Use production configuration
-docker-compose -f docker-compose.prod.yml up --build
+docker-compose -f docker-compose.ghcr.yml up --build
 ```
 
 ### 3. Remote Database
@@ -42,7 +42,7 @@ export DATABASE_URL="postgresql://user:pass@host:5432/dbname"
 export JWT_SECRET="your-secret-key"
 
 # Deploy with remote database
-docker-compose -f docker-compose.remote.yml up --build
+docker-compose -f docker-compose.remote-db.yml up --build
 ```
 
 ## 🧪 Development Environment
@@ -80,10 +80,10 @@ docker-compose down -v
 
 ## 🏭 Production Deployment
 
-### Production with Local Database
+### GHCR with Local Database
 ```bash
 # Use production compose file
-docker-compose -f docker-compose.prod.yml up --build -d
+docker-compose -f docker-compose.ghcr.yml up --build -d
 
 # This includes:
 # - Database initialization service
@@ -108,7 +108,7 @@ export JWT_SECRET="your-super-secret-key"
 export ENV="production"
 
 # 2. Deploy using remote compose file
-docker-compose -f docker-compose.remote.yml up --build -d
+docker-compose -f docker-compose.remote-db.yml up --build -d
 
 # 3. Verify deployment
 docker ps
