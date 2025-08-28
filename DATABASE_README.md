@@ -29,6 +29,10 @@ This document describes the complete database schema for the Celuma laboratory m
 #### AppUser
 - Application users with role-based access
 - Scoped to a tenant
+- **Authentication**: Supports both username and email authentication
+- **Username Field**: Optional unique identifier per tenant (max 50 characters)
+- **Email Field**: Required unique identifier per tenant
+- **Flexible Login**: Users can authenticate using username OR email
 - Can be associated with multiple branches through UserBranch
 
 ### 2. Patient Management
@@ -192,6 +196,39 @@ Invoice (1) ←→ (N) Payment
 ## Migration Notes
 
 The database schema has been migrated from the previous simple user table to this comprehensive multi-tenant system. All existing data should be migrated to the new structure before deployment.
+
+## Username Feature (v1.0.0)
+
+### Overview
+The username feature provides flexible authentication options for users, allowing them to authenticate using either username or email while maintaining backward compatibility.
+
+### Database Changes
+- **New Column**: `username VARCHAR(50)` added to `app_user` table
+- **Index**: `ix_app_user_username` created for efficient lookups
+- **Nullable**: Username field is optional and can be NULL
+- **Unique per Tenant**: Username uniqueness enforced within tenant scope
+
+### Authentication Flow
+1. **Username Priority**: System first attempts authentication using username
+2. **Email Fallback**: If username not found, falls back to email authentication
+3. **Same Password**: Both authentication methods use the same password
+4. **Tenant Scoping**: All authentication remains tenant-scoped
+
+### Migration Safety
+- **Backward Compatible**: Existing email-only users continue to work unchanged
+- **No Data Loss**: All existing user data preserved
+- **Gradual Adoption**: Users can add usernames later without breaking functionality
+
+### Usage Examples
+```sql
+-- User with username
+INSERT INTO app_user (tenant_id, username, email, full_name, role, hashed_password)
+VALUES ('tenant-uuid', 'johndoe', 'john@example.com', 'John Doe', 'admin', 'hashed_pass');
+
+-- User without username (existing behavior)
+INSERT INTO app_user (tenant_id, email, full_name, role, hashed_password)
+VALUES ('tenant-uuid', 'jane@example.com', 'Jane Smith', 'user', 'hashed_pass');
+```
 
 ## Future Enhancements
 

@@ -14,13 +14,11 @@ services:
   db-init:
     image: ghcr.io/celuma/celuma-backend:latest
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/celumadb
-      - JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
-      - JWT_EXPIRES_MIN=480
       - APP_NAME=celuma
-      - ENV=production
-      - DB_HOST=db
-      - DB_PORT=5432
+      - ENV=dev
+      - DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/celumadb
+      - JWT_SECRET=secret
+      - JWT_EXPIRES_MIN=480
     command: bash init_db.sh
     restart: "no"
 

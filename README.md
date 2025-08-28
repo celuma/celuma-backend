@@ -202,13 +202,23 @@ make clean                # Clean up containers and data
 
 ### API Endpoints
 - **Health**: `GET /api/v1/health`
-- **Authentication**: `POST /api/v1/auth/login`, `POST /api/v1/auth/register`
+- **Authentication**: 
+  - `POST /api/v1/auth/login` - Flexible login with username or email
+  - `POST /api/v1/auth/register` - User registration with optional username
+  - `GET /api/v1/auth/me` - Get current user profile
+  - `POST /api/v1/auth/logout` - Logout and token blacklisting
 - **Tenants**: `GET/POST /api/v1/tenants/`
 - **Branches**: `GET/POST /api/v1/branches/`
 - **Patients**: `GET/POST /api/v1/patients/`
 - **Laboratory**: `GET/POST /api/v1/laboratory/orders/`, `GET/POST /api/v1/laboratory/samples/`
 - **Reports**: `GET/POST /api/v1/reports/`
 - **Billing**: `GET/POST /api/v1/billing/invoices/`, `GET/POST /api/v1/billing/payments/`
+
+### 🔐 Authentication Features
+- **Flexible Login**: Users can authenticate using either username or email
+- **Optional Username**: Username field is completely optional during registration
+- **Multi-tenant Support**: All authentication is tenant-scoped
+- **JWT Tokens**: Secure stateless authentication with configurable expiration
 
 ## 🚀 Deployment
 

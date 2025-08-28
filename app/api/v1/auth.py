@@ -15,13 +15,33 @@ scheme = HTTPBearer()
 @router.post("/register", response_model=UserResponse)
 def register(user_data: UserRegister, session: Session = Depends(get_session)):
     """Register a new user"""
+    # Check if email already exists for this tenant
     if session.exec(select(AppUser).where(AppUser.email == user_data.email, AppUser.tenant_id == user_data.tenant_id)).first():
         raise HTTPException(400, "Email already registered for this tenant")
-    u = AppUser(email=user_data.email, full_name=user_data.full_name, role=user_data.role, tenant_id=user_data.tenant_id, hashed_password=hash_password(user_data.password))
+    
+    # Check if username already exists for this tenant (if provided)
+    if user_data.username:
+        if session.exec(select(AppUser).where(AppUser.username == user_data.username, AppUser.tenant_id == user_data.tenant_id)).first():
+            raise HTTPException(400, "Username already registered for this tenant")
+    
+    u = AppUser(
+        email=user_data.email, 
+        username=user_data.username,
+        full_name=user_data.full_name, 
+        role=user_data.role, 
+        tenant_id=user_data.tenant_id, 
+        hashed_password=hash_password(user_data.password)
+    )
     session.add(u)
     session.commit()
     session.refresh(u)
-    return UserResponse(id=str(u.id), email=u.email, full_name=u.full_name, role=u.role)
+    return UserResponse(
+        id=str(u.id), 
+        email=u.email, 
+        username=u.username,
+        full_name=u.full_name, 
+        role=u.role
+    )
 
 def current_user(token=Depends(scheme), session: Session = Depends(get_session)):
     try:
@@ -42,11 +62,35 @@ def current_user(token=Depends(scheme), session: Session = Depends(get_session))
 
 @router.post("/login", response_model=LoginResponse)
 def login(credentials: UserLogin, session: Session = Depends(get_session)):
-    """Login user with email and password"""
-    u = session.exec(select(AppUser).where(AppUser.email == credentials.email, AppUser.tenant_id == credentials.tenant_id)).first()
-    if not u or not verify_password(credentials.password, u.hashed_password):
+    """Login user with username/email and password"""
+    # Try to find user by username or email
+    user = None
+    
+    # First try to find by username
+    if credentials.username_or_email:
+        user = session.exec(
+            select(AppUser).where(
+                AppUser.username == credentials.username_or_email, 
+                AppUser.tenant_id == credentials.tenant_id
+            )
+        ).first()
+    
+    # If not found by username, try by email
+    if not user:
+        user = session.exec(
+            select(AppUser).where(
+                AppUser.email == credentials.username_or_email, 
+                AppUser.tenant_id == credentials.tenant_id
+            )
+        ).first()
+    
+    if not user or not verify_password(credentials.password, user.hashed_password):
         raise HTTPException(401, "Invalid credentials")
-    return LoginResponse(access_token=create_jwt(sub=str(u.id)), token_type="bearer")
+    
+    if not user.is_active:
+        raise HTTPException(401, "User account is inactive")
+    
+    return LoginResponse(access_token=create_jwt(sub=str(user.id)), token_type="bearer")
 
 @router.post("/logout", response_model=LogoutResponse)
 def logout(token: str = Depends(scheme), session: Session = Depends(get_session)):
@@ -91,6 +135,7 @@ def me(user: AppUser = Depends(current_user)):
     return UserProfile(
         id=str(user.id), 
         email=user.email, 
+        username=user.username,
         full_name=user.full_name, 
         role=user.role, 
         tenant_id=str(user.tenant_id)
