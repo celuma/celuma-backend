@@ -11,6 +11,7 @@ class AppUser(BaseModel, TimestampMixin, TenantMixin, table=True):
     
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     tenant_id: UUID = Field(foreign_key="tenant.id")
+    username: Optional[str] = Field(max_length=50, index=True, nullable=True)
     email: str = Field(max_length=255, index=True)
     full_name: str = Field(max_length=255)
     role: UserRole

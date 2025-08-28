@@ -29,6 +29,7 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 ```json
 {
   "email": "user@example.com",
+  "username": "johndoe",
   "password": "securepassword123",
   "full_name": "John Doe",
   "role": "admin",
@@ -36,11 +37,17 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 }
 ```
 
+**Notes:**
+- `username` field is **optional** - users can register with or without a username
+- If `username` is provided, it must be unique within the tenant
+- `email` is always required and must be unique within the tenant
+
 **Response:**
 ```json
 {
   "id": "user-uuid",
   "email": "user@example.com",
+  "username": "johndoe",
   "full_name": "John Doe",
   "role": "admin"
 }
@@ -52,11 +59,19 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 **Request Body:**
 ```json
 {
-  "email": "user@example.com",
+  "username_or_email": "johndoe",
   "password": "securepassword123",
   "tenant_id": "tenant-uuid-here"
 }
 ```
+
+**Notes:**
+- `username_or_email` field accepts either:
+  - **Username** (if user has one)
+  - **Email address**
+- The system automatically detects which authentication method to use
+- **Priority**: First tries username, then falls back to email
+- Both methods require the same password
 
 **Response:**
 ```json
@@ -89,11 +104,16 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 {
   "id": "user-uuid",
   "email": "user@example.com",
+  "username": "johndoe",
   "full_name": "John Doe",
   "role": "admin",
   "tenant_id": "tenant-uuid-here"
 }
 ```
+
+**Notes:**
+- `username` field will be `null` if the user doesn't have a username set
+- All other user information is always included
 
 ## 🏢 Tenant Management
 

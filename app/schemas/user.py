@@ -23,6 +23,7 @@ class UserProfile(BaseModel):
     """Schema for user profile information"""
     id: str
     email: str
+    username: Optional[str] = None
     full_name: str
     role: str
     tenant_id: str

@@ -115,15 +115,31 @@ class TestUserSchemas:
         assert user.password == user_data["password"]
         assert user.full_name == user_data["full_name"]
     
+    def test_user_register_with_username(self):
+        """Test creating user with username field"""
+        user_data = {
+            "email": "test@example.com",
+            "username": "testuser",
+            "password": "securepassword123",
+            "full_name": "Test User",
+            "role": "admin",
+            "tenant_id": "test-tenant-id"
+        }
+        user = UserRegister(**user_data)
+        assert user.email == user_data["email"]
+        assert user.username == user_data["username"]
+        assert user.password == user_data["password"]
+        assert user.full_name == user_data["full_name"]
+    
     def test_user_login_valid(self):
         """Test user login with valid data"""
         login_data = {
-            "email": "test@example.com",
+            "username_or_email": "test@example.com",
             "password": "password123",
             "tenant_id": "test-tenant-id"
         }
         login = UserLogin(**login_data)
-        assert login.email == login_data["email"]
+        assert login.username_or_email == login_data["username_or_email"]
         assert login.password == login_data["password"]
     
     def test_user_read_serialization(self):

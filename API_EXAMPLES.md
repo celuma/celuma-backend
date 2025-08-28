@@ -21,12 +21,18 @@ curl -X POST "http://localhost:8000/api/v1/auth/register" \
   -H "Content-Type: application/json" \
   -d '{
     "email": "user@example.com",
+    "username": "johndoe",
     "password": "securepassword123",
     "full_name": "John Doe",
     "role": "admin",
     "tenant_id": "tenant-uuid-here"
   }'
 ```
+
+**Notes:**
+- `username` field is **optional** - you can omit it if you don't want a username
+- If provided, username must be unique within the tenant
+- Email is always required and must be unique within the tenant
 
 **Python Example:**
 ```python
@@ -36,6 +42,7 @@ response = requests.post(
     "http://localhost:8000/api/v1/auth/register",
     json={
         "email": "user@example.com",
+        "username": "johndoe",  # Optional field
         "password": "securepassword123",
         "full_name": "John Doe",
         "role": "admin",
@@ -46,25 +53,44 @@ response = requests.post(
 if response.status_code == 200:
     user_data = response.json()
     print(f"User created: {user_data['email']}")
+    if user_data.get('username'):
+        print(f"Username: {user_data['username']}")
 ```
 
-### User Login
+### User Login (Flexible Authentication)
 ```bash
+# Login with username
 curl -X POST "http://localhost:8000/api/v1/auth/login" \
   -H "Content-Type: application/json" \
   -d '{
-    "email": "user@example.com",
+    "username_or_email": "johndoe",
+    "password": "securepassword123",
+    "tenant_id": "tenant-uuid-here"
+  }'
+
+# OR login with email
+curl -X POST "http://localhost:8000/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username_or_email": "user@example.com",
     "password": "securepassword123",
     "tenant_id": "tenant-uuid-here"
   }'
 ```
 
+**Notes:**
+- Use `username_or_email` field for both username and email authentication
+- System automatically detects which method to use
+- **Priority**: First tries username, then falls back to email
+- Same password works for both methods
+
 **Python Example:**
 ```python
+# Login with username
 response = requests.post(
     "http://localhost:8000/api/v1/auth/login",
     json={
-        "email": "user@example.com",
+        "username_or_email": "johndoe",  # Can be username or email
         "password": "securepassword123",
         "tenant_id": "tenant-uuid-here"
     }
@@ -74,6 +100,16 @@ if response.status_code == 200:
     auth_data = response.json()
     access_token = auth_data['access_token']
     print(f"Login successful, token: {access_token}")
+
+# Login with email (same endpoint, different value)
+response = requests.post(
+    "http://localhost:8000/api/v1/auth/login",
+    json={
+        "username_or_email": "user@example.com",  # Email instead of username
+        "password": "securepassword123",
+        "tenant_id": "tenant-uuid-here"
+    }
+)
 ```
 
 ### Using Authentication Token
@@ -93,6 +129,11 @@ response = requests.get(
 if response.status_code == 200:
     profile = response.json()
     print(f"User profile: {profile['full_name']}")
+    print(f"Email: {profile['email']}")
+    if profile.get('username'):
+        print(f"Username: {profile['username']}")
+    else:
+        print("No username set")
 ```
 
 ### User Logout
