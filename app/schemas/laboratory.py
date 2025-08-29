@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Dict
 from datetime import datetime
 
 class LabOrderCreate(BaseModel):
@@ -53,3 +53,28 @@ class SampleResponse(BaseModel):
     order_id: str
     tenant_id: str
     branch_id: str
+
+
+class SampleImageInfo(BaseModel):
+    """Schema for a sample image with URLs to renditions."""
+    id: str
+    label: Optional[str] = None
+    is_primary: bool
+    created_at: str
+    urls: Dict[str, str]
+
+
+class SampleImagesListResponse(BaseModel):
+    """Schema for list of sample images."""
+    sample_id: str
+    images: List[SampleImageInfo]
+
+
+class SampleImageUploadResponse(BaseModel):
+    """Schema for upload image response, similar to experiments mapping."""
+    message: str
+    sample_image_id: str
+    filename: str
+    is_raw: bool
+    file_size: int
+    urls: Dict[str, str]
