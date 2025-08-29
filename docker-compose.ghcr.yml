@@ -13,6 +13,7 @@ services:
 
   db-init:
     image: ghcr.io/celuma/celuma-backend:latest
+    pull_policy: always
     environment:
       - APP_NAME=celuma
       - ENV=dev
@@ -24,6 +25,7 @@ services:
 
   api:
     image: ghcr.io/celuma/celuma-backend:latest
+    pull_policy: always
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/celumadb
       - JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
