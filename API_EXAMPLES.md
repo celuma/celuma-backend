@@ -57,9 +57,32 @@ if response.status_code == 200:
         print(f"Username: {user_data['username']}")
 ```
 
-### User Login (Flexible Authentication)
+### User Login (username or email)
 ```bash
-# Login with username
+# Login with username (single-tenant or selection flow)
+curl -X POST "http://localhost:8000/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username_or_email": "johndoe",
+    "password": "securepassword123"
+  }'
+
+# Login with email (same endpoint)
+curl -X POST "http://localhost:8000/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username_or_email": "user@example.com",
+    "password": "securepassword123"
+  }'
+```
+
+**Behavior:**
+- `username_or_email` can be a username or an email.
+- If multiple tenants match, the API returns `need_tenant_selection` with `options`.
+- Finalize by including `tenant_id` in the same endpoint.
+
+```bash
+# Finalize login selecting a tenant
 curl -X POST "http://localhost:8000/api/v1/auth/login" \
   -H "Content-Type: application/json" \
   -d '{
@@ -67,49 +90,38 @@ curl -X POST "http://localhost:8000/api/v1/auth/login" \
     "password": "securepassword123",
     "tenant_id": "tenant-uuid-here"
   }'
-
-# OR login with email
-curl -X POST "http://localhost:8000/api/v1/auth/login" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username_or_email": "user@example.com",
-    "password": "securepassword123",
-    "tenant_id": "tenant-uuid-here"
-  }'
 ```
-
-**Notes:**
-- Use `username_or_email` field for both username and email authentication
-- System automatically detects which method to use
-- **Priority**: First tries username, then falls back to email
-- Same password works for both methods
 
 **Python Example:**
 ```python
-# Login with username
-response = requests.post(
+import requests
+
+login_resp = requests.post(
     "http://localhost:8000/api/v1/auth/login",
     json={
-        "username_or_email": "johndoe",  # Can be username or email
-        "password": "securepassword123",
-        "tenant_id": "tenant-uuid-here"
+        "username_or_email": "johndoe",  # username or email
+        "password": "securepassword123"
     }
 )
 
-if response.status_code == 200:
-    auth_data = response.json()
-    access_token = auth_data['access_token']
-    print(f"Login successful, token: {access_token}")
+login_resp.raise_for_status()
+data = login_resp.json()
 
-# Login with email (same endpoint, different value)
-response = requests.post(
-    "http://localhost:8000/api/v1/auth/login",
-    json={
-        "username_or_email": "user@example.com",  # Email instead of username
-        "password": "securepassword123",
-        "tenant_id": "tenant-uuid-here"
-    }
-)
+if data.get("need_tenant_selection"):
+    chosen_tenant_id = data["options"][0]["tenant_id"]
+    finalize_resp = requests.post(
+        "http://localhost:8000/api/v1/auth/login",
+        json={
+            "username_or_email": "johndoe",
+            "password": "securepassword123",
+            "tenant_id": chosen_tenant_id
+        }
+    )
+    finalize_resp.raise_for_status()
+    data = finalize_resp.json()
+
+access_token = data["access_token"]
+print(f"Login successful, token: {access_token}")
 ```
 
 ### Using Authentication Token
@@ -223,9 +235,14 @@ curl -X POST "http://localhost:8000/api/v1/branches/" \
     "tenant_id": "tenant-uuid-here",
     "code": "MAIN",
     "name": "Main Branch",
+    "timezone": "America/Mexico_City",
+    "address_line1": "Av. Reforma 123",
+    "address_line2": "Piso 4",
     "city": "Mexico City",
     "state": "CDMX",
-    "country": "MX"
+    "postal_code": "06000",
+    "country": "MX",
+    "is_active": true
   }'
 ```
 
@@ -237,9 +254,14 @@ response = requests.post(
         "tenant_id": tenant_id,
         "code": "MAIN",
         "name": "Main Branch",
+        "timezone": "America/Mexico_City",
+        "address_line1": "Av. Reforma 123",
+        "address_line2": "Piso 4",
         "city": "Mexico City",
         "state": "CDMX",
-        "country": "MX"
+        "postal_code": "06000",
+        "country": "MX",
+        "is_active": True
     }
 )
 
@@ -365,7 +387,9 @@ curl -X POST "http://localhost:8000/api/v1/laboratory/samples/" \
     "order_id": "order-uuid-here",
     "sample_code": "SAMP001",
     "type": "SANGRE",
-    "notes": "Blood sample for CBC"
+    "notes": "Blood sample for CBC",
+    "collected_at": "2025-08-18T10:00:00Z",
+    "received_at": "2025-08-18T11:00:00Z"
   }'
 ```
 
@@ -379,7 +403,9 @@ response = requests.post(
         "order_id": order_id,
         "sample_code": "SAMP001",
         "type": "SANGRE",
-        "notes": "Blood sample for CBC"
+        "notes": "Blood sample for CBC",
+        "collected_at": "2025-08-18T10:00:00Z",
+        "received_at": "2025-08-18T11:00:00Z"
     }
 )
 
@@ -400,7 +426,8 @@ curl -X POST "http://localhost:8000/api/v1/reports/" \
     "branch_id": "branch-uuid-here",
     "order_id": "order-uuid-here",
     "title": "Blood Test Report",
-    "diagnosis_text": "Normal blood count results"
+    "diagnosis_text": "Normal blood count results",
+    "published_at": "2025-08-18T12:00:00Z"
   }'
 ```
 
@@ -413,9 +440,41 @@ response = requests.post(
         "branch_id": branch_id,
         "order_id": order_id,
         "title": "Blood Test Report",
-        "diagnosis_text": "Normal blood count results"
+        "diagnosis_text": "Normal blood count results",
+        "published_at": "2025-08-18T12:00:00Z"
     }
 )
+
+### Create Report Version
+```bash
+curl -X POST "http://localhost:8000/api/v1/reports/versions/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "report_id": "report-uuid-here",
+    "version_no": 1,
+    "pdf_storage_id": "storage-uuid-here",
+    "html_storage_id": "storage-uuid-here",
+    "changelog": "Initial report version",
+    "authored_by": "user-uuid-here",
+    "authored_at": "2025-08-18T12:30:00Z"
+  }'
+```
+
+**Python Example:**
+```python
+response = requests.post(
+    "http://localhost:8000/api/v1/reports/versions/",
+    json={
+        "report_id": report_id,
+        "version_no": 1,
+        "pdf_storage_id": pdf_id,
+        "html_storage_id": html_id,
+        "changelog": "Initial report version",
+        "authored_by": user_id,
+        "authored_at": "2025-08-18T12:30:00Z"
+    }
+)
+```
 
 if response.status_code == 200:
     report = response.json()
@@ -449,7 +508,8 @@ curl -X POST "http://localhost:8000/api/v1/billing/invoices/" \
     "order_id": "order-uuid-here",
     "invoice_number": "INV001",
     "amount_total": 1500.00,
-    "currency": "MXN"
+    "currency": "MXN",
+    "issued_at": "2025-08-18T01:50:51.386774"
   }'
 ```
 
@@ -463,7 +523,8 @@ response = requests.post(
         "order_id": order_id,
         "invoice_number": "INV001",
         "amount_total": 1500.00,
-        "currency": "MXN"
+        "currency": "MXN",
+        "issued_at": "2025-08-18T01:50:51.386774"
     }
 )
 
@@ -482,7 +543,8 @@ curl -X POST "http://localhost:8000/api/v1/billing/payments/" \
     "branch_id": "branch-uuid-here",
     "invoice_id": "invoice-uuid-here",
     "amount_paid": 1500.00,
-    "method": "credit_card"
+    "method": "credit_card",
+    "paid_at": "2025-08-18T02:10:00Z"
   }'
 ```
 
@@ -495,7 +557,8 @@ response = requests.post(
         "branch_id": branch_id,
         "invoice_id": invoice_id,
         "amount_paid": 1500.00,
-        "method": "credit_card"
+        "method": "credit_card",
+        "paid_at": "2025-08-18T02:10:00Z"
     }
 )
 

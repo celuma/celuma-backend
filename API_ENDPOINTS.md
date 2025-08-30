@@ -54,9 +54,42 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 ```
 
 ### POST /api/v1/auth/login
-**Authenticate user and get access token**
+**Authenticate a user and return an access token. Supports username or email.**
 
 **Request Body:**
+```json
+{
+  "username_or_email": "johndoe",
+  "password": "securepassword123"
+}
+```
+
+**Behavior:**
+- `username_or_email` accepts a username or an email.
+- If the user is associated with exactly one tenant, authentication returns a token.
+- If the user matches multiple tenants, the response will request tenant selection.
+- To finalize login for a specific tenant, send the same request including `tenant_id`.
+
+**Response (single-tenant login):**
+```json
+{
+  "access_token": "jwt-token-here",
+  "token_type": "bearer"
+}
+```
+
+**Response (tenant selection required):**
+```json
+{
+  "need_tenant_selection": true,
+  "options": [
+    { "tenant_id": "tenant-uuid-1", "tenant_name": "Acme Labs" },
+    { "tenant_id": "tenant-uuid-2", "tenant_name": "Beta Diagnostics" }
+  ]
+}
+```
+
+**Request Body (finalize with tenant_id):**
 ```json
 {
   "username_or_email": "johndoe",
@@ -65,21 +98,18 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 }
 ```
 
-**Notes:**
-- `username_or_email` field accepts either:
-  - **Username** (if user has one)
-  - **Email address**
-- The system automatically detects which authentication method to use
-- **Priority**: First tries username, then falls back to email
-- Both methods require the same password
-
-**Response:**
+**Response (finalized login):**
 ```json
 {
   "access_token": "jwt-token-here",
   "token_type": "bearer"
 }
 ```
+
+**Notes:**
+- Authentication prioritizes username match first, then falls back to email.
+- The same password is used regardless of whether you log in with username or email.
+- On error, the endpoint returns `401 Unauthorized`.
 
 ### POST /api/v1/auth/logout
 **Logout user and blacklist token**
@@ -174,8 +204,7 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
   {
     "id": "branch-uuid",
     "name": "Main Branch",
-    "code": "MAIN",
-    "city": "Mexico City"
+    "code": "MAIN"
   }
 ]
 ```
@@ -206,9 +235,14 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
   "tenant_id": "tenant-uuid-here",
   "code": "MAIN",
   "name": "Main Branch",
+  "timezone": "America/Mexico_City",
+  "address_line1": "Av. Reforma 123",
+  "address_line2": "Piso 4",
   "city": "Mexico City",
   "state": "CDMX",
-  "country": "MX"
+  "postal_code": "06000",
+  "country": "MX",
+  "is_active": true
 }
 ```
 
@@ -216,8 +250,8 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 ```json
 {
   "id": "branch-uuid",
-  "name": "Main Branch",
   "code": "MAIN",
+  "name": "Main Branch",
   "tenant_id": "tenant-uuid-here"
 }
 ```
@@ -230,9 +264,8 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 [
   {
     "id": "branch-uuid",
-    "name": "Main Branch",
     "code": "MAIN",
-    "city": "Mexico City",
+    "name": "Main Branch",
     "tenant_id": "tenant-uuid-here"
   }
 ]
@@ -245,11 +278,16 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 ```json
 {
   "id": "branch-uuid",
-  "name": "Main Branch",
   "code": "MAIN",
+  "name": "Main Branch",
+  "timezone": "America/Mexico_City",
+  "address_line1": "Av. Reforma 123",
+  "address_line2": "Piso 4",
   "city": "Mexico City",
   "state": "CDMX",
+  "postal_code": "06000",
   "country": "MX",
+  "is_active": true,
   "tenant_id": "tenant-uuid-here"
 }
 ```
@@ -412,7 +450,9 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
   "order_id": "order-uuid-here",
   "sample_code": "SAMP001",
   "type": "SANGRE",
-  "notes": "Blood sample for CBC"
+  "notes": "Blood sample for CBC",
+  "collected_at": "2025-08-18T10:00:00Z",
+  "received_at": "2025-08-18T11:00:00Z"
 }
 ```
 
@@ -459,7 +499,8 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
   "branch_id": "branch-uuid-here",
   "order_id": "order-uuid-here",
   "title": "Blood Test Report",
-  "diagnosis_text": "Normal blood count results"
+  "diagnosis_text": "Normal blood count results",
+  "published_at": "2025-08-18T12:00:00Z"
 }
 ```
 
@@ -518,7 +559,8 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
   "pdf_storage_id": "storage-uuid-here",
   "html_storage_id": "storage-uuid-here",
   "changelog": "Initial report version",
-  "authored_by": "user-uuid-here"
+  "authored_by": "user-uuid-here",
+  "authored_at": "2025-08-18T12:30:00Z"
 }
 ```
 
@@ -560,7 +602,8 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
   "order_id": "order-uuid-here",
   "invoice_number": "INV001",
   "amount_total": 1500.00,
-  "currency": "MXN"
+  "currency": "MXN",
+  "issued_at": "2025-08-18T01:50:51.386774"
 }
 ```
 
@@ -625,7 +668,8 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
   "branch_id": "branch-uuid-here",
   "invoice_id": "invoice-uuid-here",
   "amount_paid": 1500.00,
-  "method": "credit_card"
+  "method": "credit_card",
+  "paid_at": "2025-08-18T02:10:00Z"
 }
 ```
 
