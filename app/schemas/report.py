@@ -10,6 +10,7 @@ class ReportCreate(BaseModel):
     title: Optional[str] = None
     diagnosis_text: Optional[str] = None
     created_by: Optional[str] = None
+    published_at: Optional[datetime] = None
 
 class ReportResponse(BaseModel):
     """Schema for report response"""
@@ -38,6 +39,7 @@ class ReportVersionCreate(BaseModel):
     html_storage_id: Optional[str] = None
     changelog: Optional[str] = None
     authored_by: Optional[str] = None
+    authored_at: Optional[datetime] = None
 
 class ReportVersionResponse(BaseModel):
     """Schema for report version response"""

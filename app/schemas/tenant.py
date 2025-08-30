@@ -27,9 +27,12 @@ class BranchCreate(BaseModel):
     name: str
     timezone: str = "America/Mexico_City"
     address_line1: Optional[str] = None
+    address_line2: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
+    postal_code: Optional[str] = None
     country: str = "MX"
+    is_active: Optional[bool] = True
 
 class BranchResponse(BaseModel):
     """Schema for branch response"""
@@ -41,9 +44,14 @@ class BranchResponse(BaseModel):
 class BranchDetailResponse(BaseModel):
     """Schema for detailed branch response"""
     id: str
-    name: str
     code: str
+    name: str
+    timezone: str
+    address_line1: Optional[str] = None
+    address_line2: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
+    postal_code: Optional[str] = None
     country: str
+    is_active: bool
     tenant_id: str

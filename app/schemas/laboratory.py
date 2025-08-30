@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 
 class LabOrderCreate(BaseModel):
     """Schema for creating a laboratory order"""
@@ -40,6 +41,8 @@ class SampleCreate(BaseModel):
     sample_code: str
     type: str
     notes: Optional[str] = None
+    collected_at: Optional[datetime] = None
+    received_at: Optional[datetime] = None
 
 class SampleResponse(BaseModel):
     """Schema for sample response"""

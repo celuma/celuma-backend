@@ -38,7 +38,11 @@ def list_tenant_branches(tenant_id: str, session: Session = Depends(get_session)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
     
-    branches = [{"id": str(b.id), "name": b.name, "code": b.code, "city": b.city} for b in tenant.branches]
+    branches = [{
+        "id": str(b.id),
+        "name": b.name,
+        "code": b.code
+    } for b in tenant.branches]
     return branches
 
 @router.get("/{tenant_id}/users")
