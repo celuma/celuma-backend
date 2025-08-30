@@ -11,6 +11,7 @@ class InvoiceCreate(BaseModel):
     invoice_number: str
     amount_total: float
     currency: str = "MXN"
+    issued_at: Optional[datetime] = None
 
 class InvoiceResponse(BaseModel):
     """Schema for invoice response"""
@@ -42,6 +43,7 @@ class PaymentCreate(BaseModel):
     invoice_id: str
     amount_paid: float
     method: Optional[str] = None
+    paid_at: Optional[datetime] = None
 
 class PaymentResponse(BaseModel):
     """Schema for payment response"""

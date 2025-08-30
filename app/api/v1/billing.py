@@ -56,7 +56,8 @@ def create_invoice(invoice_data: InvoiceCreate, session: Session = Depends(get_s
         order_id=invoice_data.order_id,
         invoice_number=invoice_data.invoice_number,
         amount_total=invoice_data.amount_total,
-        currency=invoice_data.currency
+        currency=invoice_data.currency,
+        issued_at=invoice_data.issued_at if invoice_data.issued_at is not None else None
     )
     
     session.add(invoice)
@@ -127,7 +128,8 @@ def create_payment(payment_data: PaymentCreate, session: Session = Depends(get_s
         branch_id=payment_data.branch_id,
         invoice_id=payment_data.invoice_id,
         amount_paid=payment_data.amount_paid,
-        method=payment_data.method
+        method=payment_data.method,
+        paid_at=payment_data.paid_at if payment_data.paid_at is not None else None
     )
     
     session.add(payment)

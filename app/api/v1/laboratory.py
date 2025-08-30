@@ -138,7 +138,9 @@ def create_sample(sample_data: SampleCreate, session: Session = Depends(get_sess
         order_id=sample_data.order_id,
         sample_code=sample_data.sample_code,
         type=sample_data.type,
-        notes=sample_data.notes
+        notes=sample_data.notes,
+        collected_at=sample_data.collected_at,
+        received_at=sample_data.received_at
     )
     
     session.add(sample)

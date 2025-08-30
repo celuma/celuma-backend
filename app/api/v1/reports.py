@@ -50,7 +50,8 @@ def create_report(report_data: ReportCreate, session: Session = Depends(get_sess
         order_id=report_data.order_id,
         title=report_data.title,
         diagnosis_text=report_data.diagnosis_text,
-        created_by=report_data.created_by
+        created_by=report_data.created_by,
+        published_at=report_data.published_at
     )
     
     session.add(report)
@@ -119,7 +120,8 @@ def create_report_version(version_data: ReportVersionCreate, session: Session = 
         pdf_storage_id=version_data.pdf_storage_id,
         html_storage_id=version_data.html_storage_id,
         changelog=version_data.changelog,
-        authored_by=version_data.authored_by
+        authored_by=version_data.authored_by,
+        authored_at=version_data.authored_at
     )
     
     session.add(version)
