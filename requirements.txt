@@ -10,6 +10,12 @@ passlib[bcrypt]==1.7.*
 python-multipart==0.0.*
 email-validator==2.2.*
 
+# AWS and Imaging
+boto3==1.34.*
+Pillow==10.*
+rawpy==0.25.*
+imageio==2.34.*
+
 # Testing
 pytest==8.4.1
 pytest-cov==6.2.1
