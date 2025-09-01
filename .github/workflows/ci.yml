@@ -14,7 +14,8 @@ jobs:
 
     permissions:
       contents: read
-      packages: write   # required for GHCR
+      packages: write   # GHCR
+      id-token: write   # OIDC for AWS
 
     steps:
       - uses: actions/checkout@v4
@@ -22,13 +23,26 @@ jobs:
         uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
+      # GHCR
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image (main branch)
+      # --- NEW: AWS OIDC + ECR login ---
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::385511156241:role/GitHubActionsECRPushRole
+          aws-region: mx-central-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      # -----------------------------------
+
+      - name: Build and push Docker image (main branch → GHCR + ECR STG)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -38,6 +52,8 @@ jobs:
             ghcr.io/${{ github.repository }}:${{ github.sha }}
             ghcr.io/${{ github.repository }}:main
             ghcr.io/${{ github.repository }}:latest
+            ${{ steps.login-ecr.outputs.registry }}/celuma-stg/celuma-backend:stg-${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/celuma-stg/celuma-backend:stg-latest
           labels: |
             org.opencontainers.image.source=${{ github.repositoryUrl }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -50,10 +66,14 @@ jobs:
         run: |
           echo "### 🚀 Main Branch Image Published" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Image tags:**" >> $GITHUB_STEP_SUMMARY
-          echo "- \`ghcr.io/${{ github.repository }}:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`ghcr.io/${{ github.repository }}:main\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`ghcr.io/${{ github.repository }}:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "**GHCR tags:**" >> $GITHUB_STEP_SUMMARY
+          echo "- ghcr.io/${{ github.repository }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ghcr.io/${{ github.repository }}:main" >> $GITHUB_STEP_SUMMARY
+          echo "- ghcr.io/${{ github.repository }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**ECR (stg) tags:**" >> $GITHUB_STEP_SUMMARY
+          echo "- ${{ steps.login-ecr.outputs.registry }}/celuma-stg/celuma-backend:stg-${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ${{ steps.login-ecr.outputs.registry }}/celuma-stg/celuma-backend:stg-latest" >> $GITHUB_STEP_SUMMARY
 
   docker-release:
     runs-on: ubuntu-latest
@@ -63,7 +83,8 @@ jobs:
 
     permissions:
       contents: read
-      packages: write   # required for GHCR
+      packages: write   # GHCR
+      id-token: write   # OIDC para AWS
 
     steps:
       - uses: actions/checkout@v4
@@ -71,21 +92,33 @@ jobs:
         uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
+      # GHCR (igual que ya tenías)
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # --- NUEVO: AWS OIDC + login ECR ---
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::385511156241:role/GitHubActionsECRPushRole
+          aws-region: mx-central-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      # -----------------------------------
+
       - name: Extract release version
         id: release_version
         run: |
-          # Remove 'v' prefix from tag (e.g., v1.0.0 -> 1.0.0)
           VERSION=${GITHUB_REF#refs/tags/v}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "RELEASE_TAG=$VERSION" >> $GITHUB_ENV
 
-      - name: Build and push Docker image (release tag)
+      - name: Build and push Docker image (tag → GHCR + ECR PROD)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -95,6 +128,9 @@ jobs:
             ghcr.io/${{ github.repository }}:${{ github.ref_name }}
             ghcr.io/${{ github.repository }}:${{ steps.release_version.outputs.version }}
             ghcr.io/${{ github.repository }}:latest
+            ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:${{ github.ref_name }}
+            ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:${{ steps.release_version.outputs.version }}
+            ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:latest
           labels: |
             org.opencontainers.image.source=${{ github.repositoryUrl }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -110,7 +146,12 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Release:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Image tags:**" >> $GITHUB_STEP_SUMMARY
-          echo "- \`ghcr.io/${{ github.repository }}:${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`ghcr.io/${{ github.repository }}:${{ steps.release_version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`ghcr.io/${{ github.repository }}:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "**GHCR tags:**" >> $GITHUB_STEP_SUMMARY
+          echo "- ghcr.io/${{ github.repository }}:${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ghcr.io/${{ github.repository }}:${{ steps.release_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ghcr.io/${{ github.repository }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**ECR (prod) tags:**" >> $GITHUB_STEP_SUMMARY
+          echo "- ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:${{ steps.release_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:latest" >> $GITHUB_STEP_SUMMARY
