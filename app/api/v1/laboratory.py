@@ -187,7 +187,25 @@ def upload_sample_image(sample_id: str, file: UploadFile = File(...), session: S
         raise HTTPException(404, "Sample not found")
 
     filename = file.filename or "upload"
-    data = file.file.read()
+    # Basic size guard: read up to 50MB for non-RAW, 500MB for RAW candidates
+    # We decide limit by extension to avoid over-reading large unexpected files
+    lower = filename.lower()
+    raw_exts = (".cr2", ".cr3", ".nef", ".nrw", ".arw", ".sr2", ".raf", ".rw2", ".orf", ".pef", ".dng")
+    max_bytes = 500 * 1024 * 1024 if any(lower.endswith(ext) for ext in raw_exts) else 50 * 1024 * 1024
+
+    # Read in chunks to avoid memory spikes and enforce limit
+    chunk_size = 1024 * 1024
+    received = 0
+    chunks = []
+    while True:
+        chunk = file.file.read(chunk_size)
+        if not chunk:
+            break
+        received += len(chunk)
+        if received > max_bytes:
+            raise HTTPException(413, f"File too large. Limit is {max_bytes // (1024*1024)}MB for this file type")
+        chunks.append(chunk)
+    data = b"".join(chunks)
 
     processed = process_image_bytes(filename, data)
     is_raw = processed.original_bytes is not None
@@ -219,7 +237,7 @@ def upload_sample_image(sample_id: str, file: UploadFile = File(...), session: S
     # Create StorageObject rows
     processed_storage = StorageObject(
         provider="aws",
-        region=str(s3._session.region_name or "us-east-1"),
+        region=s3.region,
         bucket=processed_info.bucket,
         object_key=processed_info.key,
         version_id=processed_info.version_id,
@@ -232,7 +250,7 @@ def upload_sample_image(sample_id: str, file: UploadFile = File(...), session: S
 
     thumb_storage = StorageObject(
         provider="aws",
-        region=str(s3._session.region_name or "us-east-1"),
+        region=s3.region,
         bucket=thumb_info.bucket,
         object_key=thumb_info.key,
         version_id=thumb_info.version_id,
@@ -273,7 +291,7 @@ def upload_sample_image(sample_id: str, file: UploadFile = File(...), session: S
         )
         original_storage = StorageObject(
             provider="aws",
-            region=str(s3._session.region_name or "us-east-1"),
+            region=s3.region,
             bucket=raw_info.bucket,
             object_key=raw_info.key,
             version_id=raw_info.version_id,
