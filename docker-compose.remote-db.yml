@@ -8,12 +8,20 @@ version: '3.8'
 services:
   db-init:
     image: ghcr.io/celuma/celuma-backend:latest
+    env_file: .env
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - JWT_SECRET=${JWT_SECRET}
       - JWT_EXPIRES_MIN=${JWT_EXPIRES_MIN:-480}
       - APP_NAME=${APP_NAME:-celuma}
       - ENV=${ENV:-production}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+      - MEDIA_PUBLIC_BASE_URL=${MEDIA_PUBLIC_BASE_URL}
+      - MEDIA_PRESIGNED_EXPIRE_SECONDS=${MEDIA_PRESIGNED_EXPIRE_SECONDS:-3600}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL}
     command: bash init_db.sh
     restart: "no"
     networks:
@@ -21,12 +29,20 @@ services:
 
   api:
     image: ghcr.io/celuma/celuma-backend:latest
+    env_file: .env
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - JWT_SECRET=${JWT_SECRET}
       - JWT_EXPIRES_MIN=${JWT_EXPIRES_MIN:-480}
       - APP_NAME=${APP_NAME:-celuma}
       - ENV=${ENV:-production}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+      - MEDIA_PUBLIC_BASE_URL=${MEDIA_PUBLIC_BASE_URL}
+      - MEDIA_PRESIGNED_EXPIRE_SECONDS=${MEDIA_PRESIGNED_EXPIRE_SECONDS:-3600}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL}
     ports: ["8000:8000"]
     depends_on:
       - db-init

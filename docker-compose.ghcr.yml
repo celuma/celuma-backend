@@ -14,26 +14,40 @@ services:
   db-init:
     image: ghcr.io/celuma/celuma-backend:latest
     pull_policy: always
+    env_file: .env
     environment:
-      - APP_NAME=celuma
-      - ENV=dev
-      - DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/celumadb
-      - JWT_SECRET=secret
-      - JWT_EXPIRES_MIN=480
+      - APP_NAME=${APP_NAME:-celuma}
+      - ENV=${ENV:-dev}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg2://postgres:postgres@db:5432/celumadb}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRES_MIN=${JWT_EXPIRES_MIN:-480}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+      - MEDIA_PUBLIC_BASE_URL=${MEDIA_PUBLIC_BASE_URL}
+      - MEDIA_PRESIGNED_EXPIRE_SECONDS=${MEDIA_PRESIGNED_EXPIRE_SECONDS:-3600}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL}
     command: bash init_db.sh
     restart: "no"
 
   api:
     image: ghcr.io/celuma/celuma-backend:latest
     pull_policy: always
+    env_file: .env
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/celumadb
-      - JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
-      - JWT_EXPIRES_MIN=480
-      - APP_NAME=celuma
-      - ENV=production
-      - DB_HOST=db
-      - DB_PORT=5432
+      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg2://postgres:postgres@db:5432/celumadb}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRES_MIN=${JWT_EXPIRES_MIN:-480}
+      - APP_NAME=${APP_NAME:-celuma}
+      - ENV=${ENV:-production}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+      - MEDIA_PUBLIC_BASE_URL=${MEDIA_PUBLIC_BASE_URL}
+      - MEDIA_PRESIGNED_EXPIRE_SECONDS=${MEDIA_PRESIGNED_EXPIRE_SECONDS:-3600}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL}
     ports: ["8000:8000"]
     depends_on:
       - db-init

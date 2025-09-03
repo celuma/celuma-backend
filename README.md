@@ -268,6 +268,22 @@ JWT_SECRET=your-super-secret-jwt-key
 JWT_EXPIRES_MIN=480
 APP_NAME=celuma
 ENV=production
+
+# AWS S3 (required for image uploads)
+AWS_ACCESS_KEY_ID=your-aws-access-key
+AWS_SECRET_ACCESS_KEY=your-aws-secret
+AWS_REGION=us-east-1
+S3_BUCKET_NAME=your-bucket-name
+
+# Media / CDN (optional)
+# Use CloudFront or CDN base URL for permanent public links
+MEDIA_PUBLIC_BASE_URL=https://dxxxxxxxxxxxx.cloudfront.net
+
+# Presigned URL expiry in seconds (used if generating presigned links)
+MEDIA_PRESIGNED_EXPIRE_SECONDS=3600
+
+# Custom S3 endpoint (LocalStack/MinIO)
+# S3_ENDPOINT_URL=http://localhost:4566
 ```
 
 ## 📊 Monitoring

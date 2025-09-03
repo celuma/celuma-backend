@@ -415,6 +415,50 @@ if response.status_code == 200:
     print(f"Sample created: {sample['sample_code']}")
 ```
 
+### Upload Sample Image (multipart/form-data)
+```bash
+curl -X POST "http://localhost:8000/api/v1/laboratory/samples/SAMPLE_UUID/images" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -F "file=@/path/to/image.dng"
+```
+
+**Python Example:**
+```python
+import requests
+
+sample_id = "SAMPLE_UUID"
+filepath = "/path/to/image.dng"
+
+with open(filepath, "rb") as f:
+    resp = requests.post(
+        f"http://localhost:8000/api/v1/laboratory/samples/{sample_id}/images",
+        headers={"Authorization": f"Bearer {access_token}"},
+        files={"file": (filepath.split("/")[-1], f, "application/octet-stream")},
+    )
+
+resp.raise_for_status()
+data = resp.json()
+print("Uploaded:", data["filename"], "Processed URL:", data["urls"].get("processed"))
+```
+
+### List Sample Images
+```bash
+curl "http://localhost:8000/api/v1/laboratory/samples/SAMPLE_UUID/images" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+resp = requests.get(
+    f"http://localhost:8000/api/v1/laboratory/samples/{sample_id}/images",
+    headers={"Authorization": f"Bearer {access_token}"},
+)
+resp.raise_for_status()
+images = resp.json()["images"]
+for img in images:
+    print("Thumb:", img["urls"].get("thumbnail"), "Processed:", img["urls"].get("processed"))
+```
+
 ## 📋 Report Management
 
 ### Create Report
