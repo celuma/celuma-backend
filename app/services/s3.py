@@ -46,6 +46,14 @@ class S3Service:
             raise RuntimeError("S3 bucket name is not configured")
         return settings.s3_bucket_name
 
+    @property
+    def region(self) -> str:
+        """Public accessor for the configured AWS region.
+
+        Falls back to settings.aws_region and finally to 'mx-central-1'.
+        """
+        return (self._session.region_name or settings.aws_region or "mx-central-1")
+
     def upload_bytes(
         self,
         data: bytes,
@@ -94,7 +102,7 @@ class S3Service:
         if settings.media_public_base_url:
             base = settings.media_public_base_url.rstrip("/")
             return f"{base}/{key}"
-        region = settings.aws_region or "us-east-1"
+        region = settings.aws_region or "mx-central-1"
         return f"https://{self.bucket}.s3.{region}.amazonaws.com/{key}"
 
 
