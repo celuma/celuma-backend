@@ -62,6 +62,15 @@ JWT_SECRET=your-secret-key
 JWT_EXPIRES_MIN=480
 APP_NAME=celuma
 ENV=production
+
+# AWS / Media (for image uploads)
+AWS_ACCESS_KEY_ID=your-access-key
+AWS_SECRET_ACCESS_KEY=your-secret
+AWS_REGION=us-east-1
+S3_BUCKET_NAME=your-bucket
+MEDIA_PUBLIC_BASE_URL=https://dxxxxxxxxxxxx.cloudfront.net
+# MEDIA_PRESIGNED_EXPIRE_SECONDS=3600
+# S3_ENDPOINT_URL=http://localhost:4566
 ```
 
 ## 📚 Full Documentation

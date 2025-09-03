@@ -202,6 +202,21 @@ APP_NAME=celuma
 
 # Environment (default: production)
 ENV=production
+
+# AWS / Media (image uploads)
+AWS_ACCESS_KEY_ID=your-access-key
+AWS_SECRET_ACCESS_KEY=your-secret
+AWS_REGION=us-east-1
+S3_BUCKET_NAME=your-bucket
+
+# Public media base URL (CDN/CloudFront)
+MEDIA_PUBLIC_BASE_URL=https://dxxxxxxxxxxxx.cloudfront.net
+
+# Presigned expiry (if using presigned links)
+MEDIA_PRESIGNED_EXPIRE_SECONDS=3600
+
+# Custom S3 endpoint (LocalStack/MinIO)
+# S3_ENDPOINT_URL=http://localhost:4566
 ```
 
 ### Environment File Example

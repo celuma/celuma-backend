@@ -487,6 +487,56 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 ]
 ```
 
+### POST /api/v1/laboratory/samples/{sample_id}/images
+**Upload a sample image (RAW or regular) and create renditions**
+
+**Request:**
+- Content-Type: `multipart/form-data`
+- Body: field `file` with the image file
+
+**Behavior:**
+- RAW formats (e.g., CR2/NEF/ARW/DNG): store RAW original + processed JPEG + thumbnail
+- Regular images (e.g., JPG/PNG/WebP): store processed JPEG + thumbnail
+
+**Response:**
+```json
+{
+  "message": "Image uploaded successfully",
+  "sample_image_id": "image-uuid",
+  "filename": "photo.dng",
+  "is_raw": true,
+  "file_size": 4567890,
+  "urls": {
+    "processed": "https://cdn.example.com/samples/<tenant>/<branch>/<sample>/processed/file.jpg",
+    "thumbnail": "https://cdn.example.com/samples/<tenant>/<branch>/<sample>/thumbnails/file.jpg",
+    "raw": "https://cdn.example.com/samples/<tenant>/<branch>/<sample>/raw/file.dng"
+  }
+}
+```
+
+### GET /api/v1/laboratory/samples/{sample_id}/images
+**List sample images and rendition URLs**
+
+**Response:**
+```json
+{
+  "sample_id": "sample-uuid",
+  "images": [
+    {
+      "id": "image-uuid",
+      "label": null,
+      "is_primary": false,
+      "created_at": "2025-08-18T10:00:00Z",
+      "urls": {
+        "processed": "https://cdn.example.com/.../processed/file.jpg",
+        "thumbnail": "https://cdn.example.com/.../thumbnails/file.jpg",
+        "original_raw": "https://cdn.example.com/.../raw/file.dng"
+      }
+    }
+  ]
+}
+```
+
 ## 📋 Report Management
 
 ### POST /api/v1/reports/
