@@ -50,17 +50,21 @@ def process_image_bytes(filename: str, data: bytes) -> ProcessedImage:
     is_raw = any(lower.endswith(ext) for ext in RAW_EXTENSIONS)
 
     if is_raw and rawpy is not None:
-        raw = rawpy.imread(BytesIO(data))  # type: ignore[attr-defined]
-        rgb = raw.postprocess(use_auto_wb=True, no_auto_bright=True)
-        pil = Image.fromarray(rgb)
-        pil = ImageOps.exif_transpose(pil).convert("RGB")
-        processed = _encode_jpeg(pil, quality=90)
-        thumb = _encode_jpeg(_make_thumbnail(pil), quality=85)
-        return ProcessedImage(
-            original_bytes=data,
-            processed_jpeg_bytes=processed,
-            thumbnail_jpeg_bytes=thumb,
-        )
+        try:
+            raw = rawpy.imread(BytesIO(data))  # type: ignore[attr-defined]
+            rgb = raw.postprocess(use_auto_wb=True, no_auto_bright=True)
+            pil = Image.fromarray(rgb)
+            pil = ImageOps.exif_transpose(pil).convert("RGB")
+            processed = _encode_jpeg(pil, quality=90)
+            thumb = _encode_jpeg(_make_thumbnail(pil), quality=85)
+            return ProcessedImage(
+                original_bytes=data,
+                processed_jpeg_bytes=processed,
+                thumbnail_jpeg_bytes=thumb,
+            )
+        except Exception:
+            # Fallback to regular image processing if RAW decoding fails
+            pass
 
     # Fallback for regular images
     pil = Image.open(BytesIO(data))
