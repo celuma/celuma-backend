@@ -8,13 +8,16 @@ echo "Starting Celuma Backend..."
 check_db() {
     echo "Checking database connection..."
     python -c "
-import psycopg2
 import os
 import sys
+from sqlalchemy import create_engine, text
 
 try:
-    conn = psycopg2.connect(os.environ['DATABASE_URL'])
-    conn.close()
+    database_url = os.environ['DATABASE_URL']
+    engine = create_engine(database_url, pool_pre_ping=True)
+    with engine.connect() as conn:
+        conn.execute(text('SELECT 1'))
+    engine.dispose()
     print('Database connection successful!')
 except Exception as e:
     print(f'Database connection failed: {e}')
