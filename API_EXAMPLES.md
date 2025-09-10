@@ -4,7 +4,7 @@ This document provides comprehensive examples of how to use the Celuma API with 
 
 ## 🚀 JSON-First API Design
 
-**All POST endpoints use JSON request bodies for optimal data handling and validation.**
+**All POST endpoints use JSON request bodies for optimal data handling and validation (except the image upload endpoint which uses multipart/form-data).**
 
 ### Benefits of JSON Payloads
 - ✅ **Excellent Data Validation**: Pydantic schemas provide automatic validation
@@ -353,7 +353,8 @@ curl -X POST "http://localhost:8000/api/v1/laboratory/orders/" \
     "patient_id": "patient-uuid-here",
     "order_code": "ORD001",
     "requested_by": "Dr. Smith",
-    "notes": "Complete blood count requested"
+    "notes": "Complete blood count requested",
+    "created_by": "user-uuid-here"
   }'
 ```
 
@@ -367,7 +368,8 @@ response = requests.post(
         "patient_id": patient_id,
         "order_code": "ORD001",
         "requested_by": "Dr. Smith",
-        "notes": "Complete blood count requested"
+        "notes": "Complete blood count requested",
+        "created_by": user_id
     }
 )
 
@@ -418,7 +420,6 @@ if response.status_code == 200:
 ### Upload Sample Image (multipart/form-data)
 ```bash
 curl -X POST "http://localhost:8000/api/v1/laboratory/samples/SAMPLE_UUID/images" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -F "file=@/path/to/image.dng"
 ```
 
@@ -451,7 +452,6 @@ curl "http://localhost:8000/api/v1/laboratory/samples/SAMPLE_UUID/images" \
 ```python
 resp = requests.get(
     f"http://localhost:8000/api/v1/laboratory/samples/{sample_id}/images",
-    headers={"Authorization": f"Bearer {access_token}"},
 )
 resp.raise_for_status()
 images = resp.json()["images"]
@@ -471,7 +471,8 @@ curl -X POST "http://localhost:8000/api/v1/reports/" \
     "order_id": "order-uuid-here",
     "title": "Blood Test Report",
     "diagnosis_text": "Normal blood count results",
-    "published_at": "2025-08-18T12:00:00Z"
+    "published_at": "2025-08-18T12:00:00Z",
+    "created_by": "user-uuid-here"
   }'
 ```
 
@@ -485,7 +486,8 @@ response = requests.post(
         "order_id": order_id,
         "title": "Blood Test Report",
         "diagnosis_text": "Normal blood count results",
-        "published_at": "2025-08-18T12:00:00Z"
+        "published_at": "2025-08-18T12:00:00Z",
+        "created_by": user_id
     }
 )
 
