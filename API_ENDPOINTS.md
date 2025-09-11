@@ -388,9 +388,13 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
   "patient_id": "patient-uuid-here",
   "order_code": "ORD001",
   "requested_by": "Dr. Smith",
-  "notes": "Complete blood count requested"
+  "notes": "Complete blood count requested",
+  "created_by": "user-uuid-here"
 }
 ```
+
+**Notes:**
+- `created_by` is optional and must be a UUID (user id) if provided.
 
 **Response:**
 ```json
@@ -550,9 +554,14 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
   "order_id": "order-uuid-here",
   "title": "Blood Test Report",
   "diagnosis_text": "Normal blood count results",
-  "published_at": "2025-08-18T12:00:00Z"
+  "published_at": "2025-08-18T12:00:00Z",
+  "created_by": "user-uuid-here"
 }
 ```
+
+**Notes:**
+- `created_by` is optional and must be a UUID (user id) if provided.
+- `published_at` is optional ISO 8601 datetime.
 
 **Response:**
 ```json
@@ -613,6 +622,10 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
   "authored_at": "2025-08-18T12:30:00Z"
 }
 ```
+
+**Notes:**
+- `html_storage_id` is optional; include it only if you have an HTML rendition.
+- `authored_by` and `authored_at` are optional; if omitted, `authored_at` defaults to server time.
 
 **Response:**
 ```json
@@ -794,12 +807,17 @@ All entities include these common fields:
 - `created_at`: Creation timestamp
 - `updated_at`: Last update timestamp
 
+### ID and Date Types
+- All `id` and `*_id` fields are UUID strings.
+- Date-time fields use ISO 8601 format (e.g., `2025-08-18T12:30:00Z`).
+- `created_at` and `updated_at` are server-generated and MUST NOT be sent in request bodies.
+
 ### Status Enums
-- **Order Status**: `RECEIVED`, `PROCESSING`, `COMPLETED`, `CANCELLED`
-- **Sample State**: `RECEIVED`, `PROCESSING`, `COMPLETED`, `DISCARDED`
-- **Report Status**: `DRAFT`, `REVIEW`, `PUBLISHED`, `ARCHIVED`
-- **Invoice Status**: `PENDING`, `PAID`, `OVERDUE`, `CANCELLED`
-- **User Role**: `admin`, `technician`, `doctor`, `receptionist`
+- **Order Status**: `RECEIVED`, `PROCESSING`, `DIAGNOSIS`, `REVIEW`, `RELEASED`, `CLOSED`, `CANCELLED`
+- **Sample State**: uses Order Status values for lifecycle: `RECEIVED`, `PROCESSING`, `DIAGNOSIS`, `REVIEW`, `RELEASED`, `CLOSED`, `CANCELLED`
+- **Report Status**: `DRAFT`, `IN_REVIEW`, `APPROVED`, `PUBLISHED`, `RETRACTED`
+- **Invoice Status**: `PENDING`, `PAID`, `FAILED`, `REFUNDED`, `PARTIAL`
+- **User Role**: `admin`, `pathologist`, `lab_tech`, `assistant`, `billing`, `viewer`
 
 ## 🔐 Authentication
 
@@ -810,7 +828,7 @@ Authorization: Bearer <jwt_token>
 ```
 
 ### Token Expiration
-JWT tokens expire after 24 hours. Use the logout endpoint to invalidate tokens before expiration.
+JWT tokens expire after 480 minutes (8 hours) by default. Use the logout endpoint to invalidate tokens before expiration.
 
 ### Token Blacklisting
 When users logout, their tokens are automatically blacklisted and cannot be used for subsequent requests.
@@ -885,4 +903,4 @@ response = requests.post(
 
 ---
 
-**Note: All POST endpoints use JSON request bodies for optimal data handling, validation, and consistent API design.**
+**Note: All POST endpoints use JSON request bodies for optimal data handling, validation, and consistent API design, except the image upload endpoint which uses multipart/form-data.**
