@@ -37,11 +37,6 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 }
 ```
 
-**Notes:**
-- `username` field is **optional** - users can register with or without a username
-- If `username` is provided, it must be unique within the tenant
-- `email` is always required and must be unique within the tenant
-
 **Response:**
 ```json
 {
@@ -52,6 +47,57 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
   "role": "admin"
 }
 ```
+
+**Notes:**
+- `username` field is **optional** - users can register with or without a username
+- If `username` is provided, it must be unique within the tenant
+- `email` is always required and must be unique within the tenant
+
+### POST /api/v1/auth/register/unified
+**Unified registration: create tenant, branch and admin user**
+
+Request body:
+
+```json
+{
+  "tenant": {
+    "name": "Acme Labs",
+    "legal_name": "Acme Laboratories S.A. de C.V.",
+    "tax_id": "ACM010101ABC"
+  },
+  "branch": {
+    "code": "HQ",
+    "name": "Headquarters",
+    "timezone": "America/Mexico_City",
+    "address_line1": "Av. Siempre Viva 123",
+    "city": "CDMX",
+    "state": "CDMX",
+    "postal_code": "01234",
+    "country": "MX"
+  },
+  "admin_user": {
+    "email": "admin@acme.com",
+    "username": "admin",
+    "password": "Secret123!",
+    "full_name": "Admin User"
+  }
+}
+```
+
+Response body:
+
+```json
+{
+  "tenant_id": "...",
+  "branch_id": "...",
+  "user_id": "..."
+}
+```
+
+**Notes:**
+- The operation is atomic. If any step fails, nothing is created.
+- The created user has role "admin" and is linked to the created branch.
+- `branch.code` must be unique per tenant.
 
 ### POST /api/v1/auth/login
 **Authenticate a user and return an access token. Supports username or email.**

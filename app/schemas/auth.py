@@ -60,3 +60,46 @@ class UserProfileUpdate(BaseModel):
     email: Optional[EmailStr] = None
     current_password: Optional[str] = None
     new_password: Optional[str] = None
+
+
+class RegistrationTenant(BaseModel):
+    """Payload section for creating the tenant during unified registration"""
+    name: str
+    legal_name: Optional[str] = None
+    tax_id: Optional[str] = None
+
+
+class RegistrationBranch(BaseModel):
+    """Payload section for creating the default branch during unified registration"""
+    code: str
+    name: str
+    timezone: str = "America/Mexico_City"
+    address_line1: Optional[str] = None
+    address_line2: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    postal_code: Optional[str] = None
+    country: str = "MX"
+
+
+class RegistrationAdminUser(BaseModel):
+    """Payload section for creating the initial admin user during unified registration"""
+    email: EmailStr
+    username: Optional[str] = None
+    password: str
+    full_name: str
+    # Role will always be admin for initial registration
+
+
+class RegistrationRequest(BaseModel):
+    """Unified registration request to create tenant, branch and admin user in one shot"""
+    tenant: RegistrationTenant
+    branch: RegistrationBranch
+    admin_user: RegistrationAdminUser
+
+
+class RegistrationResponse(BaseModel):
+    """Unified registration response with created entities identifiers"""
+    tenant_id: str
+    branch_id: str
+    user_id: str
