@@ -4,7 +4,10 @@ from app.core.db import get_session
 from app.models.report import Report, ReportVersion
 from app.models.laboratory import LabOrder
 from app.models.tenant import Tenant, Branch
+from app.models.storage import StorageObject
+from app.services.s3 import S3Service
 from app.schemas.report import ReportCreate, ReportResponse, ReportDetailResponse, ReportVersionCreate, ReportVersionResponse
+import json
 
 router = APIRouter(prefix="/reports")
 
@@ -58,6 +61,43 @@ def create_report(report_data: ReportCreate, session: Session = Depends(get_sess
     session.commit()
     session.refresh(report)
     
+    # If a JSON report body is provided, upload to S3 and create initial version (v1)
+    if report_data.report is not None:
+        s3 = S3Service()
+        # Build S3 key
+        key = f"reports/{report.tenant_id}/{report.branch_id}/{report.id}/versions/1/report.json"
+        data_bytes = json.dumps(report_data.report, ensure_ascii=False).encode("utf-8")
+        info = s3.upload_bytes(data_bytes, key=key, content_type="application/json")
+
+        storage = StorageObject(
+            provider="aws",
+            region=s3.region,
+            bucket=info.bucket,
+            object_key=info.key,
+            version_id=info.version_id,
+            etag=info.etag,
+            content_type="application/json",
+            size_bytes=info.size_bytes,
+            created_by=report.created_by,
+        )
+        session.add(storage)
+        session.flush()
+
+        # Mark existing versions as not current (none expected on create)
+        # Create version 1 as current
+        version = ReportVersion(
+            report_id=report.id,
+            version_no=1,
+            json_storage_id=storage.id,
+            pdf_storage_id=None,
+            html_storage_id=None,
+            authored_by=report.created_by,
+            is_current=True,
+        )
+        session.add(version)
+        session.commit()
+        session.refresh(version)
+
     return ReportResponse(
         id=str(report.id),
         status=report.status,
@@ -73,6 +113,22 @@ def get_report(report_id: str, session: Session = Depends(get_session)):
     if not report:
         raise HTTPException(404, "Report not found")
     
+    # Load current version JSON, if any
+    current_version = session.exec(
+        select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
+    ).first()
+
+    report_json = None
+    if current_version and current_version.json_storage_id:
+        storage = session.get(StorageObject, current_version.json_storage_id)
+        if storage:
+            s3 = S3Service()
+            try:
+                text = s3.download_text(storage.object_key)
+                report_json = json.loads(text)
+            except Exception:
+                report_json = None
+
     return ReportDetailResponse(
         id=str(report.id),
         status=report.status,
@@ -81,7 +137,8 @@ def get_report(report_id: str, session: Session = Depends(get_session)):
         branch_id=str(report.branch_id),
         title=report.title,
         diagnosis_text=report.diagnosis_text,
-        published_at=report.published_at
+        published_at=report.published_at,
+        report=report_json,
     )
 
 @router.get("/versions/")
