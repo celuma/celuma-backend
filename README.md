@@ -102,6 +102,7 @@ python test_auth_logout.py       # Authentication tests
 - [API Examples](API_EXAMPLES.md) - Usage examples with JSON payloads
 - [Database Schema](DATABASE_README.md) - Database design and migrations
 - [Testing Guide](tests/TESTING_README.md) - Comprehensive testing documentation
+- [Logging Guide](LOGGING.md) - Iconography and logging guidelines
 - **[Deployment Guide](DEPLOYMENT_README.md)** - Complete deployment documentation
 
 ## 🏗️ Architecture
