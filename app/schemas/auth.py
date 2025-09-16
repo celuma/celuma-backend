@@ -52,3 +52,11 @@ class UserProfile(BaseModel):
     full_name: str
     role: str
     tenant_id: str
+
+class UserProfileUpdate(BaseModel):
+    """Schema for updating user profile and password"""
+    full_name: Optional[str] = None
+    username: Optional[str] = None
+    email: Optional[EmailStr] = None
+    current_password: Optional[str] = None
+    new_password: Optional[str] = None

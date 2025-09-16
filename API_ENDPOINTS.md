@@ -145,6 +145,39 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 - `username` field will be `null` if the user doesn't have a username set
 - All other user information is always included
 
+### PUT /api/v1/auth/me
+**Update current user profile and/or password**
+
+**Headers:** `Authorization: Bearer <token>`
+
+**Request Body:**
+```json
+{
+  "full_name": "New Name",
+  "username": "new-username",
+  "email": "new.email@example.com",
+  "current_password": "oldpass",
+  "new_password": "newpass123"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "user-uuid",
+  "email": "new.email@example.com",
+  "username": "new-username",
+  "full_name": "New Name",
+  "role": "admin",
+  "tenant_id": "tenant-uuid-here"
+}
+```
+
+**Notes:**
+- To change the password, you must provide both `current_password` and `new_password`. The current password must match the existing one.
+- `username` and `email` must be unique within the tenant.
+- All fields are optional; only the provided fields will be updated.
+
 ## 🏢 Tenant Management
 
 ### POST /api/v1/tenants/

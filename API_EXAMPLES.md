@@ -148,6 +148,61 @@ if response.status_code == 200:
         print("No username set")
 ```
 
+### Update Profile (PUT)
+```bash
+# Update profile details (name, username, email)
+curl -X PUT "http://localhost:8000/api/v1/auth/me" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "full_name": "New Name",
+    "username": "new-username",
+    "email": "new.email@example.com"
+  }'
+
+# Change password (requires current_password and new_password)
+curl -X PUT "http://localhost:8000/api/v1/auth/me" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "current_password": "oldpass",
+    "new_password": "newpass123"
+  }'
+```
+
+**Python Example:**
+```python
+import requests
+
+headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+
+# Update profile fields
+resp = requests.put(
+    "http://localhost:8000/api/v1/auth/me",
+    headers=headers,
+    json={
+        "full_name": "New Name",
+        "username": "new-username",
+        "email": "new.email@example.com",
+    },
+)
+resp.raise_for_status()
+updated = resp.json()
+print("Updated name:", updated["full_name"])  # New Name
+
+# Change password
+pwd_resp = requests.put(
+    "http://localhost:8000/api/v1/auth/me",
+    headers=headers,
+    json={
+        "current_password": "oldpass",
+        "new_password": "newpass123",
+    },
+)
+pwd_resp.raise_for_status()
+print("Password changed successfully")
+```
+
 ### User Logout
 ```bash
 curl -X POST "http://localhost:8000/api/v1/auth/logout" \

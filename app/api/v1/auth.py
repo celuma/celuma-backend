@@ -16,6 +16,7 @@ from app.schemas.auth import (
     UserProfile,
     LoginTenantSelectionResponse,
     TenantOption,
+    UserProfileUpdate,
 )
 from datetime import datetime
 from typing import Union
@@ -166,4 +167,62 @@ def me(user: AppUser = Depends(current_user)):
         full_name=user.full_name, 
         role=user.role, 
         tenant_id=str(user.tenant_id)
+    )
+
+@router.put("/me", response_model=UserProfile)
+def update_me(
+    data: UserProfileUpdate,
+    user: AppUser = Depends(current_user),
+    session: Session = Depends(get_session),
+):
+    """Update current user profile and/or password"""
+    # Validate and update username
+    if data.username is not None and data.username != user.username:
+        existing_username = session.exec(
+            select(AppUser).where(
+                AppUser.username == data.username,
+                AppUser.tenant_id == user.tenant_id,
+                AppUser.id != user.id,
+            )
+        ).first()
+        if existing_username:
+            raise HTTPException(400, "Username already registered for this tenant")
+        user.username = data.username
+
+    # Validate and update email
+    if data.email is not None and data.email != user.email:
+        existing_email = session.exec(
+            select(AppUser).where(
+                AppUser.email == data.email,
+                AppUser.tenant_id == user.tenant_id,
+                AppUser.id != user.id,
+            )
+        ).first()
+        if existing_email:
+            raise HTTPException(400, "Email already registered for this tenant")
+        user.email = data.email
+
+    # Update full name
+    if data.full_name is not None:
+        user.full_name = data.full_name
+
+    # Change password if requested
+    if data.new_password:
+        if not data.current_password:
+            raise HTTPException(400, "Current password is required to set a new password")
+        if not verify_password(data.current_password, user.hashed_password):
+            raise HTTPException(400, "Current password is incorrect")
+        user.hashed_password = hash_password(data.new_password)
+
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    return UserProfile(
+        id=str(user.id),
+        email=user.email,
+        username=user.username,
+        full_name=user.full_name,
+        role=user.role,
+        tenant_id=str(user.tenant_id),
     )
