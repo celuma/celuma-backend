@@ -15,6 +15,82 @@ This document provides comprehensive examples of how to use the Celuma API with 
 
 ## 🔐 Authentication
 
+### Unified Registration (tenant + branch + admin)
+```bash
+curl -X POST "http://localhost:8000/api/v1/auth/register/unified" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant": {
+      "name": "Acme Labs",
+      "legal_name": "Acme Laboratories S.A. de C.V.",
+      "tax_id": "ACM010101ABC"
+    },
+    "branch": {
+      "code": "HQ",
+      "name": "Headquarters",
+      "timezone": "America/Mexico_City",
+      "address_line1": "Av. Siempre Viva 123",
+      "city": "CDMX",
+      "state": "CDMX",
+      "postal_code": "01234",
+      "country": "MX"
+    },
+    "admin_user": {
+      "email": "admin@acme.com",
+      "username": "admin",
+      "password": "Secret123!",
+      "full_name": "Admin User"
+    }
+  }'
+```
+
+**Notes:**
+- Operation is atomic; on failure nothing is created.
+- The created user has role `admin` and is linked to the created branch.
+- `branch.code` must be unique per tenant.
+
+**Python Example:**
+```python
+import requests
+
+payload = {
+    "tenant": {
+        "name": "Acme Labs",
+        "legal_name": "Acme Laboratories S.A. de C.V.",
+        "tax_id": "ACM010101ABC",
+    },
+    "branch": {
+        "code": "HQ",
+        "name": "Headquarters",
+        "timezone": "America/Mexico_City",
+        "address_line1": "Av. Siempre Viva 123",
+        "city": "CDMX",
+        "state": "CDMX",
+        "postal_code": "01234",
+        "country": "MX",
+    },
+    "admin_user": {
+        "email": "admin@acme.com",
+        "username": "admin",
+        "password": "Secret123!",
+        "full_name": "Admin User",
+    },
+}
+
+resp = requests.post(
+    "http://localhost:8000/api/v1/auth/register/unified",
+    json=payload,
+)
+resp.raise_for_status()
+data = resp.json()
+tenant_id = data["tenant_id"]
+branch_id = data["branch_id"]
+user_id = data["user_id"]
+print("Tenant:", tenant_id)
+print("Branch:", branch_id)
+print("Admin user:", user_id)
+```
+
 ### User Registration
 ```bash
 curl -X POST "http://localhost:8000/api/v1/auth/register" \
