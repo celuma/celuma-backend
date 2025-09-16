@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPBearer
 from jose import jwt, JWTError
 from sqlmodel import select, Session
@@ -73,32 +73,33 @@ def register(user_data: UserRegister, session: Session = Depends(get_session)):
         role=u.role
     )
 
-def current_user(token=Depends(scheme), session: Session = Depends(get_session)):
-    logger.info(f"🔐 Authenticating token: {token.credentials[:20]}...")
+def current_user(request: Request, token=Depends(scheme), session: Session = Depends(get_session)):
+    request_id = getattr(request.state, "request_id", "unknown")[:8]
+    logger.info(f"🔐 [{request_id}] Authenticating token: {token.credentials[:20]}...")
     
     try:
         # Check if token is blacklisted
         blacklisted = session.exec(select(BlacklistedToken).where(BlacklistedToken.token == token.credentials)).first()
         if blacklisted:
-            logger.warning(f"🚫 Token is blacklisted: {token.credentials[:20]}...")
+            logger.warning(f"🚫 [{request_id}] Token is blacklisted: {token.credentials[:20]}...")
             raise HTTPException(401, "Token has been revoked")
         
         payload = jwt.decode(token.credentials, settings.jwt_secret, algorithms=["HS256"])
         uid = payload["sub"]
-        logger.info(f"✅ Token decoded successfully, user ID: {uid}")
+        logger.info(f"✅ [{request_id}] Token decoded successfully, user ID: {uid}")
     except JWTError as e:
-        logger.error(f"❌ JWT decode error: {str(e)}")
+        logger.error(f"❌ [{request_id}] JWT decode error: {str(e)}")
         raise HTTPException(401, "Invalid token")
     
     u = session.get(AppUser, uid)
     if not u:
-        logger.error(f"❌ User not found: {uid}")
+        logger.error(f"❌ [{request_id}] User not found: {uid}")
         raise HTTPException(401, "User not found")
     if not u.is_active:
-        logger.error(f"❌ User inactive: {uid}")
+        logger.error(f"❌ [{request_id}] User inactive: {uid}")
         raise HTTPException(401, "Inactive user")
         
-    logger.info(f"🎉 Authentication successful for user: {u.email}")
+    logger.info(f"🎉 [{request_id}] Authentication successful for user: {u.email}")
     return u
 
 @router.post("/login", response_model=Union[LoginResponse, LoginTenantSelectionResponse])
@@ -207,10 +208,11 @@ def logout(token: str = Depends(scheme), session: Session = Depends(get_session)
         raise HTTPException(500, f"Logout failed: {str(e)}")
 
 @router.get("/me", response_model=UserProfile)
-def me(user: AppUser = Depends(current_user)):
+def me(request: Request, user: AppUser = Depends(current_user)):
     """Get current user profile"""
-    logger.info(f"🔍 GET /auth/me called for user ID: {user.id}")
-    logger.info(f"👤 User details: email={user.email}, username={user.username}, role={user.role}")
+    request_id = getattr(request.state, "request_id", "unknown")[:8]
+    logger.info(f"🔍 [{request_id}] GET /auth/me called for user ID: {user.id}")
+    logger.info(f"👤 [{request_id}] User details: email={user.email}, username={user.username}, role={user.role}")
     
     profile = UserProfile(
         id=str(user.id), 
@@ -221,19 +223,21 @@ def me(user: AppUser = Depends(current_user)):
         tenant_id=str(user.tenant_id)
     )
     
-    logger.info(f"📤 Returning profile: {profile.dict()}")
+    logger.info(f"📤 [{request_id}] Returning profile: {profile.dict()}")
     return profile
 
 @router.put("/me", response_model=UserProfile)
 def update_me(
+    request: Request,
     data: UserProfileUpdate,
     user: AppUser = Depends(current_user),
     session: Session = Depends(get_session),
 ):
     """Update current user profile and/or password"""
-    logger.info(f"🔄 PUT /auth/me called for user ID: {user.id}")
-    logger.info(f"📝 Update data received: {data.dict(exclude_none=True)}")
-    logger.info(f"👤 Current user: email={user.email}, username={user.username}")
+    request_id = getattr(request.state, "request_id", "unknown")[:8]
+    logger.info(f"🔄 [{request_id}] PUT /auth/me called for user ID: {user.id}")
+    logger.info(f"📝 [{request_id}] Update data received: {data.dict(exclude_none=True)}")
+    logger.info(f"👤 [{request_id}] Current user: email={user.email}, username={user.username}")
     # Validate and update username
     if data.username is not None and data.username != user.username:
         existing_username = session.exec(
@@ -285,7 +289,7 @@ def update_me(
         tenant_id=str(user.tenant_id),
     )
     
-    logger.info(f"✅ Profile updated successfully: {updated_profile.dict()}")
+    logger.info(f"✅ [{request_id}] Profile updated successfully: {updated_profile.dict()}")
     return updated_profile
 
 
