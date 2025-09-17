@@ -684,6 +684,7 @@ Response body:
 ```json
 {
   "id": "report-uuid",
+  "version_no": 2,
   "status": "DRAFT",
   "order_id": "order-uuid-here",
   "tenant_id": "tenant-uuid-here",
@@ -691,6 +692,7 @@ Response body:
   "title": "Blood Test Report",
   "diagnosis_text": "Normal blood count results",
   "published_at": null,
+  "created_by": "user-uuid-here",
   "report": {
     "tipo": "citologia_mamaria",
     "base": {},
@@ -701,49 +703,70 @@ Response body:
 }
 ```
 
-### POST /api/v1/reports/versions/
-**Create a new report version**
+### POST /api/v1/reports/{report_id}/new_version
+**Create a new version for an existing report**
 
-**Request Body:**
+Path param:
+- `report_id`: UUID of the report
+
+**Request Body (same shape as report creation):**
 ```json
 {
-  "report_id": "report-uuid-here",
-  "version_no": 1,
-  "pdf_storage_id": "storage-uuid-here",
-  "html_storage_id": "storage-uuid-here",
-  "changelog": "Initial report version",
-  "authored_by": "user-uuid-here",
-  "authored_at": "2025-08-18T12:30:00Z"
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here",
+  "order_id": "order-uuid-here",
+  "title": "Blood Test Report",
+  "diagnosis_text": "Normal blood count results",
+  "published_at": "2025-08-18T12:00:00Z",
+  "created_by": "user-uuid-here",
+  "report": { "tipo": "citologia_mamaria", "base": {}, "secciones": {}, "flags": {}, "images": [] }
 }
 ```
 
-**Notes:**
-- `html_storage_id` is optional; include it only if you have an HTML rendition.
-- `authored_by` and `authored_at` are optional; if omitted, `authored_at` defaults to server time.
+**Behavior:**
+- Increments `version_no` from the current version.
+- Marks previous `is_current` as false; new version becomes `is_current=true`.
+- If `report` is included, uploads JSON to S3 and links it to the version.
 
 **Response:**
 ```json
 {
   "id": "version-uuid",
-  "version_no": 1,
+  "version_no": 2,
   "report_id": "report-uuid-here",
   "is_current": true
 }
 ```
 
-### GET /api/v1/reports/versions/
-**List all report versions**
+### GET /api/v1/reports/{report_id}/versions
+**List versions for a specific report**
 
 **Response:**
 ```json
 [
-  {
-    "id": "version-uuid",
-    "version_no": 1,
-    "report_id": "report-uuid-here",
-    "is_current": true
-  }
+  { "id": "version-uuid-1", "version_no": 1, "report_id": "report-uuid-here", "is_current": false },
+  { "id": "version-uuid-2", "version_no": 2, "report_id": "report-uuid-here", "is_current": true }
 ]
+```
+
+### GET /api/v1/reports/{report_id}/{version_no}
+**Get details for a specific report version (same shape as detail)**
+
+**Response:**
+```json
+{
+  "id": "report-uuid",
+  "version_no": 1,
+  "status": "DRAFT",
+  "order_id": "order-uuid-here",
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here",
+  "title": "Blood Test Report",
+  "diagnosis_text": "Normal blood count results",
+  "published_at": null,
+  "created_by": "user-uuid-here",
+  "report": { "tipo": "citologia_mamaria", "base": {}, "secciones": {}, "flags": {}, "images": [] }
+}
 ```
 
 ## 💰 Billing Management
