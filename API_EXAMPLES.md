@@ -592,7 +592,7 @@ for img in images:
 
 ## 📋 Report Management
 
-### Create Report
+### Create Report (with JSON body stored in S3)
 ```bash
 curl -X POST "http://localhost:8000/api/v1/reports/" \
   -H "Content-Type: application/json" \
@@ -603,7 +603,14 @@ curl -X POST "http://localhost:8000/api/v1/reports/" \
     "title": "Blood Test Report",
     "diagnosis_text": "Normal blood count results",
     "published_at": "2025-08-18T12:00:00Z",
-    "created_by": "user-uuid-here"
+    "created_by": "user-uuid-here",
+    "report": {
+      "tipo": "citologia_mamaria",
+      "base": { "paciente": "Jane Doe" },
+      "secciones": { "interpretacion": "..." },
+      "flags": { "incluirDiagnostico": true },
+      "images": []
+    }
   }'
 ```
 
@@ -622,18 +629,20 @@ response = requests.post(
     }
 )
 
-### Create Report Version
+### Create New Report Version (JSON body uploaded to S3)
 ```bash
-curl -X POST "http://localhost:8000/api/v1/reports/versions/" \
+REPORT_ID=report-uuid-here
+curl -X POST "http://localhost:8000/api/v1/reports/$REPORT_ID/new_version" \
   -H "Content-Type: application/json" \
   -d '{
-    "report_id": "report-uuid-here",
-    "version_no": 1,
-    "pdf_storage_id": "storage-uuid-here",
-    "html_storage_id": "storage-uuid-here",
-    "changelog": "Initial report version",
-    "authored_by": "user-uuid-here",
-    "authored_at": "2025-08-18T12:30:00Z"
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here",
+    "order_id": "order-uuid-here",
+    "title": "Blood Test Report",
+    "diagnosis_text": "Normal blood count results",
+    "published_at": "2025-08-18T12:00:00Z",
+    "created_by": "user-uuid-here",
+    "report": { "tipo": "citologia_mamaria", "base": {}, "secciones": {}, "flags": {}, "images": [] }
   }'
 ```
 
@@ -663,6 +672,22 @@ if response.status_code == 200:
 ```bash
 curl http://localhost:8000/api/v1/reports/
 ```
+### Get Report Details (includes JSON body from S3 of current version)
+```bash
+curl http://localhost:8000/api/v1/reports/REPORT_UUID
+```
+Expected response contains the `report` field reconstructed from S3 for the current version.
+
+### List Versions for a Report
+```bash
+curl http://localhost:8000/api/v1/reports/REPORT_UUID/versions | jq .
+```
+
+### Get Specific Report Version
+```bash
+curl http://localhost:8000/api/v1/reports/REPORT_UUID/2 | jq .
+```
+
 
 **Python Example:**
 ```python

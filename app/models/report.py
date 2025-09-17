@@ -29,7 +29,8 @@ class ReportVersion(BaseModel, TimestampMixin, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     report_id: UUID = Field(foreign_key="report.id")
     version_no: int  # 1..N
-    pdf_storage_id: UUID = Field(foreign_key="storage_object.id")
+    pdf_storage_id: Optional[UUID] = Field(foreign_key="storage_object.id", default=None)
+    json_storage_id: Optional[UUID] = Field(foreign_key="storage_object.id", default=None)
     html_storage_id: Optional[UUID] = Field(foreign_key="storage_object.id", default=None)
     changelog: Optional[str] = Field(default=None)
     authored_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)

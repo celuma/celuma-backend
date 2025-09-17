@@ -105,4 +105,12 @@ class S3Service:
         region = settings.aws_region or "mx-central-1"
         return f"https://{self.bucket}.s3.{region}.amazonaws.com/{key}"
 
+    def download_bytes(self, key: str) -> bytes:
+        response = self._client.get_object(Bucket=self.bucket, Key=key)
+        data: bytes = response["Body"].read()
+        return data
+
+    def download_text(self, key: str, encoding: str = "utf-8") -> str:
+        return self.download_bytes(key).decode(encoding)
+
 
