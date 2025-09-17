@@ -592,7 +592,7 @@ for img in images:
 
 ## 📋 Report Management
 
-### Create Report
+### Create Report (with JSON body stored in S3)
 ```bash
 curl -X POST "http://localhost:8000/api/v1/reports/" \
   -H "Content-Type: application/json" \
@@ -603,7 +603,14 @@ curl -X POST "http://localhost:8000/api/v1/reports/" \
     "title": "Blood Test Report",
     "diagnosis_text": "Normal blood count results",
     "published_at": "2025-08-18T12:00:00Z",
-    "created_by": "user-uuid-here"
+    "created_by": "user-uuid-here",
+    "report": {
+      "tipo": "citologia_mamaria",
+      "base": { "paciente": "Jane Doe" },
+      "secciones": { "interpretacion": "..." },
+      "flags": { "incluirDiagnostico": true },
+      "images": []
+    }
   }'
 ```
 
@@ -622,14 +629,14 @@ response = requests.post(
     }
 )
 
-### Create Report Version
+### Create Report Version (PDF/HTML optional; JSON handled in create)
 ```bash
 curl -X POST "http://localhost:8000/api/v1/reports/versions/" \
   -H "Content-Type: application/json" \
   -d '{
     "report_id": "report-uuid-here",
     "version_no": 1,
-    "pdf_storage_id": "storage-uuid-here",
+    "pdf_storage_id": null,
     "html_storage_id": "storage-uuid-here",
     "changelog": "Initial report version",
     "authored_by": "user-uuid-here",
@@ -663,6 +670,12 @@ if response.status_code == 200:
 ```bash
 curl http://localhost:8000/api/v1/reports/
 ```
+### Get Report Details (includes JSON body from S3 of current version)
+```bash
+curl http://localhost:8000/api/v1/reports/REPORT_UUID
+```
+Expected response contains the `report` field reconstructed from S3 for the current version.
+
 
 **Python Example:**
 ```python

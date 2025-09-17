@@ -68,9 +68,10 @@ This document describes the complete database schema for the Celuma laboratory m
 - Supports versioning through ReportVersion
 
 #### ReportVersion
-- Versioned reports with PDF and HTML storage
+- Versioned reports with JSON (report body), PDF and HTML storage
 - Tracks authorship and changes
 - Maintains current version flags
+  - Fields: `json_storage_id` (nullable, S3 JSON body), `pdf_storage_id` (nullable), `html_storage_id` (nullable)
 
 ### 5. Storage Management
 
@@ -127,6 +128,7 @@ Sample (1) ←→ (N) SampleImage
 SampleImage (1) ←→ (N) SampleImageRendition
 
 Report (1) ←→ (N) ReportVersion
+ReportVersion (1) ←→ (1) StorageObject (JSON body)
 ReportVersion (1) ←→ (1) StorageObject (PDF)
 ReportVersion (1) ←→ (1) StorageObject (HTML)
 

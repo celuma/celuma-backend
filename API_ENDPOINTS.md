@@ -634,13 +634,21 @@ Response body:
   "title": "Blood Test Report",
   "diagnosis_text": "Normal blood count results",
   "published_at": "2025-08-18T12:00:00Z",
-  "created_by": "user-uuid-here"
+  "created_by": "user-uuid-here",
+  "report": {
+    "tipo": "citologia_mamaria",
+    "base": {},
+    "secciones": {},
+    "flags": {},
+    "images": []
+  }
 }
 ```
 
 **Notes:**
 - `created_by` is optional and must be a UUID (user id) if provided.
 - `published_at` is optional ISO 8601 datetime.
+- If `report` is provided, the JSON body is stored in S3 and an initial version (version_no=1) is created and marked as current (`is_current=true`).
 
 **Response:**
 ```json
@@ -682,7 +690,14 @@ Response body:
   "branch_id": "branch-uuid-here",
   "title": "Blood Test Report",
   "diagnosis_text": "Normal blood count results",
-  "published_at": null
+  "published_at": null,
+  "report": {
+    "tipo": "citologia_mamaria",
+    "base": {},
+    "secciones": {},
+    "flags": {},
+    "images": []
+  }
 }
 ```
 
