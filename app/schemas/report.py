@@ -24,6 +24,7 @@ class ReportResponse(BaseModel):
 class ReportDetailResponse(BaseModel):
     """Schema for detailed report response"""
     id: str
+    version_no: int | None = None
     status: str
     order_id: str
     tenant_id: str
@@ -31,6 +32,7 @@ class ReportDetailResponse(BaseModel):
     title: Optional[str] = None
     diagnosis_text: Optional[str] = None
     published_at: Optional[datetime] = None
+    created_by: Optional[str] = None
     report: Optional[Dict[str, Any]] = None  # reconstructed JSON from S3
 
 class ReportVersionCreate(BaseModel):

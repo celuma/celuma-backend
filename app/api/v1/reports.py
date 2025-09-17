@@ -106,6 +106,73 @@ def create_report(report_data: ReportCreate, session: Session = Depends(get_sess
         branch_id=str(report.branch_id)
     )
 
+
+@router.post("/{report_id}/new_version", response_model=ReportVersionResponse)
+def create_report_new_version(report_id: str, report_data: ReportCreate, session: Session = Depends(get_session)):
+    """Create a new report version for an existing report.
+
+    - Increments version_no based on current version
+    - Marks old current version as not current
+    - Uploads provided JSON body to S3 and links it
+    """
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+
+    # Determine next version number
+    current_version = session.exec(
+        select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
+    ).first()
+    next_version_no = (current_version.version_no + 1) if current_version else 1
+
+    json_storage_id = None
+    if report_data.report is not None:
+        s3 = S3Service()
+        key = f"reports/{report.tenant_id}/{report.branch_id}/{report.id}/versions/{next_version_no}/report.json"
+        data_bytes = json.dumps(report_data.report, ensure_ascii=False).encode("utf-8")
+        info = s3.upload_bytes(data_bytes, key=key, content_type="application/json")
+
+        storage = StorageObject(
+            provider="aws",
+            region=s3.region,
+            bucket=info.bucket,
+            object_key=info.key,
+            version_id=info.version_id,
+            etag=info.etag,
+            content_type="application/json",
+            size_bytes=info.size_bytes,
+            created_by=report_data.created_by,
+        )
+        session.add(storage)
+        session.flush()
+        json_storage_id = storage.id
+
+    # Mark previous current version as not current
+    if current_version:
+        current_version.is_current = False
+        session.add(current_version)
+
+    # Create new version and set is_current
+    new_version = ReportVersion(
+        report_id=report.id,
+        version_no=next_version_no,
+        json_storage_id=json_storage_id,
+        pdf_storage_id=None,
+        html_storage_id=None,
+        authored_by=report_data.created_by,
+        is_current=True,
+    )
+    session.add(new_version)
+    session.commit()
+    session.refresh(new_version)
+
+    return ReportVersionResponse(
+        id=str(new_version.id),
+        version_no=new_version.version_no,
+        report_id=str(new_version.report_id),
+        is_current=new_version.is_current,
+    )
+
 @router.get("/{report_id}", response_model=ReportDetailResponse)
 def get_report(report_id: str, session: Session = Depends(get_session)):
     """Get report details"""
@@ -131,6 +198,7 @@ def get_report(report_id: str, session: Session = Depends(get_session)):
 
     return ReportDetailResponse(
         id=str(report.id),
+        version_no=(current_version.version_no if current_version else None),
         status=report.status,
         order_id=str(report.order_id),
         tenant_id=str(report.tenant_id),
@@ -138,6 +206,7 @@ def get_report(report_id: str, session: Session = Depends(get_session)):
         title=report.title,
         diagnosis_text=report.diagnosis_text,
         published_at=report.published_at,
+        created_by=(str(report.created_by) if report.created_by else None),
         report=report_json,
     )
 
