@@ -210,10 +210,13 @@ def get_report(report_id: str, session: Session = Depends(get_session)):
         report=report_json,
     )
 
-@router.get("/versions/")
-def list_report_versions(session: Session = Depends(get_session)):
-    """List all report versions"""
-    versions = session.exec(select(ReportVersion)).all()
+@router.get("/{report_id}/versions")
+def list_report_versions(report_id: str, session: Session = Depends(get_session)):
+    """List all versions for a report"""
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    versions = session.exec(select(ReportVersion).where(ReportVersion.report_id == report.id)).all()
     return [{
         "id": str(v.id),
         "version_no": v.version_no,
@@ -221,42 +224,43 @@ def list_report_versions(session: Session = Depends(get_session)):
         "is_current": v.is_current
     } for v in versions]
 
-@router.post("/versions/", response_model=ReportVersionResponse)
-def create_report_version(version_data: ReportVersionCreate, session: Session = Depends(get_session)):
-    """Create a new report version"""
-    # Verify report exists
-    report = session.get(Report, version_data.report_id)
+@router.get("/{report_id}/{version_no}", response_model=ReportDetailResponse)
+def get_report_version(report_id: str, version_no: int, session: Session = Depends(get_session)):
+    """Get specific report version details (same shape as current detail)."""
+    report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
-    
-    # Check if version number already exists for this report
-    existing_version = session.exec(
+
+    version = session.exec(
         select(ReportVersion).where(
-            ReportVersion.report_id == version_data.report_id,
-            ReportVersion.version_no == version_data.version_no
+            ReportVersion.report_id == report.id,
+            ReportVersion.version_no == version_no,
         )
     ).first()
-    
-    if existing_version:
-        raise HTTPException(400, "Version number already exists for this report")
-    
-    version = ReportVersion(
-        report_id=version_data.report_id,
-        version_no=version_data.version_no,
-        pdf_storage_id=version_data.pdf_storage_id,
-        html_storage_id=version_data.html_storage_id,
-        changelog=version_data.changelog,
-        authored_by=version_data.authored_by,
-        authored_at=version_data.authored_at
-    )
-    
-    session.add(version)
-    session.commit()
-    session.refresh(version)
-    
-    return ReportVersionResponse(
-        id=str(version.id),
+    if not version:
+        raise HTTPException(404, "Report version not found")
+
+    report_json = None
+    if version.json_storage_id:
+        storage = session.get(StorageObject, version.json_storage_id)
+        if storage:
+            s3 = S3Service()
+            try:
+                text = s3.download_text(storage.object_key)
+                report_json = json.loads(text)
+            except Exception:
+                report_json = None
+
+    return ReportDetailResponse(
+        id=str(report.id),
         version_no=version.version_no,
-        report_id=str(version.report_id),
-        is_current=version.is_current
+        status=report.status,
+        order_id=str(report.order_id),
+        tenant_id=str(report.tenant_id),
+        branch_id=str(report.branch_id),
+        title=report.title,
+        diagnosis_text=report.diagnosis_text,
+        published_at=report.published_at,
+        created_by=(str(report.created_by) if report.created_by else None),
+        report=report_json,
     )
