@@ -28,6 +28,7 @@ class LoginResponse(BaseModel):
     """Schema for login response"""
     access_token: str
     token_type: str = "bearer"
+    tenant_id: str
 
 class TenantOption(BaseModel):
     """Schema representing a tenant choice for login"""

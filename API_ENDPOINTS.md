@@ -115,12 +115,14 @@ Response body:
 - If the user is associated with exactly one tenant, authentication returns a token.
 - If the user matches multiple tenants, the response will request tenant selection.
 - To finalize login for a specific tenant, send the same request including `tenant_id`.
+- All successful login responses include `tenant_id`.
 
 **Response (single-tenant login):**
 ```json
 {
   "access_token": "jwt-token-here",
-  "token_type": "bearer"
+  "token_type": "bearer",
+  "tenant_id": "tenant-uuid-here"
 }
 ```
 
@@ -148,7 +150,8 @@ Response body:
 ```json
 {
   "access_token": "jwt-token-here",
-  "token_type": "bearer"
+  "token_type": "bearer",
+  "tenant_id": "tenant-uuid-here"
 }
 ```
 

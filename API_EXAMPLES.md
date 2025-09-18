@@ -156,6 +156,7 @@ curl -X POST "http://localhost:8000/api/v1/auth/login" \
 - `username_or_email` can be a username or an email.
 - If multiple tenants match, the API returns `need_tenant_selection` with `options`.
 - Finalize by including `tenant_id` in the same endpoint.
+- Successful login responses include `tenant_id`.
 
 ```bash
 # Finalize login selecting a tenant
@@ -197,7 +198,10 @@ if data.get("need_tenant_selection"):
     data = finalize_resp.json()
 
 access_token = data["access_token"]
+tenant_id = data.get("tenant_id")
 print(f"Login successful, token: {access_token}")
+if tenant_id:
+    print(f"Tenant: {tenant_id}")
 ```
 
 ### Using Authentication Token
