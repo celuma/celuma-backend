@@ -224,6 +224,39 @@ def list_report_versions(report_id: str, session: Session = Depends(get_session)
         "is_current": v.is_current
     } for v in versions]
 
+@router.get("/{report_id}/pdf")
+def get_pdf_of_latest_version(report_id: str, session: Session = Depends(get_session)):
+    """Return a presigned URL to download the PDF for the newest report version."""
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+
+    latest_version = session.exec(
+        select(ReportVersion)
+        .where(ReportVersion.report_id == report.id)
+        .order_by(ReportVersion.version_no.desc())
+    ).first()
+    if not latest_version:
+        raise HTTPException(404, "No versions found for this report")
+
+    if not latest_version.pdf_storage_id:
+        raise HTTPException(404, "PDF not found for the latest version")
+
+    storage = session.get(StorageObject, latest_version.pdf_storage_id)
+    if not storage:
+        raise HTTPException(404, "Storage object not found")
+
+    s3 = S3Service()
+    url = s3.generate_presigned_url(storage.object_key)
+    return {
+        "version_id": str(latest_version.id),
+        "version_no": latest_version.version_no,
+        "report_id": str(latest_version.report_id),
+        "pdf_storage_id": str(storage.id),
+        "pdf_key": storage.object_key,
+        "pdf_url": url,
+    }
+
 @router.get("/{report_id}/{version_no}", response_model=ReportDetailResponse)
 def get_report_version(report_id: str, version_no: int, session: Session = Depends(get_session)):
     """Get specific report version details (same shape as current detail)."""
@@ -402,4 +435,73 @@ def upload_pdf_to_latest_version(
         "pdf_storage_id": str(storage.id),
         "pdf_key": info.key,
         "pdf_url": s3.object_public_url(info.key),
+    }
+
+
+@router.get("/{report_id}/versions/{version_no}/pdf")
+def get_pdf_of_specific_version(report_id: str, version_no: int, session: Session = Depends(get_session)):
+    """Return a presigned URL to download the PDF for a specific report version."""
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+
+    version = session.exec(
+        select(ReportVersion).where(
+            ReportVersion.report_id == report.id,
+            ReportVersion.version_no == version_no,
+        )
+    ).first()
+    if not version:
+        raise HTTPException(404, "Report version not found")
+
+    if not version.pdf_storage_id:
+        raise HTTPException(404, "PDF not found for this version")
+
+    storage = session.get(StorageObject, version.pdf_storage_id)
+    if not storage:
+        raise HTTPException(404, "Storage object not found")
+
+    s3 = S3Service()
+    url = s3.generate_presigned_url(storage.object_key)
+    return {
+        "version_id": str(version.id),
+        "version_no": version.version_no,
+        "report_id": str(version.report_id),
+        "pdf_storage_id": str(storage.id),
+        "pdf_key": storage.object_key,
+        "pdf_url": url,
+    }
+
+
+@router.get("/{report_id}/pdf")
+def get_pdf_of_latest_version(report_id: str, session: Session = Depends(get_session)):
+    """Return a presigned URL to download the PDF for the newest report version."""
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+
+    latest_version = session.exec(
+        select(ReportVersion)
+        .where(ReportVersion.report_id == report.id)
+        .order_by(ReportVersion.version_no.desc())
+    ).first()
+    if not latest_version:
+        raise HTTPException(404, "No versions found for this report")
+
+    if not latest_version.pdf_storage_id:
+        raise HTTPException(404, "PDF not found for the latest version")
+
+    storage = session.get(StorageObject, latest_version.pdf_storage_id)
+    if not storage:
+        raise HTTPException(404, "Storage object not found")
+
+    s3 = S3Service()
+    url = s3.generate_presigned_url(storage.object_key)
+    return {
+        "version_id": str(latest_version.id),
+        "version_no": latest_version.version_no,
+        "report_id": str(latest_version.report_id),
+        "pdf_storage_id": str(storage.id),
+        "pdf_key": storage.object_key,
+        "pdf_url": url,
     }

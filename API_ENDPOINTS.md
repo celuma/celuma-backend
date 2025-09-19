@@ -800,6 +800,24 @@ Path param:
 - 400 if uploaded file is not a PDF or is empty
 - 404 if report or version is not found
 
+### GET /api/v1/reports/{report_id}/versions/{version_no}/pdf
+**Get a presigned URL for the PDF of a specific report version**
+
+**Response:**
+```json
+{
+  "version_id": "version-uuid",
+  "version_no": 2,
+  "report_id": "report-uuid",
+  "pdf_storage_id": "storage-uuid",
+  "pdf_key": "reports/<tenant>/<branch>/<report>/versions/2/report.pdf",
+  "pdf_url": "https://...presigned-url..."
+}
+```
+
+**Errors:**
+- 404 if report, version, or PDF is not found
+
 ### POST /api/v1/reports/{report_id}/pdf
 **Upload a PDF file to the newest version of a report**
 
@@ -827,6 +845,24 @@ Path param:
 **Errors:**
 - 400 if uploaded file is not a PDF or is empty
 - 404 if report not found or it has no versions yet
+
+### GET /api/v1/reports/{report_id}/pdf
+**Get a presigned URL for the PDF of the newest report version**
+
+**Response:**
+```json
+{
+  "version_id": "version-uuid",
+  "version_no": 3,
+  "report_id": "report-uuid",
+  "pdf_storage_id": "storage-uuid",
+  "pdf_key": "reports/<tenant>/<branch>/<report>/versions/3/report.pdf",
+  "pdf_url": "https://...presigned-url..."
+}
+```
+
+**Errors:**
+- 404 if report not found, report has no versions, or the latest version has no PDF
 
 ## 💰 Billing Management
 

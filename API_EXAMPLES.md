@@ -746,6 +746,42 @@ resp.raise_for_status()
 print(resp.json())
 ```
 
+### Get PDF (presigned URL) for Specific Version
+```bash
+REPORT_ID=report-uuid-here
+VERSION_NO=2
+curl "http://localhost:8000/api/v1/reports/$REPORT_ID/versions/$VERSION_NO/pdf" | jq .
+```
+
+**Python Example:**
+```python
+import requests
+
+report_id = "REPORT_UUID"
+version_no = 2
+resp = requests.get(f"http://localhost:8000/api/v1/reports/{report_id}/versions/{version_no}/pdf")
+resp.raise_for_status()
+data = resp.json()
+print("Presigned URL:", data["pdf_url"])  # Use this URL to download the PDF
+```
+
+### Get PDF (presigned URL) for Newest Version
+```bash
+REPORT_ID=report-uuid-here
+curl "http://localhost:8000/api/v1/reports/$REPORT_ID/pdf" | jq .
+```
+
+**Python Example:**
+```python
+import requests
+
+report_id = "REPORT_UUID"
+resp = requests.get(f"http://localhost:8000/api/v1/reports/{report_id}/pdf")
+resp.raise_for_status()
+data = resp.json()
+print("Presigned URL:", data["pdf_url"])  # Use this URL to download the PDF
+```
+
 
 **Python Example:**
 ```python
