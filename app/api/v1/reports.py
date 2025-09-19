@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlmodel import select, Session
 from app.core.db import get_session
 from app.models.report import Report, ReportVersion
@@ -264,3 +264,142 @@ def get_report_version(report_id: str, version_no: int, session: Session = Depen
         created_by=(str(report.created_by) if report.created_by else None),
         report=report_json,
     )
+
+
+@router.post("/{report_id}/versions/{version_no}/pdf")
+def upload_pdf_to_specific_version(
+    report_id: str,
+    version_no: int,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+):
+    """Upload a PDF to a specific report version.
+
+    - Validates report and version exist
+    - Uploads PDF to S3 under a deterministic key
+    - Creates a StorageObject and links it to ReportVersion.pdf_storage_id
+    """
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+
+    version = session.exec(
+        select(ReportVersion).where(
+            ReportVersion.report_id == report.id,
+            ReportVersion.version_no == version_no,
+        )
+    ).first()
+    if not version:
+        raise HTTPException(404, "Report version not found")
+
+    # Basic content-type validation
+    content_type = (file.content_type or "").lower()
+    if "pdf" not in content_type:
+        raise HTTPException(400, "Uploaded file must be a PDF")
+
+    file_bytes = file.file.read()
+    if not file_bytes:
+        raise HTTPException(400, "Uploaded file is empty")
+
+    s3 = S3Service()
+    key = (
+        f"reports/{report.tenant_id}/{report.branch_id}/{report.id}/"
+        f"versions/{version.version_no}/report.pdf"
+    )
+    info = s3.upload_bytes(file_bytes, key=key, content_type="application/pdf")
+
+    storage = StorageObject(
+        provider="aws",
+        region=s3.region,
+        bucket=info.bucket,
+        object_key=info.key,
+        version_id=info.version_id,
+        etag=info.etag,
+        content_type="application/pdf",
+        size_bytes=info.size_bytes,
+        created_by=report.created_by,
+    )
+    session.add(storage)
+    session.flush()
+
+    version.pdf_storage_id = storage.id
+    session.add(version)
+    session.commit()
+    session.refresh(version)
+
+    return {
+        "version_id": str(version.id),
+        "version_no": version.version_no,
+        "report_id": str(version.report_id),
+        "pdf_storage_id": str(storage.id),
+        "pdf_key": info.key,
+        "pdf_url": s3.object_public_url(info.key),
+    }
+
+
+@router.post("/{report_id}/pdf")
+def upload_pdf_to_latest_version(
+    report_id: str,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+):
+    """Upload a PDF to the newest version of a report.
+
+    - Selects the version with the highest version_no
+    - If the report has no versions, returns 404
+    - Uploads PDF, creates StorageObject, and updates pdf_storage_id
+    """
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+
+    latest_version = session.exec(
+        select(ReportVersion)
+        .where(ReportVersion.report_id == report.id)
+        .order_by(ReportVersion.version_no.desc())
+    ).first()
+    if not latest_version:
+        raise HTTPException(404, "No versions found for this report")
+
+    content_type = (file.content_type or "").lower()
+    if "pdf" not in content_type:
+        raise HTTPException(400, "Uploaded file must be a PDF")
+
+    file_bytes = file.file.read()
+    if not file_bytes:
+        raise HTTPException(400, "Uploaded file is empty")
+
+    s3 = S3Service()
+    key = (
+        f"reports/{report.tenant_id}/{report.branch_id}/{report.id}/"
+        f"versions/{latest_version.version_no}/report.pdf"
+    )
+    info = s3.upload_bytes(file_bytes, key=key, content_type="application/pdf")
+
+    storage = StorageObject(
+        provider="aws",
+        region=s3.region,
+        bucket=info.bucket,
+        object_key=info.key,
+        version_id=info.version_id,
+        etag=info.etag,
+        content_type="application/pdf",
+        size_bytes=info.size_bytes,
+        created_by=report.created_by,
+    )
+    session.add(storage)
+    session.flush()
+
+    latest_version.pdf_storage_id = storage.id
+    session.add(latest_version)
+    session.commit()
+    session.refresh(latest_version)
+
+    return {
+        "version_id": str(latest_version.id),
+        "version_no": latest_version.version_no,
+        "report_id": str(latest_version.report_id),
+        "pdf_storage_id": str(storage.id),
+        "pdf_key": info.key,
+        "pdf_url": s3.object_public_url(info.key),
+    }
