@@ -692,6 +692,96 @@ curl http://localhost:8000/api/v1/reports/REPORT_UUID/versions | jq .
 curl http://localhost:8000/api/v1/reports/REPORT_UUID/2 | jq .
 ```
 
+### Upload Report PDF to Specific Version (multipart/form-data)
+```bash
+REPORT_ID=report-uuid-here
+VERSION_NO=2
+PDF_PATH=/path/to/report.pdf
+curl -X POST "http://localhost:8000/api/v1/reports/$REPORT_ID/versions/$VERSION_NO/pdf" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -F "file=@${PDF_PATH};type=application/pdf"
+```
+
+**Python Example:**
+```python
+import requests
+
+report_id = "REPORT_UUID"
+version_no = 2
+pdf_path = "/path/to/report.pdf"
+
+with open(pdf_path, "rb") as f:
+    resp = requests.post(
+        f"http://localhost:8000/api/v1/reports/{report_id}/versions/{version_no}/pdf",
+        files={"file": (pdf_path.split("/")[-1], f, "application/pdf")},
+    )
+
+resp.raise_for_status()
+print(resp.json())
+```
+
+### Upload Report PDF to Newest Version (multipart/form-data)
+```bash
+REPORT_ID=report-uuid-here
+PDF_PATH=/path/to/report.pdf
+curl -X POST "http://localhost:8000/api/v1/reports/$REPORT_ID/pdf" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -F "file=@${PDF_PATH};type=application/pdf"
+```
+
+**Python Example:**
+```python
+import requests
+
+report_id = "REPORT_UUID"
+pdf_path = "/path/to/report.pdf"
+
+with open(pdf_path, "rb") as f:
+    resp = requests.post(
+        f"http://localhost:8000/api/v1/reports/{report_id}/pdf",
+        files={"file": (pdf_path.split("/")[-1], f, "application/pdf")},
+    )
+
+resp.raise_for_status()
+print(resp.json())
+```
+
+### Get PDF (presigned URL) for Specific Version
+```bash
+REPORT_ID=report-uuid-here
+VERSION_NO=2
+curl "http://localhost:8000/api/v1/reports/$REPORT_ID/versions/$VERSION_NO/pdf" | jq .
+```
+
+**Python Example:**
+```python
+import requests
+
+report_id = "REPORT_UUID"
+version_no = 2
+resp = requests.get(f"http://localhost:8000/api/v1/reports/{report_id}/versions/{version_no}/pdf")
+resp.raise_for_status()
+data = resp.json()
+print("Presigned URL:", data["pdf_url"])  # Use this URL to download the PDF
+```
+
+### Get PDF (presigned URL) for Newest Version
+```bash
+REPORT_ID=report-uuid-here
+curl "http://localhost:8000/api/v1/reports/$REPORT_ID/pdf" | jq .
+```
+
+**Python Example:**
+```python
+import requests
+
+report_id = "REPORT_UUID"
+resp = requests.get(f"http://localhost:8000/api/v1/reports/{report_id}/pdf")
+resp.raise_for_status()
+data = resp.json()
+print("Presigned URL:", data["pdf_url"])  # Use this URL to download the PDF
+```
+
 
 **Python Example:**
 ```python

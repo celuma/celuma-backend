@@ -772,6 +772,98 @@ Path param:
 }
 ```
 
+### POST /api/v1/reports/{report_id}/versions/{version_no}/pdf
+**Upload a PDF file to a specific report version**
+
+**Request:**
+- Content-Type: `multipart/form-data`
+- Body: field `file` with the PDF file
+
+**Behavior:**
+- Validates that the report and version exist
+- Uploads the PDF to S3 under a deterministic key
+- Creates a `storage_object` record and assigns `pdf_storage_id` in the target version
+
+**Response:**
+```json
+{
+  "version_id": "version-uuid",
+  "version_no": 2,
+  "report_id": "report-uuid",
+  "pdf_storage_id": "storage-uuid",
+  "pdf_key": "reports/<tenant>/<branch>/<report>/versions/2/report.pdf",
+  "pdf_url": "https://bucket.s3.region.amazonaws.com/reports/.../report.pdf"
+}
+```
+
+**Errors:**
+- 400 if uploaded file is not a PDF or is empty
+- 404 if report or version is not found
+
+### GET /api/v1/reports/{report_id}/versions/{version_no}/pdf
+**Get a presigned URL for the PDF of a specific report version**
+
+**Response:**
+```json
+{
+  "version_id": "version-uuid",
+  "version_no": 2,
+  "report_id": "report-uuid",
+  "pdf_storage_id": "storage-uuid",
+  "pdf_key": "reports/<tenant>/<branch>/<report>/versions/2/report.pdf",
+  "pdf_url": "https://...presigned-url..."
+}
+```
+
+**Errors:**
+- 404 if report, version, or PDF is not found
+
+### POST /api/v1/reports/{report_id}/pdf
+**Upload a PDF file to the newest version of a report**
+
+**Request:**
+- Content-Type: `multipart/form-data`
+- Body: field `file` with the PDF file
+
+**Behavior:**
+- Selects the newest version by highest `version_no`
+- If no versions exist, returns 404
+- Uploads the PDF to S3 and updates `pdf_storage_id` on that version
+
+**Response:**
+```json
+{
+  "version_id": "version-uuid",
+  "version_no": 3,
+  "report_id": "report-uuid",
+  "pdf_storage_id": "storage-uuid",
+  "pdf_key": "reports/<tenant>/<branch>/<report>/versions/3/report.pdf",
+  "pdf_url": "https://bucket.s3.region.amazonaws.com/reports/.../report.pdf"
+}
+```
+
+**Errors:**
+- 400 if uploaded file is not a PDF or is empty
+- 404 if report not found or it has no versions yet
+
+### GET /api/v1/reports/{report_id}/pdf
+**Get a presigned URL for the PDF of the newest report version**
+
+**Response:**
+```json
+{
+  "version_id": "version-uuid",
+  "version_no": 3,
+  "report_id": "report-uuid",
+  "pdf_storage_id": "storage-uuid",
+  "pdf_key": "reports/<tenant>/<branch>/<report>/versions/3/report.pdf",
+  "pdf_url": "https://...presigned-url..."
+}
+```
+
+**Errors:**
+- 404 if report not found, report has no versions, or the latest version has no PDF
+
 ## 💰 Billing Management
 
 ### POST /api/v1/billing/invoices/
@@ -1023,4 +1115,4 @@ response = requests.post(
 
 ---
 
-**Note: All POST endpoints use JSON request bodies for optimal data handling, validation, and consistent API design, except the image upload endpoint which uses multipart/form-data.**
+**Note: All POST endpoints use JSON request bodies for optimal data handling, validation, and consistent API design, except the image upload endpoint and the report PDF upload endpoints which use multipart/form-data.**
