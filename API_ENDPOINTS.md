@@ -422,18 +422,24 @@ Response body:
 ```
 
 ### GET /api/v1/patients/
-**List all patients**
+**List all patients (full profile)**
+
+Returns a list of full patient profiles (`PatientFullResponse`).
 
 **Response:**
 ```json
 [
   {
     "id": "patient-uuid",
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here",
     "patient_code": "P001",
     "first_name": "John",
     "last_name": "Doe",
-    "tenant_id": "tenant-uuid-here",
-    "branch_id": "branch-uuid-here"
+    "dob": "1990-01-01",
+    "sex": "M",
+    "phone": "555-1234",
+    "email": "john.doe@example.com"
   }
 ]
 ```
@@ -491,20 +497,29 @@ Response body:
 ```
 
 ### GET /api/v1/laboratory/orders/
-**List all laboratory orders**
+**List all laboratory orders (enriched)**
+
+Returns `orders` array with enriched `branch` and `patient` objects and summary fields.
 
 **Response:**
 ```json
-[
-  {
-    "id": "order-uuid",
-    "order_code": "ORD001",
-    "status": "RECEIVED",
-    "patient_id": "patient-uuid-here",
-    "tenant_id": "tenant-uuid-here",
-    "branch_id": "branch-uuid-here"
-  }
-]
+{
+  "orders": [
+    {
+      "id": "order-uuid",
+      "order_code": "ORD001",
+      "status": "RECEIVED",
+      "tenant_id": "tenant-uuid",
+      "branch": { "id": "branch-uuid", "name": "Main Branch", "code": "MAIN" },
+      "patient": { "id": "patient-uuid", "full_name": "John Doe", "patient_code": "P001" },
+      "requested_by": "Dr. Smith",
+      "notes": "...",
+      "created_at": "2025-08-18T10:00:00Z",
+      "sample_count": 2,
+      "has_report": true
+    }
+  ]
+}
 ```
 
 ### GET /api/v1/laboratory/orders/{order_id}
@@ -527,6 +542,218 @@ Response body:
 
 ### POST /api/v1/laboratory/samples/
 **Create a new sample**
+### POST /api/v1/laboratory/orders/unified
+**Create a laboratory order and multiple samples in one operation**
+
+**Request Body:**
+```json
+{
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here",
+  "patient_id": "patient-uuid-here",
+  "order_code": "ORD001",
+  "requested_by": "Dr. Smith",
+  "notes": "Complete blood count requested",
+  "created_by": "user-uuid-here",
+  "samples": [
+    {
+      "sample_code": "SAMP001",
+      "type": "SANGRE",
+      "notes": "",
+      "collected_at": "2025-08-18T10:00:00Z",
+      "received_at": "2025-08-18T11:00:00Z"
+    },
+    {
+      "sample_code": "SAMP002",
+      "type": "TEJIDO"
+    }
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "order": {
+    "id": "order-uuid",
+    "order_code": "ORD001",
+    "status": "RECEIVED",
+    "patient_id": "patient-uuid-here",
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here"
+  },
+  "samples": [
+    {
+      "id": "sample-uuid-1",
+      "sample_code": "SAMP001",
+      "type": "SANGRE",
+      "state": "RECEIVED",
+      "order_id": "order-uuid",
+      "tenant_id": "tenant-uuid-here",
+      "branch_id": "branch-uuid-here"
+    },
+    {
+      "id": "sample-uuid-2",
+      "sample_code": "SAMP002",
+      "type": "TEJIDO",
+      "state": "RECEIVED",
+      "order_id": "order-uuid",
+      "tenant_id": "tenant-uuid-here",
+      "branch_id": "branch-uuid-here"
+    }
+  ]
+}
+```
+
+**Errors:**
+- 400 if `order_code` already exists for the branch, a `sample_code` is duplicated in the request, or already exists in the order
+- 404 if tenant, branch, or patient not found
+
+---
+
+### GET /api/v1/laboratory/orders/{order_id}/full
+**Get complete order details including patient (full) and samples**
+
+**Response:**
+```json
+{
+  "order": {
+    "id": "order-uuid",
+    "order_code": "ORD001",
+    "status": "RECEIVED",
+    "patient_id": "patient-uuid",
+    "tenant_id": "tenant-uuid",
+    "branch_id": "branch-uuid",
+    "requested_by": "Dr. Smith",
+    "notes": "...",
+    "billed_lock": false
+  },
+  "patient": {
+    "id": "patient-uuid",
+    "tenant_id": "tenant-uuid",
+    "branch_id": "branch-uuid",
+    "patient_code": "P001",
+    "first_name": "John",
+    "last_name": "Doe",
+    "dob": "1990-01-01",
+    "sex": "M",
+    "phone": "555-1234",
+    "email": "john.doe@example.com"
+  },
+  "samples": [
+    {
+      "id": "sample-uuid",
+      "sample_code": "SAMP001",
+      "type": "SANGRE",
+      "state": "RECEIVED",
+      "order_id": "order-uuid",
+      "tenant_id": "tenant-uuid",
+      "branch_id": "branch-uuid"
+    }
+  ]
+}
+```
+
+**Errors:**
+- 404 if order or patient is not found
+
+### GET /api/v1/laboratory/patients/{patient_id}/orders
+**List all orders for a given patient (summary) and return patient (full)**
+
+**Response:**
+```json
+{
+  "patient": {
+    "id": "patient-uuid",
+    "tenant_id": "tenant-uuid",
+    "branch_id": "branch-uuid",
+    "patient_code": "P001",
+    "first_name": "John",
+    "last_name": "Doe",
+    "dob": "1990-01-01",
+    "sex": "M",
+    "phone": "555-1234",
+    "email": "john.doe@example.com"
+  },
+  "orders": [
+    {
+      "id": "order-uuid",
+      "order_code": "ORD001",
+      "status": "RECEIVED",
+      "tenant_id": "tenant-uuid",
+      "branch_id": "branch-uuid",
+      "patient_id": "patient-uuid",
+      "requested_by": "Dr. Smith",
+      "notes": "...",
+      "created_at": "2025-08-18T10:00:00Z",
+      "sample_count": 2,
+      "has_report": true
+    }
+  ]
+}
+```
+
+**Errors:**
+- 404 if patient not found
+
+### GET /api/v1/laboratory/patients/{patient_id}/cases
+**List complete cases for a given patient (order + samples + report meta) and return patient (full)**
+
+**Response:**
+```json
+{
+  "patient": {
+    "id": "patient-uuid",
+    "tenant_id": "tenant-uuid",
+    "branch_id": "branch-uuid",
+    "patient_code": "P001",
+    "first_name": "John",
+    "last_name": "Doe",
+    "dob": "1990-01-01",
+    "sex": "M",
+    "phone": "555-1234",
+    "email": "john.doe@example.com"
+  },
+  "patient_id": "patient-uuid",
+  "cases": [
+    {
+      "order": {
+        "id": "order-uuid",
+        "order_code": "ORD001",
+        "status": "RECEIVED",
+        "patient_id": "patient-uuid",
+        "tenant_id": "tenant-uuid",
+        "branch_id": "branch-uuid",
+        "requested_by": "Dr. Smith",
+        "notes": "...",
+        "billed_lock": false
+      },
+      "samples": [
+        {
+          "id": "sample-uuid",
+          "sample_code": "SAMP001",
+          "type": "SANGRE",
+          "state": "RECEIVED",
+          "order_id": "order-uuid",
+          "tenant_id": "tenant-uuid",
+          "branch_id": "branch-uuid"
+        }
+      ],
+      "report": {
+        "id": "report-uuid",
+        "status": "DRAFT",
+        "title": "Blood Test Report",
+        "published_at": null,
+        "version_no": 2,
+        "has_pdf": true
+      }
+    }
+  ]
+}
+```
+
+**Errors:**
+- 404 if patient not found
 
 **Request Body:**
 ```json
@@ -556,21 +783,56 @@ Response body:
 ```
 
 ### GET /api/v1/laboratory/samples/
-**List all samples**
+**List all samples (enriched)**
+
+Returns `samples` array where `branch` and `order` are objects. The `order` object now includes `requested_by` and a `patient` object. `tenant_id` remains an id string.
 
 **Response:**
 ```json
-[
-  {
-    "id": "sample-uuid",
-    "sample_code": "SAMP001",
-    "type": "SANGRE",
-    "state": "RECEIVED",
-    "order_id": "order-uuid-here",
-    "tenant_id": "tenant-uuid-here",
-    "branch_id": "branch-uuid-here"
-  }
-]
+{
+  "samples": [
+    {
+      "id": "sample-uuid",
+      "sample_code": "SAMP001",
+      "type": "SANGRE",
+      "state": "RECEIVED",
+      "tenant_id": "tenant-uuid",
+      "branch": { "id": "branch-uuid", "name": "Main Branch", "code": "MAIN" },
+      "order": {
+        "id": "order-uuid",
+        "order_code": "ORD001",
+        "status": "RECEIVED",
+        "requested_by": "Juan Carlos bodoque",
+        "patient": {
+          "id": "d595498b-621d-4edd-9a5d-aacd4e26cf05",
+          "full_name": "Rafael Magaña",
+          "patient_code": "Rima2510"
+        }
+      }
+    }
+  ]
+}
+```
+
+### GET /api/v1/laboratory/samples/{sample_id}
+**Get sample detail (enriched)**
+
+**Response:**
+```json
+{
+  "id": "sample-uuid",
+  "sample_code": "SAMP001",
+  "type": "SANGRE",
+  "state": "RECEIVED",
+  "collected_at": "2025-08-18T10:00:00Z",
+  "received_at": "2025-08-18T11:00:00Z",
+  "notes": "Blood sample",
+  "tenant_id": "tenant-uuid",
+  "branch": { "id": "branch-uuid", "name": "Main Branch", "code": "MAIN" },
+  "order": { "id": "order-uuid", "order_code": "ORD001", "status": "RECEIVED" },
+  
+  "patient": { "id": "patient-uuid", "full_name": "John Doe", "patient_code": "P001" }
+}
 ```
 
 ### POST /api/v1/laboratory/samples/{sample_id}/images
@@ -579,6 +841,12 @@ Response body:
 **Request:**
 - Content-Type: `multipart/form-data`
 - Body: field `file` with the image file
+
+**Size Limits:**
+- Regular images (JPG/PNG/WebP, etc.): up to 50MB
+- RAW formats (`.cr2`, `.cr3`, `.nef`, `.nrw`, `.arw`, `.sr2`, `.raf`, `.rw2`, `.orf`, `.pef`, `.dng`): up to 500MB
+
+If the file exceeds the limit, the server returns `413` with a message: `{"detail": "Request body too large...", "type": "request_entity_too_large"}`.
 
 **Behavior:**
 - RAW formats (e.g., CR2/NEF/ARW/DNG): store RAW original + processed JPEG + thumbnail
@@ -784,6 +1052,9 @@ Path param:
 - Uploads the PDF to S3 under a deterministic key
 - Creates a `storage_object` record and assigns `pdf_storage_id` in the target version
 
+**Size Limit:**
+- PDF up to 50MB. Larger uploads will return `413`.
+
 **Response:**
 ```json
 {
@@ -829,6 +1100,9 @@ Path param:
 - Selects the newest version by highest `version_no`
 - If no versions exist, returns 404
 - Uploads the PDF to S3 and updates `pdf_storage_id` on that version
+
+**Size Limit:**
+- PDF up to 50MB. Larger uploads will return `413`.
 
 **Response:**
 ```json

@@ -35,3 +35,17 @@ class PatientDetailResponse(BaseModel):
     email: Optional[str] = None
     tenant_id: str
     branch_id: str
+
+
+class PatientFullResponse(BaseModel):
+    """Schema for full patient profile used across endpoints."""
+    id: str
+    tenant_id: str
+    branch_id: str
+    patient_code: str
+    first_name: str
+    last_name: str
+    dob: Optional[date] = None
+    sex: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None

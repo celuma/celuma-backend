@@ -6,6 +6,7 @@ from app.models.laboratory import LabOrder, Sample, SampleImage
 from app.models.storage import StorageObject, SampleImageRendition
 from app.models.tenant import Tenant, Branch
 from app.models.patient import Patient
+from app.models.report import Report, ReportVersion
 from app.models.user import AppUser
 from app.schemas.laboratory import (
     LabOrderCreate,
@@ -16,26 +17,65 @@ from app.schemas.laboratory import (
     SampleImagesListResponse,
     SampleImageInfo,
     SampleImageUploadResponse,
+    LabOrderUnifiedCreate,
+    LabOrderUnifiedResponse,
+    LabOrderFullDetailResponse,
+    PatientCasesListResponse,
+    PatientCaseSummary,
+    PatientOrdersListResponse,
+    PatientOrderSummary,
+    OrdersListResponse,
+    OrderListItem,
+    BranchRef,
+    PatientRef,
+    SamplesListResponse,
+    SampleListItem,
+    SampleDetailResponse,
+    OrderSlim,
 )
+from app.schemas.report import ReportMetaResponse
+from app.schemas.patient import PatientFullResponse
 from app.services.s3 import S3Service
 from app.services.image_processing import process_image_bytes
 from uuid import uuid4
 import os
+from sqlmodel import select
 
 router = APIRouter(prefix="/laboratory")
 
-@router.get("/orders/")
+@router.get("/orders/", response_model=OrdersListResponse)
 def list_orders(session: Session = Depends(get_session)):
-    """List all laboratory orders"""
+    """List all laboratory orders with enriched patient and branch info, plus summary fields."""
     orders = session.exec(select(LabOrder)).all()
-    return [{
-        "id": str(o.id),
-        "order_code": o.order_code,
-        "status": o.status,
-        "patient_id": str(o.patient_id),
-        "tenant_id": str(o.tenant_id),
-        "branch_id": str(o.branch_id)
-    } for o in orders]
+    results: list[OrderListItem] = []
+    for o in orders:
+        # Resolve related names
+        branch = session.get(Branch, o.branch_id)
+        patient = session.get(Patient, o.patient_id)
+        sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
+        has_report = session.exec(select(Report).where(Report.order_id == o.id)).first() is not None
+
+        results.append(
+            OrderListItem(
+                id=str(o.id),
+                order_code=o.order_code,
+                status=o.status,
+                tenant_id=str(o.tenant_id),
+                branch=BranchRef(id=str(o.branch_id), name=branch.name if branch else "", code=branch.code if branch else None),
+                patient=PatientRef(
+                    id=str(o.patient_id),
+                    full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
+                    patient_code=patient.patient_code if patient else "",
+                ),
+                requested_by=o.requested_by,
+                notes=o.notes,
+                created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
+                sample_count=sample_count,
+                has_report=has_report,
+            )
+        )
+
+    return OrdersListResponse(orders=results)
 
 @router.post("/orders/", response_model=LabOrderResponse)
 def create_order(order_data: LabOrderCreate, session: Session = Depends(get_session)):
@@ -106,19 +146,76 @@ def get_order(order_id: str, session: Session = Depends(get_session)):
         billed_lock=order.billed_lock
     )
 
-@router.get("/samples/")
+@router.get("/samples/", response_model=SamplesListResponse)
 def list_samples(session: Session = Depends(get_session)):
-    """List all samples"""
+    """List all samples with enriched branch and order objects. Keeps tenant_id as id string."""
     samples = session.exec(select(Sample)).all()
-    return [{
-        "id": str(s.id),
-        "sample_code": s.sample_code,
-        "type": s.type,
-        "state": s.state,
-        "order_id": str(s.order_id),
-        "tenant_id": str(s.tenant_id),
-        "branch_id": str(s.branch_id)
-    } for s in samples]
+    items: list[SampleListItem] = []
+    for s in samples:
+        branch = session.get(Branch, s.branch_id)
+        order = session.get(LabOrder, s.order_id)
+        patient = session.get(Patient, order.patient_id) if order else None
+        items.append(
+            SampleListItem(
+                id=str(s.id),
+                sample_code=s.sample_code,
+                type=s.type,
+                state=s.state,
+                tenant_id=str(s.tenant_id),
+                branch=BranchRef(id=str(s.branch_id), name=branch.name if branch else "", code=branch.code if branch else None),
+                order=OrderSlim(
+                    id=str(s.order_id),
+                    order_code=order.order_code if order else "",
+                    status=order.status if order else "",
+                    requested_by=order.requested_by if order else None,
+                    patient=PatientRef(
+                        id=str(patient.id) if patient else "",
+                        full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
+                        patient_code=patient.patient_code if patient else "",
+                    ) if patient else None,
+                ),
+            )
+        )
+    return SamplesListResponse(samples=items)
+
+@router.get("/samples/{sample_id}", response_model=SampleDetailResponse)
+def get_sample_detail(sample_id: str, session: Session = Depends(get_session)):
+    """Get complete detail for a sample including branch, order, and patient references."""
+    s = session.get(Sample, sample_id)
+    if not s:
+        raise HTTPException(404, "Sample not found")
+
+    branch = session.get(Branch, s.branch_id)
+    order = session.get(LabOrder, s.order_id)
+    patient = session.get(Patient, order.patient_id) if order else None
+
+    return SampleDetailResponse(
+        id=str(s.id),
+        sample_code=s.sample_code,
+        type=s.type,
+        state=s.state,
+        collected_at=str(getattr(s, "collected_at", "")) if getattr(s, "collected_at", None) else None,
+        received_at=str(getattr(s, "received_at", "")) if getattr(s, "received_at", None) else None,
+        notes=s.notes,
+        tenant_id=str(s.tenant_id),
+        branch=BranchRef(id=str(s.branch_id), name=branch.name if branch else "", code=branch.code if branch else None),
+        order=OrderSlim(
+            id=str(s.order_id),
+            order_code=order.order_code if order else "",
+            status=order.status if order else "",
+            requested_by=order.requested_by if order else None,
+            patient=PatientRef(
+                id=str(patient.id) if patient else "",
+                full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
+                patient_code=patient.patient_code if patient else "",
+            ) if patient else None,
+        ),
+        patient=PatientRef(
+            id=str(patient.id) if patient else "",
+            full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
+            patient_code=patient.patient_code if patient else "",
+        ),
+    )
 
 @router.post("/samples/", response_model=SampleResponse)
 def create_sample(sample_data: SampleCreate, session: Session = Depends(get_session)):
@@ -170,6 +267,110 @@ def create_sample(sample_data: SampleCreate, session: Session = Depends(get_sess
         order_id=str(sample.order_id),
         tenant_id=str(sample.tenant_id),
         branch_id=str(sample.branch_id)
+    )
+
+
+@router.post("/orders/unified", response_model=LabOrderUnifiedResponse)
+def create_order_with_samples(payload: LabOrderUnifiedCreate, session: Session = Depends(get_session)):
+    """Create a new laboratory order and multiple samples in one operation.
+
+    - Validates tenant, branch, and patient
+    - Ensures `order_code` uniqueness per branch
+    - Creates order and all samples atomically
+    """
+    # Validate tenant, branch, and patient
+    tenant = session.get(Tenant, payload.tenant_id)
+    if not tenant:
+        raise HTTPException(404, "Tenant not found")
+    branch = session.get(Branch, payload.branch_id)
+    if not branch:
+        raise HTTPException(404, "Branch not found")
+    patient = session.get(Patient, payload.patient_id)
+    if not patient:
+        raise HTTPException(404, "Patient not found")
+
+    # Ensure order_code unique per branch
+    existing = session.exec(
+        select(LabOrder).where(
+            LabOrder.order_code == payload.order_code,
+            LabOrder.branch_id == payload.branch_id,
+        )
+    ).first()
+    if existing:
+        raise HTTPException(400, "Order code already exists for this branch")
+
+    # Create order
+    order = LabOrder(
+        tenant_id=payload.tenant_id,
+        branch_id=payload.branch_id,
+        patient_id=payload.patient_id,
+        order_code=payload.order_code,
+        requested_by=payload.requested_by,
+        notes=payload.notes,
+        created_by=payload.created_by,
+    )
+    session.add(order)
+    session.flush()  # get order.id for samples
+
+    # Create samples
+    created_samples: list[Sample] = []
+    sample_codes_in_order: set[str] = set()
+    for s in payload.samples:
+        # Prevent duplicate sample_code within this unified request
+        if s.sample_code in sample_codes_in_order:
+            raise HTTPException(400, f"Duplicate sample_code in request: {s.sample_code}")
+        sample_codes_in_order.add(s.sample_code)
+
+        # Ensure sample_code unique for this order
+        existing_sample = session.exec(
+            select(Sample).where(
+                Sample.sample_code == s.sample_code,
+                Sample.order_id == order.id,
+            )
+        ).first()
+        if existing_sample:
+            raise HTTPException(400, f"Sample code already exists for this order: {s.sample_code}")
+
+        sample = Sample(
+            tenant_id=payload.tenant_id,
+            branch_id=payload.branch_id,
+            order_id=order.id,
+            sample_code=s.sample_code,
+            type=s.type,
+            notes=s.notes,
+            collected_at=s.collected_at,
+            received_at=s.received_at,
+        )
+        session.add(sample)
+        created_samples.append(sample)
+
+    # Commit transaction
+    session.commit()
+    session.refresh(order)
+    for s in created_samples:
+        session.refresh(s)
+
+    return LabOrderUnifiedResponse(
+        order=LabOrderResponse(
+            id=str(order.id),
+            order_code=order.order_code,
+            status=order.status,
+            patient_id=str(order.patient_id),
+            tenant_id=str(order.tenant_id),
+            branch_id=str(order.branch_id),
+        ),
+        samples=[
+            SampleResponse(
+                id=str(s.id),
+                sample_code=s.sample_code,
+                type=s.type,
+                state=s.state,
+                order_id=str(s.order_id),
+                tenant_id=str(s.tenant_id),
+                branch_id=str(s.branch_id),
+            )
+            for s in created_samples
+        ],
     )
 
 
@@ -369,3 +570,184 @@ def list_sample_images(sample_id: str, session: Session = Depends(get_session)):
         )
 
     return SampleImagesListResponse(sample_id=str(sample.id), images=results)
+
+
+@router.get("/orders/{order_id}/full", response_model=LabOrderFullDetailResponse)
+def get_order_full_detail(order_id: str, session: Session = Depends(get_session)):
+    """Return complete information for an order: order details, patient details, and samples."""
+    order = session.get(LabOrder, order_id)
+    if not order:
+        raise HTTPException(404, "Order not found")
+
+    patient = session.get(Patient, order.patient_id)
+    if not patient:
+        raise HTTPException(404, "Patient not found")
+
+    # Fetch samples for this order
+    samples = session.exec(select(Sample).where(Sample.order_id == order.id)).all()
+
+    # Build response objects
+    order_resp = LabOrderDetailResponse(
+        id=str(order.id),
+        order_code=order.order_code,
+        status=order.status,
+        patient_id=str(order.patient_id),
+        tenant_id=str(order.tenant_id),
+        branch_id=str(order.branch_id),
+        requested_by=order.requested_by,
+        notes=order.notes,
+        billed_lock=order.billed_lock,
+    )
+
+    patient_resp = PatientFullResponse(
+        id=str(patient.id),
+        tenant_id=str(patient.tenant_id),
+        branch_id=str(patient.branch_id),
+        patient_code=patient.patient_code,
+        first_name=patient.first_name,
+        last_name=patient.last_name,
+        dob=getattr(patient, "dob", None),
+        sex=getattr(patient, "sex", None),
+        phone=getattr(patient, "phone", None),
+        email=getattr(patient, "email", None),
+    )
+
+    sample_resps = [
+        SampleResponse(
+            id=str(s.id),
+            sample_code=s.sample_code,
+            type=s.type,
+            state=s.state,
+            order_id=str(s.order_id),
+            tenant_id=str(s.tenant_id),
+            branch_id=str(s.branch_id),
+        )
+        for s in samples
+    ]
+
+    return LabOrderFullDetailResponse(order=order_resp, patient=patient_resp, samples=sample_resps)
+
+
+@router.get("/patients/{patient_id}/orders", response_model=PatientOrdersListResponse)
+def list_patient_orders(patient_id: str, session: Session = Depends(get_session)):
+    """List all orders for a given patient (enriched summary)."""
+    patient = session.get(Patient, patient_id)
+    if not patient:
+        raise HTTPException(404, "Patient not found")
+
+    orders = session.exec(select(LabOrder).where(LabOrder.patient_id == patient.id)).all()
+    summaries = []
+    for o in orders:
+        sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
+        has_report = session.exec(select(Report).where(Report.order_id == o.id)).first() is not None
+        summaries.append(
+            PatientOrderSummary(
+                id=str(o.id),
+                order_code=o.order_code,
+                status=o.status,
+                tenant_id=str(o.tenant_id),
+                branch_id=str(o.branch_id),
+                patient_id=str(o.patient_id),
+                requested_by=o.requested_by,
+                notes=o.notes,
+                created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
+                sample_count=sample_count,
+                has_report=has_report,
+            )
+        )
+
+    full_patient = PatientFullResponse(
+        id=str(patient.id),
+        tenant_id=str(patient.tenant_id),
+        branch_id=str(patient.branch_id),
+        patient_code=patient.patient_code,
+        first_name=patient.first_name,
+        last_name=patient.last_name,
+        dob=getattr(patient, "dob", None),
+        sex=getattr(patient, "sex", None),
+        phone=getattr(patient, "phone", None),
+        email=getattr(patient, "email", None),
+    )
+
+    return PatientOrdersListResponse(patient=full_patient, orders=summaries)
+
+
+@router.get("/patients/{patient_id}/cases", response_model=PatientCasesListResponse)
+def list_patient_cases(patient_id: str, session: Session = Depends(get_session)):
+    """List all cases for a patient with full details: order, samples, and report metadata (if any)."""
+    patient = session.get(Patient, patient_id)
+    if not patient:
+        raise HTTPException(404, "Patient not found")
+
+    orders = session.exec(select(LabOrder).where(LabOrder.patient_id == patient.id)).all()
+    cases = []
+    for order in orders:
+        # Order detail
+        order_resp = LabOrderDetailResponse(
+            id=str(order.id),
+            order_code=order.order_code,
+            status=order.status,
+            patient_id=str(order.patient_id),
+            tenant_id=str(order.tenant_id),
+            branch_id=str(order.branch_id),
+            requested_by=order.requested_by,
+            notes=order.notes,
+            billed_lock=order.billed_lock,
+        )
+
+        # Samples list
+        samples = session.exec(select(Sample).where(Sample.order_id == order.id)).all()
+        sample_resps = [
+            SampleResponse(
+                id=str(s.id),
+                sample_code=s.sample_code,
+                type=s.type,
+                state=s.state,
+                order_id=str(s.order_id),
+                tenant_id=str(s.tenant_id),
+                branch_id=str(s.branch_id),
+            )
+            for s in samples
+        ]
+
+        # Report meta (if any) using latest/current version
+        report_meta = None
+        report = session.exec(select(Report).where(Report.order_id == order.id)).first()
+        if report:
+            current_version = session.exec(
+                select(ReportVersion)
+                .where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
+                .order_by(ReportVersion.version_no.desc())
+            ).first()
+            has_pdf = bool(current_version and current_version.pdf_storage_id)
+            report_meta = ReportMetaResponse(
+                id=str(report.id),
+                status=report.status,
+                title=report.title,
+                published_at=report.published_at,
+                version_no=current_version.version_no if current_version else None,
+                has_pdf=has_pdf,
+            )
+
+        cases.append({
+            "order": order_resp,
+            "samples": sample_resps,
+            "report": report_meta,
+        })
+
+    # Build patient full profile to attach at top-level of cases list
+    full_patient = PatientFullResponse(
+        id=str(patient.id),
+        tenant_id=str(patient.tenant_id),
+        branch_id=str(patient.branch_id),
+        patient_code=patient.patient_code,
+        first_name=patient.first_name,
+        last_name=patient.last_name,
+        dob=getattr(patient, "dob", None),
+        sex=getattr(patient, "sex", None),
+        phone=getattr(patient, "phone", None),
+        email=getattr(patient, "email", None),
+    )
+
+    # Reuse PatientCaseDetail schema structure via dicts already matching response_model
+    return PatientCasesListResponse(patient=full_patient, patient_id=str(patient.id), cases=cases)

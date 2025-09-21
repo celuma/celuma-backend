@@ -462,7 +462,7 @@ if response.status_code == 200:
     print(f"Patient created: {patient['first_name']} {patient['last_name']}")
 ```
 
-### List All Patients
+### List All Patients (full profile)
 ```bash
 curl http://localhost:8000/api/v1/patients/
 ```
@@ -473,7 +473,9 @@ response = requests.get("http://localhost:8000/api/v1/patients/")
 if response.status_code == 200:
     patients = response.json()
     for patient in patients:
-        print(f"- {patient['first_name']} {patient['last_name']} ({patient['patient_code']})")
+        print(
+            f"- {patient['first_name']} {patient['last_name']} | code={patient['patient_code']} | phone={patient.get('phone')}"
+        )
 ```
 
 ## 🧪 Laboratory Management
@@ -552,11 +554,165 @@ if response.status_code == 200:
     print(f"Sample created: {sample['sample_code']}")
 ```
 
+### Create Order with Samples (Unified)
+```bash
+curl -X POST "http://localhost:8000/api/v1/laboratory/orders/unified" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "TENANT_UUID",
+    "branch_id": "BRANCH_UUID",
+    "patient_id": "PATIENT_UUID",
+    "order_code": "ORD001",
+    "requested_by": "Dr. Smith",
+    "samples": [
+      { "sample_code": "SAMP001", "type": "SANGRE" },
+      { "sample_code": "SAMP002", "type": "TEJIDO", "notes": "Fragment" }
+    ]
+  }'
+```
+
+```python
+import requests
+
+payload = {
+    "tenant_id": tenant_id,
+    "branch_id": branch_id,
+    "patient_id": patient_id,
+    "order_code": "ORD001",
+    "requested_by": "Dr. Smith",
+    "samples": [
+        {"sample_code": "SAMP001", "type": "SANGRE"},
+        {"sample_code": "SAMP002", "type": "TEJIDO", "notes": "Fragment"},
+    ],
+}
+
+resp = requests.post(
+    f"{BASE_URL}/api/v1/laboratory/orders/unified",
+    json=payload,
+)
+resp.raise_for_status()
+data = resp.json()
+print("Order:", data["order"]["order_code"], "Samples:", len(data["samples"]))
+```
+
+### Get Full Order Detail (order + patient full + samples)
+```bash
+ORDER_ID=order-uuid-here
+curl "http://localhost:8000/api/v1/laboratory/orders/$ORDER_ID/full"
+```
+
+```python
+import requests
+
+order_id = "ORDER_UUID"
+resp = requests.get(f"{BASE_URL}/api/v1/laboratory/orders/{order_id}/full")
+resp.raise_for_status()
+full = resp.json()
+print("Order:", full["order"]["order_code"], "Patient:", full["patient"]["first_name"]) 
+print("Samples:", [s["sample_code"] for s in full["samples"]])
+```
+
+### List Cases for a Patient (includes patient full profile)
+```bash
+PATIENT_ID=patient-uuid-here
+curl "http://localhost:8000/api/v1/laboratory/patients/$PATIENT_ID/cases"
+```
+
+```python
+import requests
+
+patient_id = "PATIENT_UUID"
+resp = requests.get(f"{BASE_URL}/api/v1/laboratory/patients/{patient_id}/cases")
+resp.raise_for_status()
+data = resp.json()
+print("Patient:", data["patient"]["first_name"], data["patient"]["last_name"], "code:", data["patient"]["patient_code"]) 
+cases = data["cases"]
+for case in cases:
+    order = case["order"]
+    report = case.get("report")
+    print("Order:", order["order_code"], "samples:", len(case["samples"]), "has_report:", bool(report))
+
+### List Orders for a Patient (summary + patient full)
+```bash
+PATIENT_ID=patient-uuid-here
+curl "http://localhost:8000/api/v1/laboratory/patients/$PATIENT_ID/orders"
+```
+
+### List All Orders (enriched)
+```bash
+curl "http://localhost:8000/api/v1/laboratory/orders/"
+```
+
+```python
+import requests
+
+resp = requests.get(f"{BASE_URL}/api/v1/laboratory/orders/")
+resp.raise_for_status()
+data = resp.json()["orders"]
+for o in data:
+    print(o["order_code"], "branch:", o["branch"]["name"], "patient:", o["patient"]["full_name"], "samples:", o["sample_count"]) 
+```
+
+### List All Samples (enriched)
+```bash
+curl "http://localhost:8000/api/v1/laboratory/samples/"
+```
+
+```python
+import requests
+
+resp = requests.get(f"{BASE_URL}/api/v1/laboratory/samples/")
+resp.raise_for_status()
+samples = resp.json()["samples"]
+for s in samples:
+    print(
+        s["sample_code"],
+        "order:", s["order"]["order_code"],
+        "branch:", s["branch"]["name"],
+        "patient:", s["order"]["patient"]["full_name"] if s["order"].get("patient") else None,
+        "requested_by:", s["order"].get("requested_by"),
+    ) 
+```
+
+### Get Sample Detail (enriched)
+```bash
+SAMPLE_ID=sample-uuid-here
+curl "http://localhost:8000/api/v1/laboratory/samples/$SAMPLE_ID"
+```
+
+```python
+import requests
+
+sample_id = "SAMPLE_UUID"
+resp = requests.get(f"{BASE_URL}/api/v1/laboratory/samples/{sample_id}")
+resp.raise_for_status()
+detail = resp.json()
+print("Sample:", detail["sample_code"], "Order:", detail["order"]["order_code"], "Patient:", detail["patient"]["full_name"]) 
+```
+```python
+import requests
+
+patient_id = "PATIENT_UUID"
+resp = requests.get(f"{BASE_URL}/api/v1/laboratory/patients/{patient_id}/orders")
+resp.raise_for_status()
+data = resp.json()
+print("Patient:", data["patient"]["first_name"], data["patient"]["last_name"], data["patient"]["patient_code"]) 
+orders = data["orders"]
+for o in orders:
+    print(o["order_code"], "samples:", o["sample_count"], "has_report:", o["has_report"]) 
+```
+```
+
 ### Upload Sample Image (multipart/form-data)
 ```bash
 curl -X POST "http://localhost:8000/api/v1/laboratory/samples/SAMPLE_UUID/images" \
   -F "file=@/path/to/image.dng"
 ```
+
+Notes:
+- Regular images (JPG/PNG/WebP, etc.) up to 50MB.
+- RAW formats (`.cr2`, `.cr3`, `.nef`, `.nrw`, `.arw`, `.sr2`, `.raf`, `.rw2`, `.orf`, `.pef`, `.dng`) up to 500MB.
+- If the limit is exceeded, the API returns `413`.
 
 **Python Example:**
 ```python
@@ -702,6 +858,10 @@ curl -X POST "http://localhost:8000/api/v1/reports/$REPORT_ID/versions/$VERSION_
   -F "file=@${PDF_PATH};type=application/pdf"
 ```
 
+Notes:
+- PDF size up to 50MB.
+- If the limit is exceeded, the API returns `413`.
+
 **Python Example:**
 ```python
 import requests
@@ -728,6 +888,10 @@ curl -X POST "http://localhost:8000/api/v1/reports/$REPORT_ID/pdf" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -F "file=@${PDF_PATH};type=application/pdf"
 ```
+
+Notes:
+- PDF size up to 50MB.
+- If the limit is exceeded, the API returns `413`.
 
 **Python Example:**
 ```python
