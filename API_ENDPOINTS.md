@@ -785,7 +785,7 @@ Returns `orders` array with enriched `branch` and `patient` objects and summary 
 ### GET /api/v1/laboratory/samples/
 **List all samples (enriched)**
 
-Returns `samples` array where `branch` and `order` are objects. `tenant_id` remains an id string.
+Returns `samples` array where `branch` and `order` are objects. The `order` object now includes `requested_by` and a `patient` object. `tenant_id` remains an id string.
 
 **Response:**
 ```json
@@ -798,7 +798,17 @@ Returns `samples` array where `branch` and `order` are objects. `tenant_id` rema
       "state": "RECEIVED",
       "tenant_id": "tenant-uuid",
       "branch": { "id": "branch-uuid", "name": "Main Branch", "code": "MAIN" },
-      "order": { "id": "order-uuid", "order_code": "ORD001", "status": "RECEIVED" }
+      "order": {
+        "id": "order-uuid",
+        "order_code": "ORD001",
+        "status": "RECEIVED",
+        "requested_by": "Juan Carlos bodoque",
+        "patient": {
+          "id": "d595498b-621d-4edd-9a5d-aacd4e26cf05",
+          "full_name": "Rafael Magaña",
+          "patient_code": "Rima2510"
+        }
+      }
     }
   ]
 }
@@ -820,6 +830,7 @@ Returns `samples` array where `branch` and `order` are objects. `tenant_id` rema
   "tenant_id": "tenant-uuid",
   "branch": { "id": "branch-uuid", "name": "Main Branch", "code": "MAIN" },
   "order": { "id": "order-uuid", "order_code": "ORD001", "status": "RECEIVED" },
+  
   "patient": { "id": "patient-uuid", "full_name": "John Doe", "patient_code": "P001" }
 }
 ```

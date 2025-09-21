@@ -665,7 +665,13 @@ resp = requests.get(f"{BASE_URL}/api/v1/laboratory/samples/")
 resp.raise_for_status()
 samples = resp.json()["samples"]
 for s in samples:
-    print(s["sample_code"], "order:", s["order"]["order_code"], "branch:", s["branch"]["name"]) 
+    print(
+        s["sample_code"],
+        "order:", s["order"]["order_code"],
+        "branch:", s["branch"]["name"],
+        "patient:", s["order"]["patient"]["full_name"] if s["order"].get("patient") else None,
+        "requested_by:", s["order"].get("requested_by"),
+    ) 
 ```
 
 ### Get Sample Detail (enriched)

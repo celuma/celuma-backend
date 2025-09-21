@@ -183,6 +183,8 @@ class OrderSlim(BaseModel):
     id: str
     order_code: str
     status: str
+    requested_by: Optional[str] = None
+    patient: Optional[PatientRef] = None
 
 
 class OrderListItem(BaseModel):

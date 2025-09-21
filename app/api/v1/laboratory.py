@@ -154,6 +154,7 @@ def list_samples(session: Session = Depends(get_session)):
     for s in samples:
         branch = session.get(Branch, s.branch_id)
         order = session.get(LabOrder, s.order_id)
+        patient = session.get(Patient, order.patient_id) if order else None
         items.append(
             SampleListItem(
                 id=str(s.id),
@@ -162,7 +163,17 @@ def list_samples(session: Session = Depends(get_session)):
                 state=s.state,
                 tenant_id=str(s.tenant_id),
                 branch=BranchRef(id=str(s.branch_id), name=branch.name if branch else "", code=branch.code if branch else None),
-                order=OrderSlim(id=str(s.order_id), order_code=order.order_code if order else "", status=order.status if order else ""),
+                order=OrderSlim(
+                    id=str(s.order_id),
+                    order_code=order.order_code if order else "",
+                    status=order.status if order else "",
+                    requested_by=order.requested_by if order else None,
+                    patient=PatientRef(
+                        id=str(patient.id) if patient else "",
+                        full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
+                        patient_code=patient.patient_code if patient else "",
+                    ) if patient else None,
+                ),
             )
         )
     return SamplesListResponse(samples=items)
@@ -188,7 +199,17 @@ def get_sample_detail(sample_id: str, session: Session = Depends(get_session)):
         notes=s.notes,
         tenant_id=str(s.tenant_id),
         branch=BranchRef(id=str(s.branch_id), name=branch.name if branch else "", code=branch.code if branch else None),
-        order=OrderSlim(id=str(s.order_id), order_code=order.order_code if order else "", status=order.status if order else ""),
+        order=OrderSlim(
+            id=str(s.order_id),
+            order_code=order.order_code if order else "",
+            status=order.status if order else "",
+            requested_by=order.requested_by if order else None,
+            patient=PatientRef(
+                id=str(patient.id) if patient else "",
+                full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
+                patient_code=patient.patient_code if patient else "",
+            ) if patient else None,
+        ),
         patient=PatientRef(
             id=str(patient.id) if patient else "",
             full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
