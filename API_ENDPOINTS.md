@@ -497,20 +497,29 @@ Returns a list of full patient profiles (`PatientFullResponse`).
 ```
 
 ### GET /api/v1/laboratory/orders/
-**List all laboratory orders**
+**List all laboratory orders (enriched)**
+
+Returns `orders` array with enriched `branch` and `patient` objects and summary fields.
 
 **Response:**
 ```json
-[
-  {
-    "id": "order-uuid",
-    "order_code": "ORD001",
-    "status": "RECEIVED",
-    "patient_id": "patient-uuid-here",
-    "tenant_id": "tenant-uuid-here",
-    "branch_id": "branch-uuid-here"
-  }
-]
+{
+  "orders": [
+    {
+      "id": "order-uuid",
+      "order_code": "ORD001",
+      "status": "RECEIVED",
+      "tenant_id": "tenant-uuid",
+      "branch": { "id": "branch-uuid", "name": "Main Branch", "code": "MAIN" },
+      "patient": { "id": "patient-uuid", "full_name": "John Doe", "patient_code": "P001" },
+      "requested_by": "Dr. Smith",
+      "notes": "...",
+      "created_at": "2025-08-18T10:00:00Z",
+      "sample_count": 2,
+      "has_report": true
+    }
+  ]
+}
 ```
 
 ### GET /api/v1/laboratory/orders/{order_id}
@@ -774,21 +783,45 @@ Returns a list of full patient profiles (`PatientFullResponse`).
 ```
 
 ### GET /api/v1/laboratory/samples/
-**List all samples**
+**List all samples (enriched)**
+
+Returns `samples` array where `branch` and `order` are objects. `tenant_id` remains an id string.
 
 **Response:**
 ```json
-[
-  {
-    "id": "sample-uuid",
-    "sample_code": "SAMP001",
-    "type": "SANGRE",
-    "state": "RECEIVED",
-    "order_id": "order-uuid-here",
-    "tenant_id": "tenant-uuid-here",
-    "branch_id": "branch-uuid-here"
-  }
-]
+{
+  "samples": [
+    {
+      "id": "sample-uuid",
+      "sample_code": "SAMP001",
+      "type": "SANGRE",
+      "state": "RECEIVED",
+      "tenant_id": "tenant-uuid",
+      "branch": { "id": "branch-uuid", "name": "Main Branch", "code": "MAIN" },
+      "order": { "id": "order-uuid", "order_code": "ORD001", "status": "RECEIVED" }
+    }
+  ]
+}
+```
+
+### GET /api/v1/laboratory/samples/{sample_id}
+**Get sample detail (enriched)**
+
+**Response:**
+```json
+{
+  "id": "sample-uuid",
+  "sample_code": "SAMP001",
+  "type": "SANGRE",
+  "state": "RECEIVED",
+  "collected_at": "2025-08-18T10:00:00Z",
+  "received_at": "2025-08-18T11:00:00Z",
+  "notes": "Blood sample",
+  "tenant_id": "tenant-uuid",
+  "branch": { "id": "branch-uuid", "name": "Main Branch", "code": "MAIN" },
+  "order": { "id": "order-uuid", "order_code": "ORD001", "status": "RECEIVED" },
+  "patient": { "id": "patient-uuid", "full_name": "John Doe", "patient_code": "P001" }
+}
 ```
 
 ### POST /api/v1/laboratory/samples/{sample_id}/images

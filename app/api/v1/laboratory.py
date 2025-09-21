@@ -24,6 +24,14 @@ from app.schemas.laboratory import (
     PatientCaseSummary,
     PatientOrdersListResponse,
     PatientOrderSummary,
+    OrdersListResponse,
+    OrderListItem,
+    BranchRef,
+    PatientRef,
+    SamplesListResponse,
+    SampleListItem,
+    SampleDetailResponse,
+    OrderSlim,
 )
 from app.schemas.report import ReportMetaResponse
 from app.schemas.patient import PatientFullResponse
@@ -35,18 +43,39 @@ from sqlmodel import select
 
 router = APIRouter(prefix="/laboratory")
 
-@router.get("/orders/")
+@router.get("/orders/", response_model=OrdersListResponse)
 def list_orders(session: Session = Depends(get_session)):
-    """List all laboratory orders"""
+    """List all laboratory orders with enriched patient and branch info, plus summary fields."""
     orders = session.exec(select(LabOrder)).all()
-    return [{
-        "id": str(o.id),
-        "order_code": o.order_code,
-        "status": o.status,
-        "patient_id": str(o.patient_id),
-        "tenant_id": str(o.tenant_id),
-        "branch_id": str(o.branch_id)
-    } for o in orders]
+    results: list[OrderListItem] = []
+    for o in orders:
+        # Resolve related names
+        branch = session.get(Branch, o.branch_id)
+        patient = session.get(Patient, o.patient_id)
+        sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
+        has_report = session.exec(select(Report).where(Report.order_id == o.id)).first() is not None
+
+        results.append(
+            OrderListItem(
+                id=str(o.id),
+                order_code=o.order_code,
+                status=o.status,
+                tenant_id=str(o.tenant_id),
+                branch=BranchRef(id=str(o.branch_id), name=branch.name if branch else "", code=branch.code if branch else None),
+                patient=PatientRef(
+                    id=str(o.patient_id),
+                    full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
+                    patient_code=patient.patient_code if patient else "",
+                ),
+                requested_by=o.requested_by,
+                notes=o.notes,
+                created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
+                sample_count=sample_count,
+                has_report=has_report,
+            )
+        )
+
+    return OrdersListResponse(orders=results)
 
 @router.post("/orders/", response_model=LabOrderResponse)
 def create_order(order_data: LabOrderCreate, session: Session = Depends(get_session)):
@@ -117,19 +146,55 @@ def get_order(order_id: str, session: Session = Depends(get_session)):
         billed_lock=order.billed_lock
     )
 
-@router.get("/samples/")
+@router.get("/samples/", response_model=SamplesListResponse)
 def list_samples(session: Session = Depends(get_session)):
-    """List all samples"""
+    """List all samples with enriched branch and order objects. Keeps tenant_id as id string."""
     samples = session.exec(select(Sample)).all()
-    return [{
-        "id": str(s.id),
-        "sample_code": s.sample_code,
-        "type": s.type,
-        "state": s.state,
-        "order_id": str(s.order_id),
-        "tenant_id": str(s.tenant_id),
-        "branch_id": str(s.branch_id)
-    } for s in samples]
+    items: list[SampleListItem] = []
+    for s in samples:
+        branch = session.get(Branch, s.branch_id)
+        order = session.get(LabOrder, s.order_id)
+        items.append(
+            SampleListItem(
+                id=str(s.id),
+                sample_code=s.sample_code,
+                type=s.type,
+                state=s.state,
+                tenant_id=str(s.tenant_id),
+                branch=BranchRef(id=str(s.branch_id), name=branch.name if branch else "", code=branch.code if branch else None),
+                order=OrderSlim(id=str(s.order_id), order_code=order.order_code if order else "", status=order.status if order else ""),
+            )
+        )
+    return SamplesListResponse(samples=items)
+
+@router.get("/samples/{sample_id}", response_model=SampleDetailResponse)
+def get_sample_detail(sample_id: str, session: Session = Depends(get_session)):
+    """Get complete detail for a sample including branch, order, and patient references."""
+    s = session.get(Sample, sample_id)
+    if not s:
+        raise HTTPException(404, "Sample not found")
+
+    branch = session.get(Branch, s.branch_id)
+    order = session.get(LabOrder, s.order_id)
+    patient = session.get(Patient, order.patient_id) if order else None
+
+    return SampleDetailResponse(
+        id=str(s.id),
+        sample_code=s.sample_code,
+        type=s.type,
+        state=s.state,
+        collected_at=str(getattr(s, "collected_at", "")) if getattr(s, "collected_at", None) else None,
+        received_at=str(getattr(s, "received_at", "")) if getattr(s, "received_at", None) else None,
+        notes=s.notes,
+        tenant_id=str(s.tenant_id),
+        branch=BranchRef(id=str(s.branch_id), name=branch.name if branch else "", code=branch.code if branch else None),
+        order=OrderSlim(id=str(s.order_id), order_code=order.order_code if order else "", status=order.status if order else ""),
+        patient=PatientRef(
+            id=str(patient.id) if patient else "",
+            full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
+            patient_code=patient.patient_code if patient else "",
+        ),
+    )
 
 @router.post("/samples/", response_model=SampleResponse)
 def create_sample(sample_data: SampleCreate, session: Session = Depends(get_session)):

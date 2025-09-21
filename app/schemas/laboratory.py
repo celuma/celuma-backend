@@ -160,3 +160,77 @@ class PatientOrdersListResponse(BaseModel):
     """List of orders for a patient (summary) with full patient profile."""
     patient: PatientFullResponse
     orders: List[PatientOrderSummary]
+
+
+# --- Shared small refs for enriched list endpoints ---
+
+class BranchRef(BaseModel):
+    """Minimal branch reference with id and human-readable name (and optional code)."""
+    id: str
+    name: str
+    code: Optional[str] = None
+
+
+class PatientRef(BaseModel):
+    """Minimal patient reference for lists with full name and code."""
+    id: str
+    full_name: str
+    patient_code: str
+
+
+class OrderSlim(BaseModel):
+    """Small order reference for sample lists/details."""
+    id: str
+    order_code: str
+    status: str
+
+
+class OrderListItem(BaseModel):
+    """Order item for GET /laboratory/orders/ with enriched references."""
+    id: str
+    order_code: str
+    status: str
+    tenant_id: str
+    branch: BranchRef
+    patient: PatientRef
+    requested_by: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: Optional[str] = None
+    sample_count: int
+    has_report: bool
+
+
+class OrdersListResponse(BaseModel):
+    """Response for GET /laboratory/orders/ with enriched items."""
+    orders: List[OrderListItem]
+
+
+class SampleListItem(BaseModel):
+    """Sample item with enriched branch and order objects (tenant_id kept as id)."""
+    id: str
+    sample_code: str
+    type: str
+    state: str
+    tenant_id: str
+    branch: BranchRef
+    order: OrderSlim
+
+
+class SamplesListResponse(BaseModel):
+    """Response for GET /laboratory/samples/ with enriched items."""
+    samples: List[SampleListItem]
+
+
+class SampleDetailResponse(BaseModel):
+    """Complete detail for a sample including branch, order, and patient references."""
+    id: str
+    sample_code: str
+    type: str
+    state: str
+    collected_at: Optional[str] = None
+    received_at: Optional[str] = None
+    notes: Optional[str] = None
+    tenant_id: str
+    branch: BranchRef
+    order: OrderSlim
+    patient: PatientRef

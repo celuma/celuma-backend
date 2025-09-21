@@ -638,6 +638,51 @@ PATIENT_ID=patient-uuid-here
 curl "http://localhost:8000/api/v1/laboratory/patients/$PATIENT_ID/orders"
 ```
 
+### List All Orders (enriched)
+```bash
+curl "http://localhost:8000/api/v1/laboratory/orders/"
+```
+
+```python
+import requests
+
+resp = requests.get(f"{BASE_URL}/api/v1/laboratory/orders/")
+resp.raise_for_status()
+data = resp.json()["orders"]
+for o in data:
+    print(o["order_code"], "branch:", o["branch"]["name"], "patient:", o["patient"]["full_name"], "samples:", o["sample_count"]) 
+```
+
+### List All Samples (enriched)
+```bash
+curl "http://localhost:8000/api/v1/laboratory/samples/"
+```
+
+```python
+import requests
+
+resp = requests.get(f"{BASE_URL}/api/v1/laboratory/samples/")
+resp.raise_for_status()
+samples = resp.json()["samples"]
+for s in samples:
+    print(s["sample_code"], "order:", s["order"]["order_code"], "branch:", s["branch"]["name"]) 
+```
+
+### Get Sample Detail (enriched)
+```bash
+SAMPLE_ID=sample-uuid-here
+curl "http://localhost:8000/api/v1/laboratory/samples/$SAMPLE_ID"
+```
+
+```python
+import requests
+
+sample_id = "SAMPLE_UUID"
+resp = requests.get(f"{BASE_URL}/api/v1/laboratory/samples/{sample_id}")
+resp.raise_for_status()
+detail = resp.json()
+print("Sample:", detail["sample_code"], "Order:", detail["order"]["order_code"], "Patient:", detail["patient"]["full_name"]) 
+```
 ```python
 import requests
 
