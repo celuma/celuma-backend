@@ -16,11 +16,15 @@ from app.schemas.laboratory import (
     SampleImagesListResponse,
     SampleImageInfo,
     SampleImageUploadResponse,
+    LabOrderUnifiedCreate,
+    LabOrderUnifiedResponse,
+    LabOrderFullDetailResponse,
 )
 from app.services.s3 import S3Service
 from app.services.image_processing import process_image_bytes
 from uuid import uuid4
 import os
+from sqlmodel import select
 
 router = APIRouter(prefix="/laboratory")
 
@@ -170,6 +174,110 @@ def create_sample(sample_data: SampleCreate, session: Session = Depends(get_sess
         order_id=str(sample.order_id),
         tenant_id=str(sample.tenant_id),
         branch_id=str(sample.branch_id)
+    )
+
+
+@router.post("/orders/unified", response_model=LabOrderUnifiedResponse)
+def create_order_with_samples(payload: LabOrderUnifiedCreate, session: Session = Depends(get_session)):
+    """Create a new laboratory order and multiple samples in one operation.
+
+    - Validates tenant, branch, and patient
+    - Ensures `order_code` uniqueness per branch
+    - Creates order and all samples atomically
+    """
+    # Validate tenant, branch, and patient
+    tenant = session.get(Tenant, payload.tenant_id)
+    if not tenant:
+        raise HTTPException(404, "Tenant not found")
+    branch = session.get(Branch, payload.branch_id)
+    if not branch:
+        raise HTTPException(404, "Branch not found")
+    patient = session.get(Patient, payload.patient_id)
+    if not patient:
+        raise HTTPException(404, "Patient not found")
+
+    # Ensure order_code unique per branch
+    existing = session.exec(
+        select(LabOrder).where(
+            LabOrder.order_code == payload.order_code,
+            LabOrder.branch_id == payload.branch_id,
+        )
+    ).first()
+    if existing:
+        raise HTTPException(400, "Order code already exists for this branch")
+
+    # Create order
+    order = LabOrder(
+        tenant_id=payload.tenant_id,
+        branch_id=payload.branch_id,
+        patient_id=payload.patient_id,
+        order_code=payload.order_code,
+        requested_by=payload.requested_by,
+        notes=payload.notes,
+        created_by=payload.created_by,
+    )
+    session.add(order)
+    session.flush()  # get order.id for samples
+
+    # Create samples
+    created_samples: list[Sample] = []
+    sample_codes_in_order: set[str] = set()
+    for s in payload.samples:
+        # Prevent duplicate sample_code within this unified request
+        if s.sample_code in sample_codes_in_order:
+            raise HTTPException(400, f"Duplicate sample_code in request: {s.sample_code}")
+        sample_codes_in_order.add(s.sample_code)
+
+        # Ensure sample_code unique for this order
+        existing_sample = session.exec(
+            select(Sample).where(
+                Sample.sample_code == s.sample_code,
+                Sample.order_id == order.id,
+            )
+        ).first()
+        if existing_sample:
+            raise HTTPException(400, f"Sample code already exists for this order: {s.sample_code}")
+
+        sample = Sample(
+            tenant_id=payload.tenant_id,
+            branch_id=payload.branch_id,
+            order_id=order.id,
+            sample_code=s.sample_code,
+            type=s.type,
+            notes=s.notes,
+            collected_at=s.collected_at,
+            received_at=s.received_at,
+        )
+        session.add(sample)
+        created_samples.append(sample)
+
+    # Commit transaction
+    session.commit()
+    session.refresh(order)
+    for s in created_samples:
+        session.refresh(s)
+
+    return LabOrderUnifiedResponse(
+        order=LabOrderResponse(
+            id=str(order.id),
+            order_code=order.order_code,
+            status=order.status,
+            patient_id=str(order.patient_id),
+            tenant_id=str(order.tenant_id),
+            branch_id=str(order.branch_id),
+        ),
+        samples=[
+            SampleResponse(
+                id=str(s.id),
+                sample_code=s.sample_code,
+                type=s.type,
+                state=s.state,
+                order_id=str(s.order_id),
+                tenant_id=str(s.tenant_id),
+                branch_id=str(s.branch_id),
+            )
+            for s in created_samples
+        ],
     )
 
 
@@ -369,3 +477,59 @@ def list_sample_images(sample_id: str, session: Session = Depends(get_session)):
         )
 
     return SampleImagesListResponse(sample_id=str(sample.id), images=results)
+
+
+@router.get("/orders/{order_id}/full", response_model=LabOrderFullDetailResponse)
+def get_order_full_detail(order_id: str, session: Session = Depends(get_session)):
+    """Return complete information for an order: order details, patient details, and samples."""
+    order = session.get(LabOrder, order_id)
+    if not order:
+        raise HTTPException(404, "Order not found")
+
+    patient = session.get(Patient, order.patient_id)
+    if not patient:
+        raise HTTPException(404, "Patient not found")
+
+    # Fetch samples for this order
+    samples = session.exec(select(Sample).where(Sample.order_id == order.id)).all()
+
+    # Build response objects
+    order_resp = LabOrderDetailResponse(
+        id=str(order.id),
+        order_code=order.order_code,
+        status=order.status,
+        patient_id=str(order.patient_id),
+        tenant_id=str(order.tenant_id),
+        branch_id=str(order.branch_id),
+        requested_by=order.requested_by,
+        notes=order.notes,
+        billed_lock=order.billed_lock,
+    )
+
+    patient_resp = {
+        "id": str(patient.id),
+        "patient_code": patient.patient_code,
+        "first_name": patient.first_name,
+        "last_name": patient.last_name,
+        "dob": str(patient.dob) if getattr(patient, "dob", None) else None,
+        "sex": getattr(patient, "sex", None),
+        "phone": getattr(patient, "phone", None),
+        "email": getattr(patient, "email", None),
+        "tenant_id": str(patient.tenant_id),
+        "branch_id": str(patient.branch_id),
+    }
+
+    sample_resps = [
+        SampleResponse(
+            id=str(s.id),
+            sample_code=s.sample_code,
+            type=s.type,
+            state=s.state,
+            order_id=str(s.order_id),
+            tenant_id=str(s.tenant_id),
+            branch_id=str(s.branch_id),
+        )
+        for s in samples
+    ]
+
+    return LabOrderFullDetailResponse(order=order_resp, patient=patient_resp, samples=sample_resps)

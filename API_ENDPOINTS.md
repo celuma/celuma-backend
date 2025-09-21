@@ -527,6 +527,120 @@ Response body:
 
 ### POST /api/v1/laboratory/samples/
 **Create a new sample**
+### POST /api/v1/laboratory/orders/unified
+**Create a laboratory order and multiple samples in one operation**
+
+**Request Body:**
+```json
+{
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here",
+  "patient_id": "patient-uuid-here",
+  "order_code": "ORD001",
+  "requested_by": "Dr. Smith",
+  "notes": "Complete blood count requested",
+  "created_by": "user-uuid-here",
+  "samples": [
+    {
+      "sample_code": "SAMP001",
+      "type": "SANGRE",
+      "notes": "",
+      "collected_at": "2025-08-18T10:00:00Z",
+      "received_at": "2025-08-18T11:00:00Z"
+    },
+    {
+      "sample_code": "SAMP002",
+      "type": "TEJIDO"
+    }
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "order": {
+    "id": "order-uuid",
+    "order_code": "ORD001",
+    "status": "RECEIVED",
+    "patient_id": "patient-uuid-here",
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here"
+  },
+  "samples": [
+    {
+      "id": "sample-uuid-1",
+      "sample_code": "SAMP001",
+      "type": "SANGRE",
+      "state": "RECEIVED",
+      "order_id": "order-uuid",
+      "tenant_id": "tenant-uuid-here",
+      "branch_id": "branch-uuid-here"
+    },
+    {
+      "id": "sample-uuid-2",
+      "sample_code": "SAMP002",
+      "type": "TEJIDO",
+      "state": "RECEIVED",
+      "order_id": "order-uuid",
+      "tenant_id": "tenant-uuid-here",
+      "branch_id": "branch-uuid-here"
+    }
+  ]
+}
+```
+
+**Errors:**
+- 400 if `order_code` already exists for the branch, a `sample_code` is duplicated in the request, or already exists in the order
+- 404 if tenant, branch, or patient not found
+
+---
+
+### GET /api/v1/laboratory/orders/{order_id}/full
+**Get complete order details including patient and samples**
+
+**Response:**
+```json
+{
+  "order": {
+    "id": "order-uuid",
+    "order_code": "ORD001",
+    "status": "RECEIVED",
+    "patient_id": "patient-uuid",
+    "tenant_id": "tenant-uuid",
+    "branch_id": "branch-uuid",
+    "requested_by": "Dr. Smith",
+    "notes": "...",
+    "billed_lock": false
+  },
+  "patient": {
+    "id": "patient-uuid",
+    "patient_code": "P001",
+    "first_name": "John",
+    "last_name": "Doe",
+    "dob": "1990-01-01",
+    "sex": "M",
+    "phone": "555-1234",
+    "email": "john.doe@example.com",
+    "tenant_id": "tenant-uuid",
+    "branch_id": "branch-uuid"
+  },
+  "samples": [
+    {
+      "id": "sample-uuid",
+      "sample_code": "SAMP001",
+      "type": "SANGRE",
+      "state": "RECEIVED",
+      "order_id": "order-uuid",
+      "tenant_id": "tenant-uuid",
+      "branch_id": "branch-uuid"
+    }
+  ]
+}
+```
+
+**Errors:**
+- 404 if order or patient is not found
 
 **Request Body:**
 ```json

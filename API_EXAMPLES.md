@@ -552,6 +552,64 @@ if response.status_code == 200:
     print(f"Sample created: {sample['sample_code']}")
 ```
 
+### Create Order with Samples (Unified)
+```bash
+curl -X POST "http://localhost:8000/api/v1/laboratory/orders/unified" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "TENANT_UUID",
+    "branch_id": "BRANCH_UUID",
+    "patient_id": "PATIENT_UUID",
+    "order_code": "ORD001",
+    "requested_by": "Dr. Smith",
+    "samples": [
+      { "sample_code": "SAMP001", "type": "SANGRE" },
+      { "sample_code": "SAMP002", "type": "TEJIDO", "notes": "Fragment" }
+    ]
+  }'
+```
+
+```python
+import requests
+
+payload = {
+    "tenant_id": tenant_id,
+    "branch_id": branch_id,
+    "patient_id": patient_id,
+    "order_code": "ORD001",
+    "requested_by": "Dr. Smith",
+    "samples": [
+        {"sample_code": "SAMP001", "type": "SANGRE"},
+        {"sample_code": "SAMP002", "type": "TEJIDO", "notes": "Fragment"},
+    ],
+}
+
+resp = requests.post(
+    f"{BASE_URL}/api/v1/laboratory/orders/unified",
+    json=payload,
+)
+resp.raise_for_status()
+data = resp.json()
+print("Order:", data["order"]["order_code"], "Samples:", len(data["samples"]))
+```
+
+### Get Full Order Detail (order + patient + samples)
+```bash
+ORDER_ID=order-uuid-here
+curl "http://localhost:8000/api/v1/laboratory/orders/$ORDER_ID/full"
+```
+
+```python
+import requests
+
+order_id = "ORDER_UUID"
+resp = requests.get(f"{BASE_URL}/api/v1/laboratory/orders/{order_id}/full")
+resp.raise_for_status()
+full = resp.json()
+print("Order:", full["order"]["order_code"], "Patient:", full["patient"]["first_name"]) 
+print("Samples:", [s["sample_code"] for s in full["samples"]])
+```
+
 ### Upload Sample Image (multipart/form-data)
 ```bash
 curl -X POST "http://localhost:8000/api/v1/laboratory/samples/SAMPLE_UUID/images" \

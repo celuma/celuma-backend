@@ -78,3 +78,37 @@ class SampleImageUploadResponse(BaseModel):
     is_raw: bool
     file_size: int
     urls: Dict[str, str]
+
+
+class UnifiedSampleCreate(BaseModel):
+    """Input schema for creating a sample as part of unified order creation."""
+    sample_code: str
+    type: str
+    notes: Optional[str] = None
+    collected_at: Optional[datetime] = None
+    received_at: Optional[datetime] = None
+
+
+class LabOrderUnifiedCreate(BaseModel):
+    """Unified create: create lab order and one or more samples in one operation."""
+    tenant_id: str
+    branch_id: str
+    patient_id: str
+    order_code: str
+    requested_by: Optional[str] = None
+    notes: Optional[str] = None
+    created_by: Optional[str] = None
+    samples: List[UnifiedSampleCreate]
+
+
+class LabOrderUnifiedResponse(BaseModel):
+    """Response for unified create, returning order and samples created."""
+    order: LabOrderResponse
+    samples: List[SampleResponse]
+
+
+class LabOrderFullDetailResponse(BaseModel):
+    """Complete detail for a lab order: order, patient, and samples."""
+    order: LabOrderDetailResponse
+    patient: Dict[str, Optional[str]]
+    samples: List[SampleResponse]
