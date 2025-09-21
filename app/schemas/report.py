@@ -51,3 +51,13 @@ class ReportVersionResponse(BaseModel):
     version_no: int
     report_id: str
     is_current: bool
+
+
+class ReportMetaResponse(BaseModel):
+    """Lightweight report metadata for case listings."""
+    id: str
+    status: str
+    title: Optional[str] = None
+    published_at: Optional[datetime] = None
+    version_no: Optional[int] = None
+    has_pdf: bool = False

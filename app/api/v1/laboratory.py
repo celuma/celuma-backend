@@ -6,6 +6,7 @@ from app.models.laboratory import LabOrder, Sample, SampleImage
 from app.models.storage import StorageObject, SampleImageRendition
 from app.models.tenant import Tenant, Branch
 from app.models.patient import Patient
+from app.models.report import Report, ReportVersion
 from app.models.user import AppUser
 from app.schemas.laboratory import (
     LabOrderCreate,
@@ -19,6 +20,10 @@ from app.schemas.laboratory import (
     LabOrderUnifiedCreate,
     LabOrderUnifiedResponse,
     LabOrderFullDetailResponse,
+    PatientCasesListResponse,
+    PatientCaseSummary,
+    PatientOrdersListResponse,
+    PatientOrderSummary,
 )
 from app.services.s3 import S3Service
 from app.services.image_processing import process_image_bytes
@@ -533,3 +538,101 @@ def get_order_full_detail(order_id: str, session: Session = Depends(get_session)
     ]
 
     return LabOrderFullDetailResponse(order=order_resp, patient=patient_resp, samples=sample_resps)
+
+
+@router.get("/patients/{patient_id}/orders", response_model=PatientOrdersListResponse)
+def list_patient_orders(patient_id: str, session: Session = Depends(get_session)):
+    """List all orders for a given patient (enriched summary)."""
+    patient = session.get(Patient, patient_id)
+    if not patient:
+        raise HTTPException(404, "Patient not found")
+
+    orders = session.exec(select(LabOrder).where(LabOrder.patient_id == patient.id)).all()
+    summaries = []
+    for o in orders:
+        sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
+        has_report = session.exec(select(Report).where(Report.order_id == o.id)).first() is not None
+        summaries.append(
+            PatientOrderSummary(
+                id=str(o.id),
+                order_code=o.order_code,
+                status=o.status,
+                tenant_id=str(o.tenant_id),
+                branch_id=str(o.branch_id),
+                patient_id=str(o.patient_id),
+                requested_by=o.requested_by,
+                notes=o.notes,
+                created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
+                sample_count=sample_count,
+                has_report=has_report,
+            )
+        )
+
+    return PatientOrdersListResponse(patient_id=str(patient.id), orders=summaries)
+
+
+@router.get("/patients/{patient_id}/cases", response_model=PatientCasesListResponse)
+def list_patient_cases(patient_id: str, session: Session = Depends(get_session)):
+    """List all cases for a patient with full details: order, samples, and report metadata (if any)."""
+    patient = session.get(Patient, patient_id)
+    if not patient:
+        raise HTTPException(404, "Patient not found")
+
+    orders = session.exec(select(LabOrder).where(LabOrder.patient_id == patient.id)).all()
+    cases = []
+    for order in orders:
+        # Order detail
+        order_resp = LabOrderDetailResponse(
+            id=str(order.id),
+            order_code=order.order_code,
+            status=order.status,
+            patient_id=str(order.patient_id),
+            tenant_id=str(order.tenant_id),
+            branch_id=str(order.branch_id),
+            requested_by=order.requested_by,
+            notes=order.notes,
+            billed_lock=order.billed_lock,
+        )
+
+        # Samples list
+        samples = session.exec(select(Sample).where(Sample.order_id == order.id)).all()
+        sample_resps = [
+            SampleResponse(
+                id=str(s.id),
+                sample_code=s.sample_code,
+                type=s.type,
+                state=s.state,
+                order_id=str(s.order_id),
+                tenant_id=str(s.tenant_id),
+                branch_id=str(s.branch_id),
+            )
+            for s in samples
+        ]
+
+        # Report meta (if any) using latest/current version
+        report_meta = None
+        report = session.exec(select(Report).where(Report.order_id == order.id)).first()
+        if report:
+            current_version = session.exec(
+                select(ReportVersion)
+                .where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
+                .order_by(ReportVersion.version_no.desc())
+            ).first()
+            has_pdf = bool(current_version and current_version.pdf_storage_id)
+            from app.schemas.report import ReportMetaResponse  # local import to avoid cycles
+            report_meta = ReportMetaResponse(
+                id=str(report.id),
+                status=report.status,
+                title=report.title,
+                published_at=report.published_at,
+                version_no=current_version.version_no if current_version else None,
+                has_pdf=has_pdf,
+            )
+
+        cases.append({
+            "order": order_resp,
+            "samples": sample_resps,
+            "report": report_meta,
+        })
+
+    return PatientCasesListResponse(patient_id=str(patient.id), cases=cases)

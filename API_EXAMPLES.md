@@ -610,6 +610,42 @@ print("Order:", full["order"]["order_code"], "Patient:", full["patient"]["first_
 print("Samples:", [s["sample_code"] for s in full["samples"]])
 ```
 
+### List Cases for a Patient
+```bash
+PATIENT_ID=patient-uuid-here
+curl "http://localhost:8000/api/v1/laboratory/patients/$PATIENT_ID/cases"
+```
+
+```python
+import requests
+
+patient_id = "PATIENT_UUID"
+resp = requests.get(f"{BASE_URL}/api/v1/laboratory/patients/{patient_id}/cases")
+resp.raise_for_status()
+cases = resp.json()["cases"]
+for case in cases:
+    order = case["order"]
+    report = case.get("report")
+    print("Order:", order["order_code"], "samples:", len(case["samples"]), "has_report:", bool(report))
+
+### List Orders for a Patient (summary)
+```bash
+PATIENT_ID=patient-uuid-here
+curl "http://localhost:8000/api/v1/laboratory/patients/$PATIENT_ID/orders"
+```
+
+```python
+import requests
+
+patient_id = "PATIENT_UUID"
+resp = requests.get(f"{BASE_URL}/api/v1/laboratory/patients/{patient_id}/orders")
+resp.raise_for_status()
+orders = resp.json()["orders"]
+for o in orders:
+    print(o["order_code"], "samples:", o["sample_count"], "has_report:", o["has_report"]) 
+```
+```
+
 ### Upload Sample Image (multipart/form-data)
 ```bash
 curl -X POST "http://localhost:8000/api/v1/laboratory/samples/SAMPLE_UUID/images" \

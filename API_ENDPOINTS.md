@@ -642,6 +642,81 @@ Response body:
 **Errors:**
 - 404 if order or patient is not found
 
+### GET /api/v1/laboratory/patients/{patient_id}/orders
+**List all orders for a given patient (summary)**
+
+**Response:**
+```json
+{
+  "patient_id": "patient-uuid",
+  "orders": [
+    {
+      "id": "order-uuid",
+      "order_code": "ORD001",
+      "status": "RECEIVED",
+      "tenant_id": "tenant-uuid",
+      "branch_id": "branch-uuid",
+      "patient_id": "patient-uuid",
+      "requested_by": "Dr. Smith",
+      "notes": "...",
+      "created_at": "2025-08-18T10:00:00Z",
+      "sample_count": 2,
+      "has_report": true
+    }
+  ]
+}
+```
+
+**Errors:**
+- 404 if patient not found
+
+### GET /api/v1/laboratory/patients/{patient_id}/cases
+**List complete cases for a given patient (order + samples + report meta)**
+
+**Response:**
+```json
+{
+  "patient_id": "patient-uuid",
+  "cases": [
+    {
+      "order": {
+        "id": "order-uuid",
+        "order_code": "ORD001",
+        "status": "RECEIVED",
+        "patient_id": "patient-uuid",
+        "tenant_id": "tenant-uuid",
+        "branch_id": "branch-uuid",
+        "requested_by": "Dr. Smith",
+        "notes": "...",
+        "billed_lock": false
+      },
+      "samples": [
+        {
+          "id": "sample-uuid",
+          "sample_code": "SAMP001",
+          "type": "SANGRE",
+          "state": "RECEIVED",
+          "order_id": "order-uuid",
+          "tenant_id": "tenant-uuid",
+          "branch_id": "branch-uuid"
+        }
+      ],
+      "report": {
+        "id": "report-uuid",
+        "status": "DRAFT",
+        "title": "Blood Test Report",
+        "published_at": null,
+        "version_no": 2,
+        "has_pdf": true
+      }
+    }
+  ]
+}
+```
+
+**Errors:**
+- 404 if patient not found
+
 **Request Body:**
 ```json
 {

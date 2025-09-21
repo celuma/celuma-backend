@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 from datetime import datetime
+from app.schemas.report import ReportMetaResponse
 
 class LabOrderCreate(BaseModel):
     """Schema for creating a laboratory order"""
@@ -112,3 +113,48 @@ class LabOrderFullDetailResponse(BaseModel):
     order: LabOrderDetailResponse
     patient: Dict[str, Optional[str]]
     samples: List[SampleResponse]
+    report: Optional[ReportMetaResponse] = None
+
+
+class PatientCaseSummary(BaseModel):
+    """Summary of a case (order) for a given patient."""
+    id: str
+    order_code: str
+    status: str
+    tenant_id: str
+    branch_id: str
+    created_at: Optional[str] = None
+
+
+class PatientCaseDetail(BaseModel):
+    """Detailed case info: order + samples + report meta (if any)."""
+    order: LabOrderDetailResponse
+    samples: List[SampleResponse]
+    report: Optional[ReportMetaResponse] = None
+
+
+class PatientCasesListResponse(BaseModel):
+    """List of cases (orders) for a patient."""
+    patient_id: str
+    cases: List[PatientCaseDetail]
+
+
+class PatientOrderSummary(BaseModel):
+    """Enriched summary of an order for list endpoint."""
+    id: str
+    order_code: str
+    status: str
+    tenant_id: str
+    branch_id: str
+    patient_id: str
+    requested_by: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: Optional[str] = None
+    sample_count: int
+    has_report: bool
+
+
+class PatientOrdersListResponse(BaseModel):
+    """List of orders for a patient (summary)."""
+    patient_id: str
+    orders: List[PatientOrderSummary]
