@@ -90,12 +90,40 @@ async def limit_request_size(request: Request, call_next):
     # Skip size check for health endpoints
     if request.url.path in ["/", "/health", "/api/v1/health"]:
         return await call_next(request)
-    
-    # Check Content-Length header
-    content_length = request.headers.get("content-length")
-    if content_length:
-        content_length = int(content_length)
-        max_size = 10 * 1024 * 1024  # 10MB
+
+    # Determine per-route/per-type limits
+    path = request.url.path.lower()
+    content_type = (request.headers.get("content-type") or "").lower()
+
+    # Endpoints that handle streaming/chunked reads with their own limits
+    streaming_paths = [
+        "/api/v1/laboratory/samples/",  # base; specific images endpoint starts with this
+        "/api/v1/reports/",             # reports endpoints may upload PDFs, validated inside
+    ]
+    # If it's the specific sample images upload endpoint, skip global limit (endpoint enforces 50/500MB)
+    if path.startswith("/api/v1/laboratory/samples/") and path.endswith("/images"):
+        return await call_next(request)
+
+    # Default limits
+    fifty_mb = 50 * 1024 * 1024
+    five_hundred_mb = 500 * 1024 * 1024
+
+    # Heuristics: PDFs and standard images up to 50MB; RAW images up to 500MB
+    # RAW detection via typical extensions or vendor content-types
+    is_raw_like = any(ext in path for ext in [".cr2", ".cr3", ".nef", ".nrw", ".arw", ".sr2", ".raf", ".rw2", ".orf", ".pef", ".dng"]) or "raw" in content_type
+
+    if request.headers.get("content-length"):
+        try:
+            content_length = int(request.headers.get("content-length", "0"))
+        except ValueError:
+            content_length = 0
+
+        # For report PDF uploads, allow 50MB
+        if path.startswith("/api/v1/reports/"):
+            max_size = fifty_mb
+        else:
+            max_size = five_hundred_mb if is_raw_like else fifty_mb
+
         if content_length > max_size:
             return JSONResponse(
                 status_code=413,
@@ -104,7 +132,7 @@ async def limit_request_size(request: Request, call_next):
                     "type": "request_entity_too_large"
                 }
             )
-    
+
     return await call_next(request)
 
 # Basic rate limiting middleware (simple in-memory)

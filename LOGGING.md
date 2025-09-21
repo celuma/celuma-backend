@@ -76,7 +76,10 @@ logger.info(
 - Injects `X-Request-ID` and adds headers: `X-Content-Type-Options`, `X-Frame-Options`, `X-XSS-Protection`, `Referrer-Policy`, `Permissions-Policy`.
 
 2) Request Size Limiting
-- Rejects bodies >10MB with `413`.
+- Per-route limits with `413` on exceed:
+  - `/api/v1/laboratory/samples/{sample_id}/images`: handled in endpoint; reads in chunks and enforces 50MB (standard images) or 500MB (RAW formats) based on filename extension.
+  - `/api/v1/reports/.../pdf` and `/api/v1/reports/{report_id}/pdf`: up to 50MB.
+  - Other routes: default 50MB unless explicitly documented.
 
 3) Basic Rate Limiting (in-memory)
 - 100 req/min per IP, returns `429` when exceeded.

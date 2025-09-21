@@ -558,6 +558,11 @@ curl -X POST "http://localhost:8000/api/v1/laboratory/samples/SAMPLE_UUID/images
   -F "file=@/path/to/image.dng"
 ```
 
+Notes:
+- Regular images (JPG/PNG/WebP, etc.) up to 50MB.
+- RAW formats (`.cr2`, `.cr3`, `.nef`, `.nrw`, `.arw`, `.sr2`, `.raf`, `.rw2`, `.orf`, `.pef`, `.dng`) up to 500MB.
+- If the limit is exceeded, the API returns `413`.
+
 **Python Example:**
 ```python
 import requests
@@ -702,6 +707,10 @@ curl -X POST "http://localhost:8000/api/v1/reports/$REPORT_ID/versions/$VERSION_
   -F "file=@${PDF_PATH};type=application/pdf"
 ```
 
+Notes:
+- PDF size up to 50MB.
+- If the limit is exceeded, the API returns `413`.
+
 **Python Example:**
 ```python
 import requests
@@ -728,6 +737,10 @@ curl -X POST "http://localhost:8000/api/v1/reports/$REPORT_ID/pdf" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -F "file=@${PDF_PATH};type=application/pdf"
 ```
+
+Notes:
+- PDF size up to 50MB.
+- If the limit is exceeded, the API returns `413`.
 
 **Python Example:**
 ```python

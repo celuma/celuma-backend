@@ -580,6 +580,12 @@ Response body:
 - Content-Type: `multipart/form-data`
 - Body: field `file` with the image file
 
+**Size Limits:**
+- Regular images (JPG/PNG/WebP, etc.): up to 50MB
+- RAW formats (`.cr2`, `.cr3`, `.nef`, `.nrw`, `.arw`, `.sr2`, `.raf`, `.rw2`, `.orf`, `.pef`, `.dng`): up to 500MB
+
+If the file exceeds the limit, the server returns `413` with a message: `{"detail": "Request body too large...", "type": "request_entity_too_large"}`.
+
 **Behavior:**
 - RAW formats (e.g., CR2/NEF/ARW/DNG): store RAW original + processed JPEG + thumbnail
 - Regular images (e.g., JPG/PNG/WebP): store processed JPEG + thumbnail
@@ -784,6 +790,9 @@ Path param:
 - Uploads the PDF to S3 under a deterministic key
 - Creates a `storage_object` record and assigns `pdf_storage_id` in the target version
 
+**Size Limit:**
+- PDF up to 50MB. Larger uploads will return `413`.
+
 **Response:**
 ```json
 {
@@ -829,6 +838,9 @@ Path param:
 - Selects the newest version by highest `version_no`
 - If no versions exist, returns 404
 - Uploads the PDF to S3 and updates `pdf_storage_id` on that version
+
+**Size Limit:**
+- PDF up to 50MB. Larger uploads will return `413`.
 
 **Response:**
 ```json
