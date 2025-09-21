@@ -25,6 +25,7 @@ from app.schemas.laboratory import (
     PatientOrdersListResponse,
     PatientOrderSummary,
 )
+from app.schemas.report import ReportMetaResponse
 from app.services.s3 import S3Service
 from app.services.image_processing import process_image_bytes
 from uuid import uuid4
@@ -619,7 +620,6 @@ def list_patient_cases(patient_id: str, session: Session = Depends(get_session))
                 .order_by(ReportVersion.version_no.desc())
             ).first()
             has_pdf = bool(current_version and current_version.pdf_storage_id)
-            from app.schemas.report import ReportMetaResponse  # local import to avoid cycles
             report_meta = ReportMetaResponse(
                 id=str(report.id),
                 status=report.status,
