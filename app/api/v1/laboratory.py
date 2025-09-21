@@ -26,6 +26,7 @@ from app.schemas.laboratory import (
     PatientOrderSummary,
 )
 from app.schemas.report import ReportMetaResponse
+from app.schemas.patient import PatientFullResponse
 from app.services.s3 import S3Service
 from app.services.image_processing import process_image_bytes
 from uuid import uuid4
@@ -512,18 +513,18 @@ def get_order_full_detail(order_id: str, session: Session = Depends(get_session)
         billed_lock=order.billed_lock,
     )
 
-    patient_resp = {
-        "id": str(patient.id),
-        "patient_code": patient.patient_code,
-        "first_name": patient.first_name,
-        "last_name": patient.last_name,
-        "dob": str(patient.dob) if getattr(patient, "dob", None) else None,
-        "sex": getattr(patient, "sex", None),
-        "phone": getattr(patient, "phone", None),
-        "email": getattr(patient, "email", None),
-        "tenant_id": str(patient.tenant_id),
-        "branch_id": str(patient.branch_id),
-    }
+    patient_resp = PatientFullResponse(
+        id=str(patient.id),
+        tenant_id=str(patient.tenant_id),
+        branch_id=str(patient.branch_id),
+        patient_code=patient.patient_code,
+        first_name=patient.first_name,
+        last_name=patient.last_name,
+        dob=getattr(patient, "dob", None),
+        sex=getattr(patient, "sex", None),
+        phone=getattr(patient, "phone", None),
+        email=getattr(patient, "email", None),
+    )
 
     sample_resps = [
         SampleResponse(
@@ -569,7 +570,20 @@ def list_patient_orders(patient_id: str, session: Session = Depends(get_session)
             )
         )
 
-    return PatientOrdersListResponse(patient_id=str(patient.id), orders=summaries)
+    full_patient = PatientFullResponse(
+        id=str(patient.id),
+        tenant_id=str(patient.tenant_id),
+        branch_id=str(patient.branch_id),
+        patient_code=patient.patient_code,
+        first_name=patient.first_name,
+        last_name=patient.last_name,
+        dob=getattr(patient, "dob", None),
+        sex=getattr(patient, "sex", None),
+        phone=getattr(patient, "phone", None),
+        email=getattr(patient, "email", None),
+    )
+
+    return PatientOrdersListResponse(patient=full_patient, orders=summaries)
 
 
 @router.get("/patients/{patient_id}/cases", response_model=PatientCasesListResponse)
@@ -635,4 +649,19 @@ def list_patient_cases(patient_id: str, session: Session = Depends(get_session))
             "report": report_meta,
         })
 
-    return PatientCasesListResponse(patient_id=str(patient.id), cases=cases)
+    # Build patient full profile to attach at top-level of cases list
+    full_patient = PatientFullResponse(
+        id=str(patient.id),
+        tenant_id=str(patient.tenant_id),
+        branch_id=str(patient.branch_id),
+        patient_code=patient.patient_code,
+        first_name=patient.first_name,
+        last_name=patient.last_name,
+        dob=getattr(patient, "dob", None),
+        sex=getattr(patient, "sex", None),
+        phone=getattr(patient, "phone", None),
+        email=getattr(patient, "email", None),
+    )
+
+    # Reuse PatientCaseDetail schema structure via dicts already matching response_model
+    return PatientCasesListResponse(patient=full_patient, patient_id=str(patient.id), cases=cases)

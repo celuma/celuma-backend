@@ -422,18 +422,24 @@ Response body:
 ```
 
 ### GET /api/v1/patients/
-**List all patients**
+**List all patients (full profile)**
+
+Returns a list of full patient profiles (`PatientFullResponse`).
 
 **Response:**
 ```json
 [
   {
     "id": "patient-uuid",
+    "tenant_id": "tenant-uuid-here",
+    "branch_id": "branch-uuid-here",
     "patient_code": "P001",
     "first_name": "John",
     "last_name": "Doe",
-    "tenant_id": "tenant-uuid-here",
-    "branch_id": "branch-uuid-here"
+    "dob": "1990-01-01",
+    "sex": "M",
+    "phone": "555-1234",
+    "email": "john.doe@example.com"
   }
 ]
 ```
@@ -597,7 +603,7 @@ Response body:
 ---
 
 ### GET /api/v1/laboratory/orders/{order_id}/full
-**Get complete order details including patient and samples**
+**Get complete order details including patient (full) and samples**
 
 **Response:**
 ```json
@@ -615,15 +621,15 @@ Response body:
   },
   "patient": {
     "id": "patient-uuid",
+    "tenant_id": "tenant-uuid",
+    "branch_id": "branch-uuid",
     "patient_code": "P001",
     "first_name": "John",
     "last_name": "Doe",
     "dob": "1990-01-01",
     "sex": "M",
     "phone": "555-1234",
-    "email": "john.doe@example.com",
-    "tenant_id": "tenant-uuid",
-    "branch_id": "branch-uuid"
+    "email": "john.doe@example.com"
   },
   "samples": [
     {
@@ -643,12 +649,23 @@ Response body:
 - 404 if order or patient is not found
 
 ### GET /api/v1/laboratory/patients/{patient_id}/orders
-**List all orders for a given patient (summary)**
+**List all orders for a given patient (summary) and return patient (full)**
 
 **Response:**
 ```json
 {
-  "patient_id": "patient-uuid",
+  "patient": {
+    "id": "patient-uuid",
+    "tenant_id": "tenant-uuid",
+    "branch_id": "branch-uuid",
+    "patient_code": "P001",
+    "first_name": "John",
+    "last_name": "Doe",
+    "dob": "1990-01-01",
+    "sex": "M",
+    "phone": "555-1234",
+    "email": "john.doe@example.com"
+  },
   "orders": [
     {
       "id": "order-uuid",
@@ -671,11 +688,23 @@ Response body:
 - 404 if patient not found
 
 ### GET /api/v1/laboratory/patients/{patient_id}/cases
-**List complete cases for a given patient (order + samples + report meta)**
+**List complete cases for a given patient (order + samples + report meta) and return patient (full)**
 
 **Response:**
 ```json
 {
+  "patient": {
+    "id": "patient-uuid",
+    "tenant_id": "tenant-uuid",
+    "branch_id": "branch-uuid",
+    "patient_code": "P001",
+    "first_name": "John",
+    "last_name": "Doe",
+    "dob": "1990-01-01",
+    "sex": "M",
+    "phone": "555-1234",
+    "email": "john.doe@example.com"
+  },
   "patient_id": "patient-uuid",
   "cases": [
     {

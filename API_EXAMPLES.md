@@ -462,7 +462,7 @@ if response.status_code == 200:
     print(f"Patient created: {patient['first_name']} {patient['last_name']}")
 ```
 
-### List All Patients
+### List All Patients (full profile)
 ```bash
 curl http://localhost:8000/api/v1/patients/
 ```
@@ -473,7 +473,9 @@ response = requests.get("http://localhost:8000/api/v1/patients/")
 if response.status_code == 200:
     patients = response.json()
     for patient in patients:
-        print(f"- {patient['first_name']} {patient['last_name']} ({patient['patient_code']})")
+        print(
+            f"- {patient['first_name']} {patient['last_name']} | code={patient['patient_code']} | phone={patient.get('phone')}"
+        )
 ```
 
 ## 🧪 Laboratory Management
@@ -593,7 +595,7 @@ data = resp.json()
 print("Order:", data["order"]["order_code"], "Samples:", len(data["samples"]))
 ```
 
-### Get Full Order Detail (order + patient + samples)
+### Get Full Order Detail (order + patient full + samples)
 ```bash
 ORDER_ID=order-uuid-here
 curl "http://localhost:8000/api/v1/laboratory/orders/$ORDER_ID/full"
@@ -610,7 +612,7 @@ print("Order:", full["order"]["order_code"], "Patient:", full["patient"]["first_
 print("Samples:", [s["sample_code"] for s in full["samples"]])
 ```
 
-### List Cases for a Patient
+### List Cases for a Patient (includes patient full profile)
 ```bash
 PATIENT_ID=patient-uuid-here
 curl "http://localhost:8000/api/v1/laboratory/patients/$PATIENT_ID/cases"
@@ -622,13 +624,15 @@ import requests
 patient_id = "PATIENT_UUID"
 resp = requests.get(f"{BASE_URL}/api/v1/laboratory/patients/{patient_id}/cases")
 resp.raise_for_status()
-cases = resp.json()["cases"]
+data = resp.json()
+print("Patient:", data["patient"]["first_name"], data["patient"]["last_name"], "code:", data["patient"]["patient_code"]) 
+cases = data["cases"]
 for case in cases:
     order = case["order"]
     report = case.get("report")
     print("Order:", order["order_code"], "samples:", len(case["samples"]), "has_report:", bool(report))
 
-### List Orders for a Patient (summary)
+### List Orders for a Patient (summary + patient full)
 ```bash
 PATIENT_ID=patient-uuid-here
 curl "http://localhost:8000/api/v1/laboratory/patients/$PATIENT_ID/orders"
@@ -640,7 +644,9 @@ import requests
 patient_id = "PATIENT_UUID"
 resp = requests.get(f"{BASE_URL}/api/v1/laboratory/patients/{patient_id}/orders")
 resp.raise_for_status()
-orders = resp.json()["orders"]
+data = resp.json()
+print("Patient:", data["patient"]["first_name"], data["patient"]["last_name"], data["patient"]["patient_code"]) 
+orders = data["orders"]
 for o in orders:
     print(o["order_code"], "samples:", o["sample_count"], "has_report:", o["has_report"]) 
 ```

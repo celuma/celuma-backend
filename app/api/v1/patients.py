@@ -3,22 +3,29 @@ from sqlmodel import select, Session
 from app.core.db import get_session
 from app.models.patient import Patient
 from app.models.tenant import Tenant, Branch
-from app.schemas.patient import PatientCreate, PatientResponse, PatientDetailResponse
+from app.schemas.patient import PatientCreate, PatientResponse, PatientDetailResponse, PatientFullResponse
 
 router = APIRouter(prefix="/patients")
 
-@router.get("/")
+@router.get("/", response_model=list[PatientFullResponse])
 def list_patients(session: Session = Depends(get_session)):
-    """List all patients"""
+    """List all patients with full profile"""
     patients = session.exec(select(Patient)).all()
-    return [{
-        "id": str(p.id),
-        "patient_code": p.patient_code,
-        "first_name": p.first_name,
-        "last_name": p.last_name,
-        "tenant_id": str(p.tenant_id),
-        "branch_id": str(p.branch_id)
-    } for p in patients]
+    return [
+        PatientFullResponse(
+            id=str(p.id),
+            tenant_id=str(p.tenant_id),
+            branch_id=str(p.branch_id),
+            patient_code=p.patient_code,
+            first_name=p.first_name,
+            last_name=p.last_name,
+            dob=p.dob,
+            sex=p.sex,
+            phone=p.phone,
+            email=p.email,
+        )
+        for p in patients
+    ]
 
 @router.post("/", response_model=PatientResponse)
 def create_patient(patient_data: PatientCreate, session: Session = Depends(get_session)):
