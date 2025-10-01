@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select, Session
 from app.core.db import get_session
+from app.api.v1.auth import get_auth_ctx, AuthContext
 from app.models.billing import Invoice, Payment
 from app.models.laboratory import LabOrder
 from app.models.tenant import Tenant, Branch
@@ -9,9 +10,12 @@ from app.schemas.billing import InvoiceCreate, InvoiceResponse, InvoiceDetailRes
 router = APIRouter(prefix="/billing")
 
 @router.get("/invoices/")
-def list_invoices(session: Session = Depends(get_session)):
+def list_invoices(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """List all invoices"""
-    invoices = session.exec(select(Invoice)).all()
+    invoices = session.exec(select(Invoice).where(Invoice.tenant_id == ctx.tenant_id)).all()
     return [{
         "id": str(i.id),
         "invoice_number": i.invoice_number,
@@ -76,10 +80,16 @@ def create_invoice(invoice_data: InvoiceCreate, session: Session = Depends(get_s
     )
 
 @router.get("/invoices/{invoice_id}", response_model=InvoiceDetailResponse)
-def get_invoice(invoice_id: str, session: Session = Depends(get_session)):
+def get_invoice(
+    invoice_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """Get invoice details"""
     invoice = session.get(Invoice, invoice_id)
     if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    if str(invoice.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Invoice not found")
     
     return InvoiceDetailResponse(
@@ -95,9 +105,12 @@ def get_invoice(invoice_id: str, session: Session = Depends(get_session)):
     )
 
 @router.get("/payments/")
-def list_payments(session: Session = Depends(get_session)):
+def list_payments(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """List all payments"""
-    payments = session.exec(select(Payment)).all()
+    payments = session.exec(select(Payment).where(Payment.tenant_id == ctx.tenant_id)).all()
     return [{
         "id": str(p.id),
         "amount_paid": float(p.amount_paid),

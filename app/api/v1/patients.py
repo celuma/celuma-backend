@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select, Session
 from app.core.db import get_session
+from app.api.v1.auth import get_auth_ctx, AuthContext
 from app.models.patient import Patient
 from app.models.tenant import Tenant, Branch
 from app.schemas.patient import PatientCreate, PatientResponse, PatientDetailResponse, PatientFullResponse
@@ -8,9 +9,12 @@ from app.schemas.patient import PatientCreate, PatientResponse, PatientDetailRes
 router = APIRouter(prefix="/patients")
 
 @router.get("/", response_model=list[PatientFullResponse])
-def list_patients(session: Session = Depends(get_session)):
+def list_patients(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """List all patients with full profile"""
-    patients = session.exec(select(Patient)).all()
+    patients = session.exec(select(Patient).where(Patient.tenant_id == ctx.tenant_id)).all()
     return [
         PatientFullResponse(
             id=str(p.id),
@@ -76,10 +80,16 @@ def create_patient(patient_data: PatientCreate, session: Session = Depends(get_s
     )
 
 @router.get("/{patient_id}", response_model=PatientDetailResponse)
-def get_patient(patient_id: str, session: Session = Depends(get_session)):
+def get_patient(
+    patient_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """Get patient details"""
     patient = session.get(Patient, patient_id)
     if not patient:
+        raise HTTPException(404, "Patient not found")
+    if str(patient.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Patient not found")
     
     return PatientDetailResponse(

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select, Session
 from app.core.db import get_session
+from app.api.v1.auth import get_auth_ctx, AuthContext
 from app.models.tenant import Branch, Tenant
 from app.models.user import AppUser
 from app.api.v1.auth import current_user
@@ -9,9 +10,12 @@ from app.schemas.tenant import BranchCreate, BranchResponse, BranchDetailRespons
 router = APIRouter(prefix="/branches")
 
 @router.get("/")
-def list_branches(session: Session = Depends(get_session)):
+def list_branches(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """List all branches"""
-    branches = session.exec(select(Branch)).all()
+    branches = session.exec(select(Branch).where(Branch.tenant_id == ctx.tenant_id)).all()
     return [{
         "id": str(b.id),
         "name": b.name,
@@ -49,10 +53,16 @@ def create_branch(branch_data: BranchCreate, session: Session = Depends(get_sess
     )
 
 @router.get("/{branch_id}", response_model=BranchDetailResponse)
-def get_branch(branch_id: str, session: Session = Depends(get_session)):
+def get_branch(
+    branch_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """Get branch details"""
     branch = session.get(Branch, branch_id)
     if not branch:
+        raise HTTPException(404, "Branch not found")
+    if str(branch.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Branch not found")
     return BranchDetailResponse(
         id=str(branch.id),
@@ -70,10 +80,16 @@ def get_branch(branch_id: str, session: Session = Depends(get_session)):
     )
 
 @router.get("/{branch_id}/users")
-def list_branch_users(branch_id: str, session: Session = Depends(get_session)):
+def list_branch_users(
+    branch_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """List all users for a branch"""
     branch = session.get(Branch, branch_id)
     if not branch:
+        raise HTTPException(404, "Branch not found")
+    if str(branch.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Branch not found")
     
     users = [{"id": str(ub.user.id), "email": ub.user.email, "full_name": ub.user.full_name, "role": ub.user.role} for ub in branch.users]
