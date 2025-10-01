@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi import FastAPI, Request, Response, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
@@ -10,6 +10,7 @@ from collections import defaultdict
 import asyncio
 from app.api.v1.users import router as users_router
 from app.api.v1.auth import router as auth_router
+from app.api.v1.auth import current_user
 from app.api.v1.tenants import router as tenants_router
 from app.api.v1.branches import router as branches_router
 from app.api.v1.patients import router as patients_router
@@ -235,12 +236,12 @@ async def log_requests(request: Request, call_next):
 
 app.include_router(users_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
-app.include_router(tenants_router, prefix="/api/v1")
-app.include_router(branches_router, prefix="/api/v1")
-app.include_router(patients_router, prefix="/api/v1")
-app.include_router(laboratory_router, prefix="/api/v1")
-app.include_router(reports_router, prefix="/api/v1")
-app.include_router(billing_router, prefix="/api/v1")
+app.include_router(tenants_router, prefix="/api/v1", dependencies=[Depends(current_user)])
+app.include_router(branches_router, prefix="/api/v1", dependencies=[Depends(current_user)])
+app.include_router(patients_router, prefix="/api/v1", dependencies=[Depends(current_user)])
+app.include_router(laboratory_router, prefix="/api/v1", dependencies=[Depends(current_user)])
+app.include_router(reports_router, prefix="/api/v1", dependencies=[Depends(current_user)])
+app.include_router(billing_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 
 @app.get("/")
 def root():

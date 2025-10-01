@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlmodel import select, Session
 from app.core.db import get_session
+from app.api.v1.auth import get_auth_ctx, AuthContext
 from app.models.report import Report, ReportVersion
 from app.models.laboratory import LabOrder
 from app.models.tenant import Tenant, Branch
@@ -12,9 +13,12 @@ import json
 router = APIRouter(prefix="/reports")
 
 @router.get("/")
-def list_reports(session: Session = Depends(get_session)):
+def list_reports(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """List all reports"""
-    reports = session.exec(select(Report)).all()
+    reports = session.exec(select(Report).where(Report.tenant_id == ctx.tenant_id)).all()
     return [{
         "id": str(r.id),
         "status": r.status,
@@ -174,10 +178,16 @@ def create_report_new_version(report_id: str, report_data: ReportCreate, session
     )
 
 @router.get("/{report_id}", response_model=ReportDetailResponse)
-def get_report(report_id: str, session: Session = Depends(get_session)):
+def get_report(
+    report_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """Get report details"""
     report = session.get(Report, report_id)
     if not report:
+        raise HTTPException(404, "Report not found")
+    if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Report not found")
     
     # Load current version JSON, if any
@@ -211,10 +221,16 @@ def get_report(report_id: str, session: Session = Depends(get_session)):
     )
 
 @router.get("/{report_id}/versions")
-def list_report_versions(report_id: str, session: Session = Depends(get_session)):
+def list_report_versions(
+    report_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """List all versions for a report"""
     report = session.get(Report, report_id)
     if not report:
+        raise HTTPException(404, "Report not found")
+    if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Report not found")
     versions = session.exec(select(ReportVersion).where(ReportVersion.report_id == report.id)).all()
     return [{
@@ -225,10 +241,16 @@ def list_report_versions(report_id: str, session: Session = Depends(get_session)
     } for v in versions]
 
 @router.get("/{report_id}/pdf")
-def get_pdf_of_latest_version(report_id: str, session: Session = Depends(get_session)):
+def get_pdf_of_latest_version(
+    report_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """Return a presigned URL to download the PDF for the newest report version."""
     report = session.get(Report, report_id)
     if not report:
+        raise HTTPException(404, "Report not found")
+    if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Report not found")
 
     latest_version = session.exec(
@@ -258,10 +280,17 @@ def get_pdf_of_latest_version(report_id: str, session: Session = Depends(get_ses
     }
 
 @router.get("/{report_id}/{version_no}", response_model=ReportDetailResponse)
-def get_report_version(report_id: str, version_no: int, session: Session = Depends(get_session)):
+def get_report_version(
+    report_id: str,
+    version_no: int,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """Get specific report version details (same shape as current detail)."""
     report = session.get(Report, report_id)
     if not report:
+        raise HTTPException(404, "Report not found")
+    if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Report not found")
 
     version = session.exec(

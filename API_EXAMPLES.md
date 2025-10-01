@@ -15,6 +15,11 @@ This document provides comprehensive examples of how to use the Celuma API with 
 
 ## 🔐 Authentication
 
+Note: Except for `GET /`, `GET /health`, `GET /api/v1/health`, and `POST /api/v1/auth/*` (login/register), all endpoints require a Bearer token in the header:
+```
+Authorization: Bearer YOUR_ACCESS_TOKEN
+```
+
 ### Unified Registration (tenant + branch + admin)
 ```bash
 curl -X POST "http://localhost:8000/api/v1/auth/register/unified" \

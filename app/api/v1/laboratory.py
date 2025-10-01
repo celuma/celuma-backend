@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from typing import Dict
 from sqlmodel import select, Session
 from app.core.db import get_session
+from app.api.v1.auth import get_auth_ctx, AuthContext
 from app.models.laboratory import LabOrder, Sample, SampleImage
 from app.models.storage import StorageObject, SampleImageRendition
 from app.models.tenant import Tenant, Branch
@@ -44,9 +45,12 @@ from sqlmodel import select
 router = APIRouter(prefix="/laboratory")
 
 @router.get("/orders/", response_model=OrdersListResponse)
-def list_orders(session: Session = Depends(get_session)):
+def list_orders(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """List all laboratory orders with enriched patient and branch info, plus summary fields."""
-    orders = session.exec(select(LabOrder)).all()
+    orders = session.exec(select(LabOrder).where(LabOrder.tenant_id == ctx.tenant_id)).all()
     results: list[OrderListItem] = []
     for o in orders:
         # Resolve related names
@@ -128,10 +132,16 @@ def create_order(order_data: LabOrderCreate, session: Session = Depends(get_sess
     )
 
 @router.get("/orders/{order_id}", response_model=LabOrderDetailResponse)
-def get_order(order_id: str, session: Session = Depends(get_session)):
+def get_order(
+    order_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """Get order details"""
     order = session.get(LabOrder, order_id)
     if not order:
+        raise HTTPException(404, "Order not found")
+    if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Order not found")
     
     return LabOrderDetailResponse(
@@ -147,9 +157,12 @@ def get_order(order_id: str, session: Session = Depends(get_session)):
     )
 
 @router.get("/samples/", response_model=SamplesListResponse)
-def list_samples(session: Session = Depends(get_session)):
+def list_samples(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """List all samples with enriched branch and order objects. Keeps tenant_id as id string."""
-    samples = session.exec(select(Sample)).all()
+    samples = session.exec(select(Sample).where(Sample.tenant_id == ctx.tenant_id)).all()
     items: list[SampleListItem] = []
     for s in samples:
         branch = session.get(Branch, s.branch_id)
@@ -179,10 +192,16 @@ def list_samples(session: Session = Depends(get_session)):
     return SamplesListResponse(samples=items)
 
 @router.get("/samples/{sample_id}", response_model=SampleDetailResponse)
-def get_sample_detail(sample_id: str, session: Session = Depends(get_session)):
+def get_sample_detail(
+    sample_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """Get complete detail for a sample including branch, order, and patient references."""
     s = session.get(Sample, sample_id)
     if not s:
+        raise HTTPException(404, "Sample not found")
+    if str(s.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Sample not found")
 
     branch = session.get(Branch, s.branch_id)
@@ -573,10 +592,16 @@ def list_sample_images(sample_id: str, session: Session = Depends(get_session)):
 
 
 @router.get("/orders/{order_id}/full", response_model=LabOrderFullDetailResponse)
-def get_order_full_detail(order_id: str, session: Session = Depends(get_session)):
+def get_order_full_detail(
+    order_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """Return complete information for an order: order details, patient details, and samples."""
     order = session.get(LabOrder, order_id)
     if not order:
+        raise HTTPException(404, "Order not found")
+    if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Order not found")
 
     patient = session.get(Patient, order.patient_id)
@@ -629,13 +654,19 @@ def get_order_full_detail(order_id: str, session: Session = Depends(get_session)
 
 
 @router.get("/patients/{patient_id}/orders", response_model=PatientOrdersListResponse)
-def list_patient_orders(patient_id: str, session: Session = Depends(get_session)):
+def list_patient_orders(
+    patient_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """List all orders for a given patient (enriched summary)."""
     patient = session.get(Patient, patient_id)
     if not patient:
         raise HTTPException(404, "Patient not found")
 
-    orders = session.exec(select(LabOrder).where(LabOrder.patient_id == patient.id)).all()
+    if str(patient.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Patient not found")
+    orders = session.exec(select(LabOrder).where(LabOrder.patient_id == patient.id, LabOrder.tenant_id == ctx.tenant_id)).all()
     summaries = []
     for o in orders:
         sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
@@ -673,13 +704,19 @@ def list_patient_orders(patient_id: str, session: Session = Depends(get_session)
 
 
 @router.get("/patients/{patient_id}/cases", response_model=PatientCasesListResponse)
-def list_patient_cases(patient_id: str, session: Session = Depends(get_session)):
+def list_patient_cases(
+    patient_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
     """List all cases for a patient with full details: order, samples, and report metadata (if any)."""
     patient = session.get(Patient, patient_id)
     if not patient:
         raise HTTPException(404, "Patient not found")
 
-    orders = session.exec(select(LabOrder).where(LabOrder.patient_id == patient.id)).all()
+    if str(patient.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Patient not found")
+    orders = session.exec(select(LabOrder).where(LabOrder.patient_id == patient.id, LabOrder.tenant_id == ctx.tenant_id)).all()
     cases = []
     for order in orders:
         # Order detail

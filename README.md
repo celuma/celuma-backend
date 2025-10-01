@@ -220,6 +220,9 @@ make clean                # Clean up containers and data
 - **Optional Username**: Username field is completely optional during registration
 - **Multi-tenant Support**: All authentication is tenant-scoped
 - **JWT Tokens**: Secure stateless authentication with configurable expiration
+  
+#### Global Authentication Policy
+- All endpoints require `Authorization: Bearer <token>` except: `GET /`, `GET /health`, `GET /api/v1/health`, `POST /api/v1/auth/login`, `POST /api/v1/auth/register`, `POST /api/v1/auth/register/unified`.
 
 ## 🚀 Deployment
 

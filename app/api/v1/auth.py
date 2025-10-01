@@ -24,6 +24,7 @@ from app.schemas.auth import (
 )
 from datetime import datetime
 from typing import Union
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,27 @@ def current_user(request: Request, token=Depends(scheme), session: Session = Dep
         
     logger.info(f"🎉 [{request_id}] Authentication successful for user: {u.email}")
     return u
+
+
+class AuthContext(BaseModel):
+    """Lightweight auth context extracted from the current user.
+
+    This object is designed to be passed as a dependency to endpoints which need
+    quick access to the authenticated tenant and user identifiers for
+    multi-tenant scoping.
+    """
+
+    user_id: str
+    tenant_id: str
+
+
+def get_auth_ctx(user: AppUser = Depends(current_user)) -> AuthContext:
+    """Return the authentication context for the current request.
+
+    It exposes the `tenant_id` and `user_id` to be used in database queries to
+    enforce tenant isolation.
+    """
+    return AuthContext(user_id=str(user.id), tenant_id=str(user.tenant_id))
 
 @router.post("/login", response_model=Union[LoginResponse, LoginTenantSelectionResponse])
 def login(credentials: UserLogin, session: Session = Depends(get_session)):
