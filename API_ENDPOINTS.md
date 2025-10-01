@@ -22,6 +22,19 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 
 ## 🔐 Authentication Endpoints
 
+### Global Authentication Policy
+- All API endpoints require a Bearer token in the `Authorization` header, except:
+  - `GET /`
+  - `GET /health`
+  - `GET /api/v1/health`
+  - `POST /api/v1/auth/login`
+  - `POST /api/v1/auth/register`
+  - `POST /api/v1/auth/register/unified`
+- For all other endpoints, include:
+```
+Authorization: Bearer <jwt_token>
+```
+
 ### POST /api/v1/auth/register
 **Register a new user**
 
@@ -229,6 +242,8 @@ Response body:
 
 ## 🏢 Tenant Management
 
+Headers: `Authorization: Bearer <token>`
+
 ### POST /api/v1/tenants/
 **Create a new tenant**
 
@@ -307,6 +322,8 @@ Response body:
 ```
 
 ## 🏥 Branch Management
+
+Headers: `Authorization: Bearer <token>`
 
 ### POST /api/v1/branches/
 **Create a new branch**
@@ -391,6 +408,8 @@ Response body:
 
 ## 👥 Patient Management
 
+Headers: `Authorization: Bearer <token>`
+
 ### POST /api/v1/patients/
 **Create a new patient**
 
@@ -464,6 +483,8 @@ Returns a list of full patient profiles (`PatientFullResponse`).
 ```
 
 ## 🧪 Laboratory Management
+
+Headers: `Authorization: Bearer <token>`
 
 ### POST /api/v1/laboratory/orders/
 **Create a new laboratory order**
@@ -893,6 +914,8 @@ If the file exceeds the limit, the server returns `413` with a message: `{"detai
 
 ## 📋 Report Management
 
+Headers: `Authorization: Bearer <token>`
+
 ### POST /api/v1/reports/
 **Create a new report**
 
@@ -1139,6 +1162,8 @@ Path param:
 - 404 if report not found, report has no versions, or the latest version has no PDF
 
 ## 💰 Billing Management
+
+Headers: `Authorization: Bearer <token>`
 
 ### POST /api/v1/billing/invoices/
 **Create a new invoice**
