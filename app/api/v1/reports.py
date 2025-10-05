@@ -5,27 +5,83 @@ from app.api.v1.auth import get_auth_ctx, AuthContext
 from app.models.report import Report, ReportVersion
 from app.models.laboratory import LabOrder
 from app.models.tenant import Tenant, Branch
+from app.models.patient import Patient
 from app.models.storage import StorageObject
 from app.services.s3 import S3Service
-from app.schemas.report import ReportCreate, ReportResponse, ReportDetailResponse, ReportVersionCreate, ReportVersionResponse
+from app.schemas.report import (
+    ReportCreate, 
+    ReportResponse, 
+    ReportDetailResponse, 
+    ReportVersionCreate, 
+    ReportVersionResponse,
+    ReportsListResponse,
+    ReportListItem,
+    BranchRef,
+    OrderRef,
+    PatientRef
+)
 import json
 
 router = APIRouter(prefix="/reports")
 
-@router.get("/")
+@router.get("/", response_model=ReportsListResponse)
 def list_reports(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
 ):
-    """List all reports"""
+    """List all reports with enriched branch, order, and patient info"""
     reports = session.exec(select(Report).where(Report.tenant_id == ctx.tenant_id)).all()
-    return [{
-        "id": str(r.id),
-        "status": r.status,
-        "order_id": str(r.order_id),
-        "tenant_id": str(r.tenant_id),
-        "branch_id": str(r.branch_id)
-    } for r in reports]
+    results: list[ReportListItem] = []
+    
+    for r in reports:
+        # Resolve related entities
+        branch = session.get(Branch, r.branch_id)
+        order = session.get(LabOrder, r.order_id)
+        patient = session.get(Patient, order.patient_id) if order else None
+        
+        # Get current version info
+        current_version = session.exec(
+            select(ReportVersion).where(
+                ReportVersion.report_id == r.id, 
+                ReportVersion.is_current == True
+            )
+        ).first()
+        
+        version_no = current_version.version_no if current_version else None
+        has_pdf = bool(current_version and current_version.pdf_storage_id)
+        
+        results.append(
+            ReportListItem(
+                id=str(r.id),
+                status=r.status,
+                tenant_id=str(r.tenant_id),
+                branch=BranchRef(
+                    id=str(r.branch_id),
+                    name=branch.name if branch else "",
+                    code=branch.code if branch else None
+                ),
+                order=OrderRef(
+                    id=str(r.order_id),
+                    order_code=order.order_code if order else "",
+                    status=order.status if order else "",
+                    requested_by=order.requested_by if order else None,
+                    patient=PatientRef(
+                        id=str(patient.id) if patient else "",
+                        full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
+                        patient_code=patient.patient_code if patient else "",
+                    ) if patient else None
+                ),
+                title=r.title,
+                diagnosis_text=r.diagnosis_text,
+                published_at=r.published_at,
+                created_at=str(getattr(r, "created_at", "")) if getattr(r, "created_at", None) else None,
+                created_by=str(r.created_by) if r.created_by else None,
+                version_no=version_no,
+                has_pdf=has_pdf
+            )
+        )
+    
+    return ReportsListResponse(reports=results)
 
 @router.post("/", response_model=ReportResponse)
 def create_report(report_data: ReportCreate, session: Session = Depends(get_session)):

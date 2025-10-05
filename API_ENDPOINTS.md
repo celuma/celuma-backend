@@ -956,19 +956,44 @@ Headers: `Authorization: Bearer <token>`
 ```
 
 ### GET /api/v1/reports/
-**List all reports**
+**List all reports (enriched)**
+
+Returns `reports` array with enriched `branch`, `order`, and `patient` objects plus version metadata.
 
 **Response:**
 ```json
-[
-  {
-    "id": "report-uuid",
-    "status": "DRAFT",
-    "order_id": "order-uuid-here",
-    "tenant_id": "tenant-uuid-here",
-    "branch_id": "branch-uuid-here"
-  }
-]
+{
+  "reports": [
+    {
+      "id": "report-uuid",
+      "status": "PUBLISHED",
+      "tenant_id": "tenant-uuid",
+      "branch": {
+        "id": "branch-uuid",
+        "name": "Main Branch",
+        "code": "MAIN"
+      },
+      "order": {
+        "id": "order-uuid",
+        "order_code": "ORD001",
+        "status": "COMPLETED",
+        "requested_by": "Dr. Smith",
+        "patient": {
+          "id": "patient-uuid",
+          "full_name": "John Doe",
+          "patient_code": "P001"
+        }
+      },
+      "title": "Blood Test Report",
+      "diagnosis_text": "Normal blood count results",
+      "published_at": "2025-08-18T12:00:00Z",
+      "created_at": "2025-08-18T10:00:00Z",
+      "created_by": "user-uuid",
+      "version_no": 2,
+      "has_pdf": true
+    }
+  ]
+}
 ```
 
 ### GET /api/v1/reports/{report_id}

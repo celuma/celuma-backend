@@ -833,10 +833,69 @@ if response.status_code == 200:
     print(f"Report created: {report['title']}")
 ```
 
-### List All Reports
+### List All Reports (enriched)
 ```bash
-curl http://localhost:8000/api/v1/reports/
+curl "http://localhost:8000/api/v1/reports/" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
 ```
+
+**Response includes enriched branch, order, patient, and version information:**
+```json
+{
+  "reports": [
+    {
+      "id": "report-uuid",
+      "status": "PUBLISHED",
+      "tenant_id": "tenant-uuid",
+      "branch": {
+        "id": "branch-uuid",
+        "name": "Main Branch",
+        "code": "MAIN"
+      },
+      "order": {
+        "id": "order-uuid",
+        "order_code": "ORD001",
+        "status": "COMPLETED",
+        "requested_by": "Dr. Smith",
+        "patient": {
+          "id": "patient-uuid",
+          "full_name": "John Doe",
+          "patient_code": "P001"
+        }
+      },
+      "title": "Blood Test Report",
+      "diagnosis_text": "Normal blood count results",
+      "published_at": "2025-08-18T12:00:00Z",
+      "created_at": "2025-08-18T10:00:00Z",
+      "created_by": "user-uuid",
+      "version_no": 2,
+      "has_pdf": true
+    }
+  ]
+}
+```
+
+**Python Example:**
+```python
+import requests
+
+resp = requests.get(
+    f"{BASE_URL}/api/v1/reports/",
+    headers={"Authorization": f"Bearer {access_token}"}
+)
+resp.raise_for_status()
+data = resp.json()["reports"]
+for r in data:
+    print(
+        f"Report: {r['title']} | Status: {r['status']} | "
+        f"Order: {r['order']['order_code']} | "
+        f"Patient: {r['order']['patient']['full_name']} | "
+        f"Branch: {r['branch']['name']} | "
+        f"Version: {r['version_no']} | "
+        f"Has PDF: {r['has_pdf']}"
+    )
+```
+
 ### Get Report Details (includes JSON body from S3 of current version)
 ```bash
 curl http://localhost:8000/api/v1/reports/REPORT_UUID
@@ -954,11 +1013,20 @@ print("Presigned URL:", data["pdf_url"])  # Use this URL to download the PDF
 
 **Python Example:**
 ```python
-response = requests.get("http://localhost:8000/api/v1/reports/")
+response = requests.get(
+    "http://localhost:8000/api/v1/reports/",
+    headers={"Authorization": f"Bearer {access_token}"}
+)
 if response.status_code == 200:
-    reports = response.json()
+    data = response.json()
+    reports = data['reports']
     for report in reports:
-        print(f"- {report['title']} (Status: {report['status']})")
+        patient_name = report['order']['patient']['full_name'] if report['order'].get('patient') else 'N/A'
+        print(
+            f"- {report['title']} | Status: {report['status']} | "
+            f"Patient: {patient_name} | Order: {report['order']['order_code']} | "
+            f"Version: {report['version_no']} | Has PDF: {report['has_pdf']}"
+        )
 ```
 
 ## 💰 Billing Management
