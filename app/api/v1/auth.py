@@ -151,7 +151,7 @@ def login(credentials: UserLogin, session: Session = Depends(get_session)):
             logger.warning("Inactive user login attempt", extra={"event": "auth.login.inactive", "user_id": str(user.id), "tenant_id": str(user.tenant_id)})
             raise HTTPException(401, "User account is inactive")
         logger.info("Login success", extra={"event": "auth.login.success", "user_id": str(user.id), "tenant_id": str(user.tenant_id)})
-        return LoginResponse(access_token=create_jwt(sub=str(user.id)), token_type="bearer", tenant_id=str(user.tenant_id))
+        return LoginResponse(access_token=create_jwt(sub=str(user.id)), token_type="Bearer", tenant_id=str(user.tenant_id))
 
     # No tenant_id provided: find matches across all tenants
     candidates = []
@@ -175,7 +175,7 @@ def login(credentials: UserLogin, session: Session = Depends(get_session)):
     if len(valid_users) == 1:
         user = valid_users[0]
         logger.info("Login success (single match)", extra={"event": "auth.login.success", "user_id": str(user.id), "tenant_id": str(user.tenant_id)})
-        return LoginResponse(access_token=create_jwt(sub=str(user.id)), token_type="bearer", tenant_id=str(user.tenant_id))
+        return LoginResponse(access_token=create_jwt(sub=str(user.id)), token_type="Bearer", tenant_id=str(user.tenant_id))
 
     # Multiple tenants: return selection list
     options = []
