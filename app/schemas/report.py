@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 class ReportCreate(BaseModel):
@@ -61,3 +61,43 @@ class ReportMetaResponse(BaseModel):
     published_at: Optional[datetime] = None
     version_no: Optional[int] = None
     has_pdf: bool = False
+
+# Schemas for enriched list responses
+class BranchRef(BaseModel):
+    """Reference to a branch with basic info"""
+    id: str
+    name: str
+    code: Optional[str] = None
+
+class PatientRef(BaseModel):
+    """Reference to a patient with basic info"""
+    id: str
+    full_name: str
+    patient_code: str
+
+class OrderRef(BaseModel):
+    """Reference to an order with basic info"""
+    id: str
+    order_code: str
+    status: str
+    requested_by: Optional[str] = None
+    patient: Optional[PatientRef] = None
+
+class ReportListItem(BaseModel):
+    """Enriched report item for list view"""
+    id: str
+    status: str
+    tenant_id: str
+    branch: BranchRef
+    order: OrderRef
+    title: Optional[str] = None
+    diagnosis_text: Optional[str] = None
+    published_at: Optional[datetime] = None
+    created_at: Optional[str] = None
+    created_by: Optional[str] = None
+    version_no: Optional[int] = None
+    has_pdf: bool = False
+
+class ReportsListResponse(BaseModel):
+    """Response schema for reports list"""
+    reports: List[ReportListItem]
