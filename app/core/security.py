@@ -3,10 +3,10 @@ from passlib.context import CryptContext
 from jose import jwt, JWTError
 from app.core.config import settings
 
-# Default to pbkdf2_sha256 to avoid bcrypt backend issues across environments.
-# Keep bcrypt-based schemes for backward compatibility when verifying existing hashes.
+# Use pbkdf2_sha256 exclusively - no 72-byte password limit, more secure,
+# and avoids bcrypt backend compatibility issues across environments.
 pwd_context = CryptContext(
-    schemes=["pbkdf2_sha256", "bcrypt_sha256", "bcrypt"],
+    schemes=["pbkdf2_sha256"],
     deprecated="auto",
     pbkdf2_sha256__default_rounds=29000,
 )
