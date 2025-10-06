@@ -1301,6 +1301,51 @@ Headers: `Authorization: Bearer <token>`
 ]
 ```
 
+## 📊 Dashboard Endpoints
+
+Headers: `Authorization: Bearer <token>`
+
+### GET /api/v1/dashboard/
+**Get dashboard statistics and recent activity**
+
+**Response:**
+```json
+{
+  "stats": {
+    "total_patients": 150,
+    "total_orders": 89,
+    "total_samples": 234,
+    "total_reports": 67,
+    "pending_orders": 12,
+    "draft_reports": 8,
+    "published_reports": 59
+  },
+  "recent_activity": [
+    {
+      "id": "order-uuid",
+      "title": "Orden ORD001",
+      "description": "Paciente: Juan Pérez • Solicitado por: Dr. García",
+      "timestamp": "2025-01-16T10:30:00Z",
+      "type": "order",
+      "status": "RECEIVED"
+    },
+    {
+      "id": "report-uuid",
+      "title": "Citología Mamaria",
+      "description": "Orden: ORD002 • Paciente: María López",
+      "timestamp": "2025-01-16T09:15:00Z",
+      "type": "report",
+      "status": "PUBLISHED"
+    }
+  ]
+}
+```
+
+**Notes:**
+- Returns aggregated statistics for the current tenant
+- Recent activity includes the 8 most recent items across orders, reports, and samples
+- Optimized endpoint that combines multiple queries for better performance
+
 ## 🔍 System Endpoints
 
 ### GET /

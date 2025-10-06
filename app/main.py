@@ -17,6 +17,7 @@ from app.api.v1.patients import router as patients_router
 from app.api.v1.laboratory import router as laboratory_router
 from app.api.v1.reports import router as reports_router
 from app.api.v1.billing import router as billing_router
+from app.api.v1.dashboard import router as dashboard_router
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -242,6 +243,7 @@ app.include_router(patients_router, prefix="/api/v1", dependencies=[Depends(curr
 app.include_router(laboratory_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(reports_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(billing_router, prefix="/api/v1", dependencies=[Depends(current_user)])
+app.include_router(dashboard_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 
 @app.get("/")
 def root():

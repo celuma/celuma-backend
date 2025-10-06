@@ -1029,6 +1029,75 @@ if response.status_code == 200:
         )
 ```
 
+## 📊 Dashboard Management
+
+### Get Dashboard Statistics
+```bash
+curl "http://localhost:8000/api/v1/dashboard/" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+import requests
+
+headers = {"Authorization": f"Bearer {access_token}"}
+response = requests.get(
+    "http://localhost:8000/api/v1/dashboard/",
+    headers=headers
+)
+
+if response.status_code == 200:
+    dashboard_data = response.json()
+    stats = dashboard_data['stats']
+    print(f"Total patients: {stats['total_patients']}")
+    print(f"Total orders: {stats['total_orders']}")
+    print(f"Pending orders: {stats['pending_orders']}")
+    print(f"Published reports: {stats['published_reports']}")
+    
+    print("\nRecent Activity:")
+    for activity in dashboard_data['recent_activity']:
+        print(f"- {activity['title']}: {activity['description']}")
+```
+
+**Response:**
+```json
+{
+  "stats": {
+    "total_patients": 150,
+    "total_orders": 89,
+    "total_samples": 234,
+    "total_reports": 67,
+    "pending_orders": 12,
+    "draft_reports": 8,
+    "published_reports": 59
+  },
+  "recent_activity": [
+    {
+      "id": "order-uuid",
+      "title": "Orden ORD001",
+      "description": "Paciente: Juan Pérez • Solicitado por: Dr. García",
+      "timestamp": "2025-01-16T10:30:00Z",
+      "type": "order",
+      "status": "RECEIVED"
+    },
+    {
+      "id": "report-uuid",
+      "title": "Citología Mamaria",
+      "description": "Orden: ORD002 • Paciente: María López",
+      "timestamp": "2025-01-16T09:15:00Z",
+      "type": "report",
+      "status": "PUBLISHED"
+    }
+  ]
+}
+```
+
+**Notes:**
+- Returns aggregated statistics for the current tenant
+- Recent activity includes the 8 most recent items across orders, reports, and samples
+- Optimized endpoint that combines multiple queries for better performance
+
 ## 💰 Billing Management
 
 ### Create Invoice
