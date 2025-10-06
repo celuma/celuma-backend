@@ -137,7 +137,7 @@ def get_dashboard_data(
     # Recent samples (last 2)
     recent_samples = session.exec(
         select(Sample).where(Sample.tenant_id == ctx.tenant_id)
-        .order_by(Sample.created_at.desc())
+        .order_by(Sample.received_at.desc().nullslast(), Sample.collected_at.desc().nullslast())
         .limit(2)
     ).all()
     
@@ -147,11 +147,14 @@ def get_dashboard_data(
             patient = session.get(Patient, order.patient_id)
             patient_name = f"{patient.first_name} {patient.last_name}" if patient else "Paciente desconocido"
             
+            # Use received_at if available, otherwise collected_at, otherwise order created_at
+            sample_timestamp = sample.received_at or sample.collected_at or order.created_at
+            
             recent_activity.append(RecentActivityItem(
                 id=str(sample.id),
                 title=f"Muestra {sample.sample_code}",
                 description=f"Orden: {order.order_code} • Paciente: {patient_name}",
-                timestamp=sample.created_at,
+                timestamp=sample_timestamp,
                 type="sample",
                 status=sample.state,
             ))
