@@ -84,8 +84,16 @@ def list_reports(
     return ReportsListResponse(reports=results)
 
 @router.post("/", response_model=ReportResponse)
-def create_report(report_data: ReportCreate, session: Session = Depends(get_session)):
+def create_report(
+    report_data: ReportCreate, 
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx)
+):
     """Create a new report"""
+    # Verify that the report's tenant_id matches the authenticated user's tenant_id
+    if report_data.tenant_id != ctx.tenant_id:
+        raise HTTPException(403, "Cannot create reports for a different tenant")
+    
     # Verify tenant, branch, and order exist
     tenant = session.get(Tenant, report_data.tenant_id)
     if not tenant:
@@ -95,9 +103,17 @@ def create_report(report_data: ReportCreate, session: Session = Depends(get_sess
     if not branch:
         raise HTTPException(404, "Branch not found")
     
+    # Verify branch belongs to the tenant
+    if str(branch.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Branch does not belong to your tenant")
+    
     order = session.get(LabOrder, report_data.order_id)
     if not order:
         raise HTTPException(404, "Order not found")
+    
+    # Verify order belongs to the tenant
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Order does not belong to your tenant")
     
     # Check if report already exists for this order
     existing_report = session.exec(
@@ -168,7 +184,12 @@ def create_report(report_data: ReportCreate, session: Session = Depends(get_sess
 
 
 @router.post("/{report_id}/new_version", response_model=ReportVersionResponse)
-def create_report_new_version(report_id: str, report_data: ReportCreate, session: Session = Depends(get_session)):
+def create_report_new_version(
+    report_id: str, 
+    report_data: ReportCreate, 
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx)
+):
     """Create a new report version for an existing report.
 
     - Increments version_no based on current version
@@ -178,6 +199,10 @@ def create_report_new_version(report_id: str, report_data: ReportCreate, session
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
+    
+    # Verify report belongs to the authenticated user's tenant
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
 
     # Determine next version number
     current_version = session.exec(
@@ -390,6 +415,7 @@ def upload_pdf_to_specific_version(
     version_no: int,
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx)
 ):
     """Upload a PDF to a specific report version.
 
@@ -400,6 +426,10 @@ def upload_pdf_to_specific_version(
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
+    
+    # Verify report belongs to the authenticated user's tenant
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
 
     version = session.exec(
         select(ReportVersion).where(
@@ -460,6 +490,7 @@ def upload_pdf_to_latest_version(
     report_id: str,
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx)
 ):
     """Upload a PDF to the newest version of a report.
 
@@ -470,6 +501,10 @@ def upload_pdf_to_latest_version(
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
+    
+    # Verify report belongs to the authenticated user's tenant
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
 
     latest_version = session.exec(
         select(ReportVersion)
@@ -524,11 +559,20 @@ def upload_pdf_to_latest_version(
 
 
 @router.get("/{report_id}/versions/{version_no}/pdf")
-def get_pdf_of_specific_version(report_id: str, version_no: int, session: Session = Depends(get_session)):
+def get_pdf_of_specific_version(
+    report_id: str, 
+    version_no: int, 
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx)
+):
     """Return a presigned URL to download the PDF for a specific report version."""
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
+    
+    # Verify report belongs to the authenticated user's tenant
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
 
     version = session.exec(
         select(ReportVersion).where(
@@ -552,40 +596,6 @@ def get_pdf_of_specific_version(report_id: str, version_no: int, session: Sessio
         "version_id": str(version.id),
         "version_no": version.version_no,
         "report_id": str(version.report_id),
-        "pdf_storage_id": str(storage.id),
-        "pdf_key": storage.object_key,
-        "pdf_url": url,
-    }
-
-
-@router.get("/{report_id}/pdf")
-def get_pdf_of_latest_version(report_id: str, session: Session = Depends(get_session)):
-    """Return a presigned URL to download the PDF for the newest report version."""
-    report = session.get(Report, report_id)
-    if not report:
-        raise HTTPException(404, "Report not found")
-
-    latest_version = session.exec(
-        select(ReportVersion)
-        .where(ReportVersion.report_id == report.id)
-        .order_by(ReportVersion.version_no.desc())
-    ).first()
-    if not latest_version:
-        raise HTTPException(404, "No versions found for this report")
-
-    if not latest_version.pdf_storage_id:
-        raise HTTPException(404, "PDF not found for the latest version")
-
-    storage = session.get(StorageObject, latest_version.pdf_storage_id)
-    if not storage:
-        raise HTTPException(404, "Storage object not found")
-
-    s3 = S3Service()
-    url = s3.generate_presigned_url(storage.object_key)
-    return {
-        "version_id": str(latest_version.id),
-        "version_no": latest_version.version_no,
-        "report_id": str(latest_version.report_id),
         "pdf_storage_id": str(storage.id),
         "pdf_key": storage.object_key,
         "pdf_url": url,
