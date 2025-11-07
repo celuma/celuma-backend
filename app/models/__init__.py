@@ -1,14 +1,16 @@
 # Import all models to ensure they are registered with SQLModel
 from .base import BaseModel, TimestampMixin, TenantMixin, BranchMixin
-from .enums import UserRole, OrderStatus, SampleType, ReportStatus, PaymentStatus
+from .enums import UserRole, OrderStatus, SampleType, ReportStatus, PaymentStatus, EventType
 from .tenant import Tenant, Branch
 from .user import AppUser, UserBranch
 from .patient import Patient
 from .storage import StorageObject, SampleImageRendition
 from .laboratory import LabOrder, Sample, SampleImage
 from .report import Report, ReportVersion
-from .billing import Invoice, Payment
+from .billing import Invoice, Payment, ServiceCatalog, InvoiceItem
 from .audit import AuditLog
+from .events import CaseEvent
+from .invitation import UserInvitation, PasswordResetToken
 
 # Export all models for easy access
 __all__ = [
@@ -21,6 +23,7 @@ __all__ = [
     "SampleType",
     "ReportStatus",
     "PaymentStatus",
+    "EventType",
     "Tenant",
     "Branch",
     "AppUser",
@@ -35,5 +38,10 @@ __all__ = [
     "ReportVersion",
     "Invoice",
     "Payment",
-    "AuditLog"
+    "ServiceCatalog",
+    "InvoiceItem",
+    "AuditLog",
+    "CaseEvent",
+    "UserInvitation",
+    "PasswordResetToken"
 ]

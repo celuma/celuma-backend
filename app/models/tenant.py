@@ -12,6 +12,8 @@ class Tenant(BaseModel, TimestampMixin, table=True):
     name: str = Field(max_length=255)
     legal_name: Optional[str] = Field(max_length=500, default=None)
     tax_id: Optional[str] = Field(max_length=50, default=None)
+    logo_url: Optional[str] = Field(max_length=500, default=None)
+    is_active: bool = Field(default=True)
     
     # Basic relationships only - will add more as we fix the models
     branches: List["Branch"] = Relationship(back_populates="tenant")
