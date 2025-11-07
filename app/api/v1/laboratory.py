@@ -2,13 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from typing import Dict
 from sqlmodel import select, Session
 from app.core.db import get_session
-from app.api.v1.auth import get_auth_ctx, AuthContext
+from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.models.laboratory import LabOrder, Sample, SampleImage
 from app.models.storage import StorageObject, SampleImageRendition
 from app.models.tenant import Tenant, Branch
 from app.models.patient import Patient
 from app.models.report import Report, ReportVersion
 from app.models.user import AppUser
+from app.models.events import CaseEvent
+from app.models.enums import EventType
 from app.schemas.laboratory import (
     LabOrderCreate,
     LabOrderResponse,
@@ -36,11 +38,15 @@ from app.schemas.laboratory import (
 )
 from app.schemas.report import ReportMetaResponse
 from app.schemas.patient import PatientFullResponse
+from app.schemas.events import EventCreate, EventResponse, EventsListResponse
 from app.services.s3 import S3Service
 from app.services.image_processing import process_image_bytes
 from uuid import uuid4
 import os
 from sqlmodel import select
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/laboratory")
 
@@ -788,3 +794,100 @@ def list_patient_cases(
 
     # Reuse PatientCaseDetail schema structure via dicts already matching response_model
     return PatientCasesListResponse(patient=full_patient, patient_id=str(patient.id), cases=cases)
+
+
+# Case Events (Timeline) Endpoints
+
+@router.post("/orders/{order_id}/events", response_model=EventResponse)
+def create_case_event(
+    order_id: str,
+    event_data: EventCreate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Create a new event in the case timeline"""
+    # Verify order exists and belongs to tenant
+    order = session.get(LabOrder, order_id)
+    if not order:
+        raise HTTPException(404, "Order not found")
+    
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Order does not belong to your tenant")
+    
+    # Create event
+    event = CaseEvent(
+        tenant_id=order.tenant_id,
+        branch_id=order.branch_id,
+        order_id=order.id,
+        event_type=EventType(event_data.event_type),
+        description=event_data.description,
+        metadata=event_data.metadata,
+        created_by=user.id,
+    )
+    
+    session.add(event)
+    session.commit()
+    session.refresh(event)
+    
+    logger.info(
+        f"Event created for order {order_id}",
+        extra={
+            "event": "case_event.created",
+            "order_id": order_id,
+            "event_type": event_data.event_type,
+            "user_id": str(user.id),
+        },
+    )
+    
+    return EventResponse(
+        id=str(event.id),
+        tenant_id=str(event.tenant_id),
+        branch_id=str(event.branch_id),
+        order_id=str(event.order_id),
+        event_type=event.event_type,
+        description=event.description,
+        metadata=event.metadata,
+        created_by=str(event.created_by) if event.created_by else None,
+        created_at=event.created_at,
+    )
+
+
+@router.get("/orders/{order_id}/events", response_model=EventsListResponse)
+def list_case_events(
+    order_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
+    """Get timeline of events for a case"""
+    # Verify order exists and belongs to tenant
+    order = session.get(LabOrder, order_id)
+    if not order:
+        raise HTTPException(404, "Order not found")
+    
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Order does not belong to your tenant")
+    
+    # Get events ordered by creation date
+    events = session.exec(
+        select(CaseEvent)
+        .where(CaseEvent.order_id == order_id)
+        .order_by(CaseEvent.created_at.desc())
+    ).all()
+    
+    return EventsListResponse(
+        events=[
+            EventResponse(
+                id=str(e.id),
+                tenant_id=str(e.tenant_id),
+                branch_id=str(e.branch_id),
+                order_id=str(e.order_id),
+                event_type=e.event_type,
+                description=e.description,
+                metadata=e.metadata,
+                created_by=str(e.created_by) if e.created_by else None,
+                created_at=e.created_at,
+            )
+            for e in events
+        ]
+    )

@@ -351,6 +351,11 @@ def get_pdf_of_latest_version(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Report not found")
 
+    # Check if order is locked due to pending payment
+    order = session.get(LabOrder, report.order_id)
+    if order and order.billed_lock:
+        raise HTTPException(403, "Report access blocked due to pending payment")
+
     latest_version = session.exec(
         select(ReportVersion)
         .where(ReportVersion.report_id == report.id)
@@ -592,6 +597,11 @@ def get_pdf_of_specific_version(
     # Verify report belongs to the authenticated user's tenant
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
+
+    # Check if order is locked due to pending payment
+    order = session.get(LabOrder, report.order_id)
+    if order and order.billed_lock:
+        raise HTTPException(403, "Report access blocked due to pending payment")
 
     version = session.exec(
         select(ReportVersion).where(
