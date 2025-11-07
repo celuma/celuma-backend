@@ -3,8 +3,8 @@ Unit tests for Celuma API Pydantic schemas
 """
 from app.schemas.tenant import TenantCreate, TenantResponse, BranchCreate, BranchResponse
 from app.schemas.patient import PatientCreate, PatientResponse
-from app.schemas.user import UserRead
-from app.schemas.auth import UserRegister, UserLogin
+from app.schemas.user import UserDetailResponse
+from app.schemas.auth import UserRegister, UserLogin, UserResponse
 
 class TestTenantSchemas:
     """Test Tenant schema validation"""
@@ -142,11 +142,14 @@ class TestUserSchemas:
         assert login.username_or_email == login_data["username_or_email"]
         assert login.password == login_data["password"]
     
-    def test_user_read_serialization(self):
-        """Test user read serialization"""
-        user_read = UserRead(
-            id=1,
-            email="test@example.com"
+    def test_user_response_serialization(self):
+        """Test user response serialization"""
+        user_response = UserResponse(
+            id="test-id",
+            email="test@example.com",
+            full_name="Test User",
+            role="admin"
         )
-        assert user_read.id == 1
-        assert user_read.email == "test@example.com"
+        assert user_response.id == "test-id"
+        assert user_response.email == "test@example.com"
+        assert user_response.full_name == "Test User"
