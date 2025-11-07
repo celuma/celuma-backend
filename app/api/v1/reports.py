@@ -1,12 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlmodel import select, Session
 from app.core.db import get_session
-from app.api.v1.auth import get_auth_ctx, AuthContext
+from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.models.report import Report, ReportVersion
 from app.models.laboratory import LabOrder
 from app.models.tenant import Tenant, Branch
 from app.models.patient import Patient
 from app.models.storage import StorageObject
+from app.models.user import AppUser
+from app.models.audit import AuditLog
+from app.models.enums import ReportStatus, UserRole
 from app.services.s3 import S3Service
 from app.schemas.report import (
     ReportCreate, 
@@ -18,9 +21,17 @@ from app.schemas.report import (
     ReportListItem,
     BranchRef,
     OrderRef,
-    PatientRef
+    PatientRef,
+    ReportStatusUpdate,
+    ReportSignRequest,
+    ReportReviewComment,
+    ReportActionResponse
 )
 import json
+from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reports")
 
@@ -49,6 +60,8 @@ def list_reports(
         
         version_no = current_version.version_no if current_version else None
         has_pdf = bool(current_version and current_version.pdf_storage_id)
+        signed_by = str(current_version.signed_by) if current_version and current_version.signed_by else None
+        signed_at = current_version.signed_at if current_version else None
         
         results.append(
             ReportListItem(
@@ -76,6 +89,8 @@ def list_reports(
                 published_at=r.published_at,
                 created_at=str(getattr(r, "created_at", "")) if getattr(r, "created_at", None) else None,
                 created_by=str(r.created_by) if r.created_by else None,
+                signed_by=signed_by,
+                signed_at=signed_at,
                 version_no=version_no,
                 has_pdf=has_pdf
             )
@@ -298,6 +313,8 @@ def get_report(
         diagnosis_text=report.diagnosis_text,
         published_at=report.published_at,
         created_by=(str(report.created_by) if report.created_by else None),
+        signed_by=(str(current_version.signed_by) if current_version and current_version.signed_by else None),
+        signed_at=(current_version.signed_at if current_version else None),
         report=report_json,
     )
 
@@ -405,6 +422,8 @@ def get_report_version(
         diagnosis_text=report.diagnosis_text,
         published_at=report.published_at,
         created_by=(str(report.created_by) if report.created_by else None),
+        signed_by=(str(version.signed_by) if version.signed_by else None),
+        signed_at=version.signed_at,
         report=report_json,
     )
 
@@ -600,3 +619,428 @@ def get_pdf_of_specific_version(
         "pdf_key": storage.object_key,
         "pdf_url": url,
     }
+
+
+# Helper function to create audit log
+def _create_audit_log(
+    session: Session,
+    tenant_id: str,
+    branch_id: str,
+    actor_user_id: str,
+    action: str,
+    entity_type: str,
+    entity_id: str,
+    old_values: dict = None,
+    new_values: dict = None,
+):
+    """Create an audit log entry"""
+    audit = AuditLog(
+        tenant_id=tenant_id,
+        branch_id=branch_id,
+        actor_user_id=actor_user_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        old_values=old_values,
+        new_values=new_values,
+    )
+    session.add(audit)
+
+
+@router.post("/{report_id}/submit", response_model=ReportActionResponse)
+def submit_report(
+    report_id: str,
+    data: ReportStatusUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Submit a report for review (DRAFT → IN_REVIEW)"""
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
+    
+    if report.status != ReportStatus.DRAFT:
+        raise HTTPException(400, f"Cannot submit report in {report.status} status")
+    
+    # Update status
+    old_status = report.status
+    report.status = ReportStatus.IN_REVIEW
+    session.add(report)
+    
+    # Create audit log
+    _create_audit_log(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        branch_id=str(report.branch_id),
+        actor_user_id=ctx.user_id,
+        action="REPORT.SUBMIT",
+        entity_type="report",
+        entity_id=report_id,
+        old_values={"status": old_status},
+        new_values={"status": report.status, "changelog": data.changelog},
+    )
+    
+    session.commit()
+    session.refresh(report)
+    
+    logger.info(
+        f"Report {report_id} submitted for review by user {ctx.user_id}",
+        extra={
+            "event": "report.submit",
+            "report_id": report_id,
+            "user_id": ctx.user_id,
+        },
+    )
+    
+    return ReportActionResponse(
+        id=str(report.id),
+        status=report.status,
+        message="Report submitted for review"
+    )
+
+
+@router.post("/{report_id}/approve", response_model=ReportActionResponse)
+def approve_report(
+    report_id: str,
+    data: ReportStatusUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Approve a report (IN_REVIEW → APPROVED) - Pathologist only"""
+    # Check user role
+    if user.role != UserRole.PATHOLOGIST:
+        raise HTTPException(403, "Only pathologists can approve reports")
+    
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
+    
+    if report.status != ReportStatus.IN_REVIEW:
+        raise HTTPException(400, f"Cannot approve report in {report.status} status")
+    
+    # Update status
+    old_status = report.status
+    report.status = ReportStatus.APPROVED
+    session.add(report)
+    
+    # Create audit log
+    _create_audit_log(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        branch_id=str(report.branch_id),
+        actor_user_id=ctx.user_id,
+        action="REPORT.APPROVE",
+        entity_type="report",
+        entity_id=report_id,
+        old_values={"status": old_status},
+        new_values={"status": report.status, "changelog": data.changelog},
+    )
+    
+    session.commit()
+    session.refresh(report)
+    
+    logger.info(
+        f"Report {report_id} approved by pathologist {ctx.user_id}",
+        extra={
+            "event": "report.approve",
+            "report_id": report_id,
+            "user_id": ctx.user_id,
+        },
+    )
+    
+    return ReportActionResponse(
+        id=str(report.id),
+        status=report.status,
+        message="Report approved"
+    )
+
+
+@router.post("/{report_id}/request-changes", response_model=ReportActionResponse)
+def request_changes(
+    report_id: str,
+    data: ReportReviewComment,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Request changes on a report (IN_REVIEW → DRAFT) - Pathologist only"""
+    # Check user role
+    if user.role != UserRole.PATHOLOGIST:
+        raise HTTPException(403, "Only pathologists can request changes")
+    
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
+    
+    if report.status != ReportStatus.IN_REVIEW:
+        raise HTTPException(400, f"Cannot request changes for report in {report.status} status")
+    
+    # Update status back to DRAFT
+    old_status = report.status
+    report.status = ReportStatus.DRAFT
+    session.add(report)
+    
+    # Create audit log
+    _create_audit_log(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        branch_id=str(report.branch_id),
+        actor_user_id=ctx.user_id,
+        action="REPORT.REQUEST_CHANGES",
+        entity_type="report",
+        entity_id=report_id,
+        old_values={"status": old_status},
+        new_values={"status": report.status, "comment": data.comment},
+    )
+    
+    session.commit()
+    session.refresh(report)
+    
+    logger.info(
+        f"Changes requested for report {report_id} by pathologist {ctx.user_id}",
+        extra={
+            "event": "report.request_changes",
+            "report_id": report_id,
+            "user_id": ctx.user_id,
+        },
+    )
+    
+    return ReportActionResponse(
+        id=str(report.id),
+        status=report.status,
+        message="Changes requested, report returned to draft"
+    )
+
+
+@router.post("/{report_id}/sign", response_model=ReportActionResponse)
+def sign_report(
+    report_id: str,
+    data: ReportSignRequest,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Sign and publish a report (APPROVED → PUBLISHED) - Pathologist only"""
+    # Check user role
+    if user.role != UserRole.PATHOLOGIST:
+        raise HTTPException(403, "Only pathologists can sign reports")
+    
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
+    
+    if report.status != ReportStatus.APPROVED:
+        raise HTTPException(400, f"Cannot sign report in {report.status} status. Report must be approved first.")
+    
+    # Get current version and sign it
+    current_version = session.exec(
+        select(ReportVersion).where(
+            ReportVersion.report_id == report.id,
+            ReportVersion.is_current == True
+        )
+    ).first()
+    
+    if not current_version:
+        raise HTTPException(404, "No current version found for this report")
+    
+    # Update version with signature
+    current_version.signed_by = user.id
+    current_version.signed_at = datetime.utcnow()
+    if data.changelog:
+        current_version.changelog = data.changelog
+    session.add(current_version)
+    
+    # Update report status and published_at
+    old_status = report.status
+    report.status = ReportStatus.PUBLISHED
+    report.published_at = datetime.utcnow()
+    session.add(report)
+    
+    # Create audit log
+    _create_audit_log(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        branch_id=str(report.branch_id),
+        actor_user_id=ctx.user_id,
+        action="REPORT.SIGN",
+        entity_type="report",
+        entity_id=report_id,
+        old_values={"status": old_status},
+        new_values={
+            "status": report.status,
+            "signed_by": str(user.id),
+            "signed_at": report.published_at.isoformat(),
+            "changelog": data.changelog,
+        },
+    )
+    
+    session.commit()
+    session.refresh(report)
+    
+    logger.info(
+        f"Report {report_id} signed and published by pathologist {ctx.user_id}",
+        extra={
+            "event": "report.sign",
+            "report_id": report_id,
+            "user_id": ctx.user_id,
+        },
+    )
+    
+    return ReportActionResponse(
+        id=str(report.id),
+        status=report.status,
+        message="Report signed and published"
+    )
+
+
+@router.post("/{report_id}/retract", response_model=ReportActionResponse)
+def retract_report(
+    report_id: str,
+    data: ReportStatusUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Retract a published report (PUBLISHED → RETRACTED) - Pathologist only"""
+    # Check user role
+    if user.role != UserRole.PATHOLOGIST:
+        raise HTTPException(403, "Only pathologists can retract reports")
+    
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
+    
+    if report.status != ReportStatus.PUBLISHED:
+        raise HTTPException(400, f"Cannot retract report in {report.status} status")
+    
+    # Update status
+    old_status = report.status
+    report.status = ReportStatus.RETRACTED
+    session.add(report)
+    
+    # Create audit log
+    _create_audit_log(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        branch_id=str(report.branch_id),
+        actor_user_id=ctx.user_id,
+        action="REPORT.RETRACT",
+        entity_type="report",
+        entity_id=report_id,
+        old_values={"status": old_status},
+        new_values={"status": report.status, "changelog": data.changelog},
+    )
+    
+    session.commit()
+    session.refresh(report)
+    
+    logger.info(
+        f"Report {report_id} retracted by pathologist {ctx.user_id}",
+        extra={
+            "event": "report.retract",
+            "report_id": report_id,
+            "user_id": ctx.user_id,
+        },
+    )
+    
+    return ReportActionResponse(
+        id=str(report.id),
+        status=report.status,
+        message="Report retracted"
+    )
+
+
+@router.get("/worklist", response_model=ReportsListResponse)
+def get_pathologist_worklist(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+    branch_id: str = None,
+):
+    """Get worklist of reports in review for pathologist"""
+    # This endpoint is primarily for pathologists, but we allow all users to see what's in review
+    # in case they need to check status
+    
+    # Build query for reports in IN_REVIEW status
+    query = select(Report).where(
+        Report.tenant_id == ctx.tenant_id,
+        Report.status == ReportStatus.IN_REVIEW
+    )
+    
+    # Optional branch filter
+    if branch_id:
+        query = query.where(Report.branch_id == branch_id)
+    
+    reports = session.exec(query).all()
+    results: list[ReportListItem] = []
+    
+    for r in reports:
+        # Resolve related entities
+        branch = session.get(Branch, r.branch_id)
+        order = session.get(LabOrder, r.order_id)
+        patient = session.get(Patient, order.patient_id) if order else None
+        
+        # Get current version info
+        current_version = session.exec(
+            select(ReportVersion).where(
+                ReportVersion.report_id == r.id, 
+                ReportVersion.is_current == True
+            )
+        ).first()
+        
+        version_no = current_version.version_no if current_version else None
+        has_pdf = bool(current_version and current_version.pdf_storage_id)
+        signed_by = str(current_version.signed_by) if current_version and current_version.signed_by else None
+        signed_at = current_version.signed_at if current_version else None
+        
+        results.append(
+            ReportListItem(
+                id=str(r.id),
+                status=r.status,
+                tenant_id=str(r.tenant_id),
+                branch=BranchRef(
+                    id=str(r.branch_id),
+                    name=branch.name if branch else "",
+                    code=branch.code if branch else None
+                ),
+                order=OrderRef(
+                    id=str(r.order_id),
+                    order_code=order.order_code if order else "",
+                    status=order.status if order else "",
+                    requested_by=order.requested_by if order else None,
+                    patient=PatientRef(
+                        id=str(patient.id) if patient else "",
+                        full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
+                        patient_code=patient.patient_code if patient else "",
+                    ) if patient else None
+                ),
+                title=r.title,
+                diagnosis_text=r.diagnosis_text,
+                published_at=r.published_at,
+                created_at=str(getattr(r, "created_at", "")) if getattr(r, "created_at", None) else None,
+                created_by=str(r.created_by) if r.created_by else None,
+                signed_by=signed_by,
+                signed_at=signed_at,
+                version_no=version_no,
+                has_pdf=has_pdf
+            )
+        )
+    
+    return ReportsListResponse(reports=results)

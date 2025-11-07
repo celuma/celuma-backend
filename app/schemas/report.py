@@ -33,6 +33,8 @@ class ReportDetailResponse(BaseModel):
     diagnosis_text: Optional[str] = None
     published_at: Optional[datetime] = None
     created_by: Optional[str] = None
+    signed_by: Optional[str] = None
+    signed_at: Optional[datetime] = None
     report: Optional[Dict[str, Any]] = None  # reconstructed JSON from S3
 
 class ReportVersionCreate(BaseModel):
@@ -95,9 +97,31 @@ class ReportListItem(BaseModel):
     published_at: Optional[datetime] = None
     created_at: Optional[str] = None
     created_by: Optional[str] = None
+    signed_by: Optional[str] = None
+    signed_at: Optional[datetime] = None
     version_no: Optional[int] = None
     has_pdf: bool = False
 
 class ReportsListResponse(BaseModel):
     """Response schema for reports list"""
     reports: List[ReportListItem]
+
+# Schemas for report state transitions
+class ReportStatusUpdate(BaseModel):
+    """Schema for updating report status"""
+    changelog: Optional[str] = None
+
+class ReportSignRequest(BaseModel):
+    """Schema for signing a report"""
+    changelog: Optional[str] = None
+
+class ReportReviewComment(BaseModel):
+    """Schema for review comments"""
+    comment: str
+    request_changes: bool = False
+
+class ReportActionResponse(BaseModel):
+    """Generic response for report actions"""
+    id: str
+    status: str
+    message: str
