@@ -240,6 +240,233 @@ Response body:
 - `username` and `email` must be unique within the tenant.
 - All fields are optional; only the provided fields will be updated.
 
+## 👤 User Management
+
+Headers: `Authorization: Bearer <token>`
+
+**Note:** All user management endpoints require Admin role unless otherwise specified.
+
+### GET /api/v1/users/
+**List all users in the tenant (Admin only)**
+
+**Response:**
+```json
+{
+  "users": [
+    {
+      "id": "user-uuid",
+      "tenant_id": "tenant-uuid",
+      "email": "user@example.com",
+      "username": "johndoe",
+      "full_name": "John Doe",
+      "role": "lab_tech",
+      "is_active": true,
+      "created_at": "2025-01-15T10:00:00Z",
+      "updated_at": "2025-01-15T10:00:00Z"
+    }
+  ]
+}
+```
+
+### POST /api/v1/users/
+**Create a new user (Admin only)**
+
+**Request Body:**
+```json
+{
+  "email": "newuser@example.com",
+  "username": "newuser",
+  "password": "SecurePass123!",
+  "full_name": "New User",
+  "role": "lab_tech"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "user-uuid",
+  "tenant_id": "tenant-uuid",
+  "email": "newuser@example.com",
+  "username": "newuser",
+  "full_name": "New User",
+  "role": "lab_tech",
+  "is_active": true,
+  "created_at": "2025-01-15T10:00:00Z",
+  "updated_at": "2025-01-15T10:00:00Z"
+}
+```
+
+**Notes:**
+- Email must be unique within the tenant
+- Username is optional but must be unique if provided
+- Password must meet security requirements
+- Role must be one of: `admin`, `pathologist`, `lab_tech`, `assistant`, `billing`, `viewer`
+
+### PUT /api/v1/users/{user_id}
+**Update a user (Admin only)**
+
+**Request Body:**
+```json
+{
+  "email": "updated@example.com",
+  "username": "updateduser",
+  "full_name": "Updated Name",
+  "role": "pathologist",
+  "is_active": true
+}
+```
+
+**Response:**
+```json
+{
+  "id": "user-uuid",
+  "tenant_id": "tenant-uuid",
+  "email": "updated@example.com",
+  "username": "updateduser",
+  "full_name": "Updated Name",
+  "role": "pathologist",
+  "is_active": true,
+  "created_at": "2025-01-15T10:00:00Z",
+  "updated_at": "2025-01-16T14:30:00Z"
+}
+```
+
+**Notes:**
+- All fields are optional; only provided fields will be updated
+- Cannot update password through this endpoint (use PUT /api/v1/auth/me)
+- User cannot update their own account
+
+### DELETE /api/v1/users/{user_id}
+**Deactivate a user (Admin only)**
+
+**Response:**
+```json
+{
+  "message": "User deactivated successfully"
+}
+```
+
+**Notes:**
+- This endpoint sets `is_active` to `false` rather than deleting the user
+- Users cannot deactivate themselves
+- Deactivated users cannot log in but their data is preserved
+
+### POST /api/v1/users/{user_id}/toggle-active
+**Toggle user active status (Admin only)**
+
+**Response:**
+```json
+{
+  "message": "User activated",
+  "is_active": true
+}
+```
+
+**Notes:**
+- Toggles the `is_active` status of a user
+- Users cannot toggle their own status
+- Useful for quickly enabling/disabling user access
+
+### POST /api/v1/users/invitations
+**Create and send user invitation (Admin only)**
+
+**Request Body:**
+```json
+{
+  "email": "newuser@example.com",
+  "full_name": "New User",
+  "role": "lab_tech"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "invitation-uuid",
+  "email": "newuser@example.com",
+  "full_name": "New User",
+  "role": "lab_tech",
+  "token": "secure-token-string",
+  "expires_at": "2025-01-22T10:00:00Z"
+}
+```
+
+**Notes:**
+- Generates a secure invitation token valid for 7 days
+- Sends an email invitation to the specified address
+- Cannot invite email addresses that already exist in the tenant
+- Only one pending invitation per email at a time
+
+### GET /api/v1/users/invitations/{token}
+**Get invitation details (Public endpoint)**
+
+**Response:**
+```json
+{
+  "email": "newuser@example.com",
+  "full_name": "New User",
+  "role": "lab_tech",
+  "tenant_name": "Acme Laboratories",
+  "expires_at": "2025-01-22T10:00:00Z"
+}
+```
+
+**Notes:**
+- Public endpoint for verifying invitation tokens
+- Does not require authentication
+- Returns 404 if invitation not found or already used
+- Returns 400 if invitation has expired
+
+### POST /api/v1/users/invitations/{token}/accept
+**Accept invitation and create user account (Public endpoint)**
+
+**Request Body:**
+```json
+{
+  "password": "SecurePass123!",
+  "username": "myusername"
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Account created successfully",
+  "user_id": "user-uuid",
+  "email": "newuser@example.com"
+}
+```
+
+**Notes:**
+- Public endpoint, does not require authentication
+- Username is optional
+- Password must meet security requirements
+- Marks invitation as used after successful account creation
+- User can immediately log in after account creation
+
+### POST /api/v1/users/{user_id}/avatar
+**Upload user avatar**
+
+**Content-Type:** `multipart/form-data`
+
+**Form Data:**
+- `file`: Image file (JPEG, PNG, or WEBP)
+
+**Response:**
+```json
+{
+  "message": "Avatar uploaded successfully",
+  "avatar_url": "https://s3.amazonaws.com/bucket/avatars/user-uuid/avatar.jpg"
+}
+```
+
+**Notes:**
+- Users can upload their own avatar
+- Admins can upload avatars for any user
+- Only image files are accepted (JPEG, PNG, WEBP)
+- Avatar is stored in S3 and URL is saved to user profile
+
 ## 🏢 Tenant Management
 
 Headers: `Authorization: Bearer <token>`
@@ -1185,6 +1412,184 @@ Path param:
 
 **Errors:**
 - 404 if report not found, report has no versions, or the latest version has no PDF
+- 403 if report access is blocked due to pending payment
+
+### POST /api/v1/reports/{report_id}/submit
+**Submit a report for review (DRAFT → IN_REVIEW)**
+
+**Request Body:**
+```json
+{
+  "changelog": "Initial submission for pathologist review"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "report-uuid",
+  "status": "IN_REVIEW",
+  "message": "Report submitted for review"
+}
+```
+
+**Notes:**
+- Transitions report from DRAFT to IN_REVIEW status
+- Creates an audit log entry
+- Changelog is optional but recommended
+- Only reports in DRAFT status can be submitted
+
+### POST /api/v1/reports/{report_id}/approve
+**Approve a report (IN_REVIEW → APPROVED) - Pathologist only**
+
+**Request Body:**
+```json
+{
+  "changelog": "Report approved after review"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "report-uuid",
+  "status": "APPROVED",
+  "message": "Report approved"
+}
+```
+
+**Notes:**
+- Only pathologists can approve reports
+- Transitions report from IN_REVIEW to APPROVED status
+- Creates an audit log entry
+- Changelog is optional but recommended
+
+### POST /api/v1/reports/{report_id}/request-changes
+**Request changes on a report (IN_REVIEW → DRAFT) - Pathologist only**
+
+**Request Body:**
+```json
+{
+  "comment": "Please revise the diagnosis section and add more details about the findings"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "report-uuid",
+  "status": "DRAFT",
+  "message": "Changes requested, report returned to draft"
+}
+```
+
+**Notes:**
+- Only pathologists can request changes
+- Transitions report from IN_REVIEW back to DRAFT status
+- Comment is required to explain what changes are needed
+- Creates an audit log entry with the comment
+
+### POST /api/v1/reports/{report_id}/sign
+**Sign and publish a report (APPROVED → PUBLISHED) - Pathologist only**
+
+**Request Body:**
+```json
+{
+  "changelog": "Final review complete, report signed and published"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "report-uuid",
+  "status": "PUBLISHED",
+  "message": "Report signed and published"
+}
+```
+
+**Notes:**
+- Only pathologists can sign reports
+- Transitions report from APPROVED to PUBLISHED status
+- Sets `signed_by` to current pathologist's user ID
+- Sets `signed_at` timestamp
+- Sets `published_at` timestamp on the report
+- Creates an audit log entry
+- Changelog is optional but recommended
+
+### POST /api/v1/reports/{report_id}/retract
+**Retract a published report (PUBLISHED → RETRACTED) - Pathologist only**
+
+**Request Body:**
+```json
+{
+  "changelog": "Report retracted due to error in diagnosis"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "report-uuid",
+  "status": "RETRACTED",
+  "message": "Report retracted"
+}
+```
+
+**Notes:**
+- Only pathologists can retract reports
+- Transitions report from PUBLISHED to RETRACTED status
+- Creates an audit log entry
+- Changelog is optional but recommended
+- Used when a published report needs to be withdrawn
+
+### GET /api/v1/reports/worklist
+**Get worklist of reports in review for pathologist**
+
+**Query Parameters:**
+- `branch_id` (optional): Filter by specific branch
+
+**Response:**
+```json
+{
+  "reports": [
+    {
+      "id": "report-uuid",
+      "status": "IN_REVIEW",
+      "tenant_id": "tenant-uuid",
+      "branch": {
+        "id": "branch-uuid",
+        "name": "Main Branch",
+        "code": "MAIN"
+      },
+      "order": {
+        "id": "order-uuid",
+        "order_code": "ORD001",
+        "status": "COMPLETED",
+        "requested_by": "Dr. Smith",
+        "patient": {
+          "id": "patient-uuid",
+          "full_name": "John Doe",
+          "patient_code": "P001"
+        }
+      },
+      "title": "Blood Test Report",
+      "diagnosis_text": "Normal blood count results",
+      "published_at": null,
+      "created_at": "2025-08-18T10:00:00Z",
+      "created_by": "user-uuid",
+      "version_no": 2,
+      "has_pdf": true
+    }
+  ]
+}
+```
+
+**Notes:**
+- Returns all reports with IN_REVIEW status
+- Primarily for pathologists to see what needs review
+- Optional branch filter for multi-branch organizations
+- Returns enriched data with branch, order, and patient information
 
 ## 💰 Billing Management
 
@@ -1257,6 +1662,51 @@ Headers: `Authorization: Bearer <token>`
 }
 ```
 
+### GET /api/v1/billing/invoices/{invoice_id}/full
+**Get invoice details with items and payments**
+
+**Response:**
+```json
+{
+  "id": "invoice-uuid",
+  "invoice_number": "INV001",
+  "amount_total": 1500.0,
+  "currency": "MXN",
+  "status": "PARTIAL",
+  "order_id": "order-uuid-here",
+  "tenant_id": "tenant-uuid-here",
+  "branch_id": "branch-uuid-here",
+  "issued_at": "2025-08-18T01:50:51.386774",
+  "items": [
+    {
+      "id": "item-uuid",
+      "invoice_id": "invoice-uuid",
+      "service_id": "service-uuid",
+      "description": "Biopsy Analysis",
+      "quantity": 1,
+      "unit_price": 1500.0,
+      "subtotal": 1500.0
+    }
+  ],
+  "payments": [
+    {
+      "id": "payment-uuid",
+      "amount_paid": 750.0,
+      "method": "credit_card",
+      "invoice_id": "invoice-uuid",
+      "tenant_id": "tenant-uuid",
+      "branch_id": "branch-uuid"
+    }
+  ],
+  "balance": 750.0
+}
+```
+
+**Notes:**
+- Returns complete invoice information including all line items and payments
+- `balance` is calculated as total minus sum of all payments
+- Useful for displaying detailed invoice information with payment history
+
 ### POST /api/v1/billing/payments/
 **Create a new payment**
 
@@ -1300,6 +1750,45 @@ Headers: `Authorization: Bearer <token>`
   }
 ]
 ```
+
+### GET /api/v1/billing/orders/{order_id}/balance
+**Get payment balance for an order**
+
+**Response:**
+```json
+{
+  "order_id": "order-uuid",
+  "total_invoiced": 3000.0,
+  "total_paid": 2250.0,
+  "balance": 750.0,
+  "is_locked": true,
+  "invoices": [
+    {
+      "id": "invoice-uuid-1",
+      "invoice_number": "INV001",
+      "amount_total": 1500.0,
+      "status": "PAID",
+      "balance": 0.0
+    },
+    {
+      "id": "invoice-uuid-2",
+      "invoice_number": "INV002",
+      "amount_total": 1500.0,
+      "status": "PARTIAL",
+      "balance": 750.0
+    }
+  ]
+}
+```
+
+**Notes:**
+- Returns aggregated payment information for all invoices related to an order
+- `total_invoiced`: Sum of all invoice amounts for the order
+- `total_paid`: Sum of all payments made across all invoices
+- `balance`: Remaining amount to be paid (always >= 0)
+- `is_locked`: Indicates if the order is locked due to pending payment (report access blocked)
+- `invoices`: Array of all invoices with their individual balances
+- Useful for checking order payment status and managing billing locks
 
 ## 📊 Dashboard Endpoints
 
@@ -1363,6 +1852,13 @@ Headers: `Authorization: Bearer <token>`
     "Sample tracking",
     "Report generation",
     "Billing system",
+    "Service catalog",
+    "Invoice line items",
+    "Event timeline tracking",
+    "User invitations",
+    "Password reset",
+    "User profiles with avatars",
+    "Tenant branding",
     "Audit logging"
   ]
 }
@@ -1377,6 +1873,249 @@ Headers: `Authorization: Bearer <token>`
   "status": "ok"
 }
 ```
+
+## 🛒 Service Catalog Endpoints
+
+### GET /api/v1/billing/catalog
+**List all service catalog items**
+
+**Response:**
+```json
+[
+  {
+    "id": "service-uuid",
+    "tenant_id": "tenant-uuid",
+    "service_name": "Biopsy Analysis",
+    "service_code": "BIO-001",
+    "description": "Complete biopsy analysis service",
+    "price": 1500.00,
+    "currency": "MXN",
+    "is_active": true,
+    "valid_from": "2025-01-01T00:00:00Z",
+    "valid_until": null,
+    "created_at": "2025-01-01T00:00:00Z"
+  }
+]
+```
+
+### POST /api/v1/billing/catalog
+**Create a new service catalog item**
+
+**Request Body:**
+```json
+{
+  "service_name": "Biopsy Analysis",
+  "service_code": "BIO-001",
+  "description": "Complete biopsy analysis service",
+  "price": 1500.00,
+  "currency": "MXN",
+  "is_active": true,
+  "valid_from": "2025-01-01T00:00:00Z",
+  "valid_until": null
+}
+```
+
+**Response:** Returns the created service catalog item.
+
+### PUT /api/v1/billing/catalog/{id}
+**Update a service catalog item**
+
+**Request Body:**
+```json
+{
+  "service_name": "Updated Service Name",
+  "price": 1800.00,
+  "is_active": false
+}
+```
+
+**Response:** Returns the updated service catalog item.
+
+### DELETE /api/v1/billing/catalog/{id}
+**Delete a service catalog item**
+
+**Response:**
+```json
+{
+  "message": "Service deleted successfully"
+}
+```
+
+## 📄 Invoice Items Endpoints
+
+### GET /api/v1/billing/invoices/{invoice_id}/items
+**List all items for an invoice**
+
+**Response:**
+```json
+[
+  {
+    "id": "item-uuid",
+    "tenant_id": "tenant-uuid",
+    "invoice_id": "invoice-uuid",
+    "service_id": "service-uuid",
+    "description": "Biopsy Analysis",
+    "quantity": 1,
+    "unit_price": 1500.00,
+    "subtotal": 1500.00,
+    "created_at": "2025-01-01T00:00:00Z"
+  }
+]
+```
+
+### POST /api/v1/billing/invoices/{invoice_id}/items
+**Add an item to an invoice**
+
+**Request Body:**
+```json
+{
+  "service_id": "service-uuid",
+  "description": "Biopsy Analysis",
+  "quantity": 1,
+  "unit_price": 1500.00
+}
+```
+
+**Response:** Returns the created invoice item.
+
+## 👥 Portal Endpoints
+
+### POST /api/v1/portal/invite
+**Send a user invitation**
+
+**Request Body:**
+```json
+{
+  "email": "newuser@example.com",
+  "full_name": "New User",
+  "role": "lab_tech"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "invitation-uuid",
+  "email": "newuser@example.com",
+  "token": "invitation-token",
+  "expires_at": "2025-01-08T00:00:00Z",
+  "message": "Invitation sent successfully"
+}
+```
+
+### POST /api/v1/portal/accept-invitation
+**Accept an invitation and create user account**
+
+**Request Body:**
+```json
+{
+  "token": "invitation-token",
+  "password": "SecurePassword123!"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "user-uuid",
+  "email": "newuser@example.com",
+  "full_name": "New User",
+  "role": "lab_tech",
+  "message": "Account created successfully"
+}
+```
+
+### POST /api/v1/portal/request-password-reset
+**Request a password reset token**
+
+**Request Body:**
+```json
+{
+  "email": "user@example.com"
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Password reset email sent"
+}
+```
+
+### POST /api/v1/portal/reset-password
+**Reset password using a token**
+
+**Request Body:**
+```json
+{
+  "token": "reset-token",
+  "new_password": "NewSecurePassword123!"
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Password reset successfully"
+}
+```
+
+## 📋 Event Timeline Endpoints
+
+### GET /api/v1/laboratory/orders/{order_id}/events
+**Get event timeline for an order**
+
+**Response:**
+```json
+[
+  {
+    "id": "event-uuid",
+    "tenant_id": "tenant-uuid",
+    "branch_id": "branch-uuid",
+    "order_id": "order-uuid",
+    "event_type": "ORDER_CREATED",
+    "description": "Order created by lab tech",
+    "event_metadata": {
+      "order_code": "ORD-001",
+      "patient_name": "John Doe"
+    },
+    "created_by": "user-uuid",
+    "created_at": "2025-01-01T10:00:00Z"
+  },
+  {
+    "id": "event-uuid-2",
+    "tenant_id": "tenant-uuid",
+    "branch_id": "branch-uuid",
+    "order_id": "order-uuid",
+    "event_type": "SAMPLE_RECEIVED",
+    "description": "Sample received and logged",
+    "event_metadata": {
+      "sample_code": "SMP-001",
+      "sample_type": "BIOPSIA"
+    },
+    "created_by": "user-uuid",
+    "created_at": "2025-01-01T11:30:00Z"
+  }
+]
+```
+
+### POST /api/v1/laboratory/orders/{order_id}/events
+**Add an event to the order timeline**
+
+**Request Body:**
+```json
+{
+  "event_type": "STATUS_CHANGED",
+  "description": "Order status changed to PROCESSING",
+  "event_metadata": {
+    "old_status": "RECEIVED",
+    "new_status": "PROCESSING",
+    "reason": "Sample preparation started"
+  }
+}
+```
+
+**Response:** Returns the created event.
 
 ## 📚 Data Models
 
