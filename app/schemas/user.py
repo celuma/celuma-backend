@@ -18,6 +18,7 @@ class UserUpdateByAdmin(BaseModel):
     full_name: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
+    password: Optional[str] = None
     branch_ids: Optional[List[str]] = None
 
 class UserDetailResponse(BaseModel):

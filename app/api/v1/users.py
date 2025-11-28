@@ -57,6 +57,18 @@ def get_user_branch_ids(user: AppUser, session: Session) -> list[str]:
     return [str(ub.branch_id) for ub in user.branches]
 
 
+def check_last_admin(session: Session, tenant_id: str) -> int:
+    """Count active administrators for a tenant"""
+    count = session.exec(
+        select(AppUser).where(
+            AppUser.tenant_id == tenant_id,
+            AppUser.role == UserRole.ADMIN,
+            AppUser.is_active == True
+        )
+    ).all()
+    return len(count)
+
+
 @router.get("/", response_model=UsersListResponse)
 def list_users(
     session: Session = Depends(get_session),
@@ -198,6 +210,17 @@ def update_user(
     if str(target_user.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "User does not belong to your tenant")
     
+    # Safety Check: Prevent modifying the last admin if it leaves the tenant without admins
+    if target_user.role == UserRole.ADMIN:
+        # If demoting or deactivating
+        is_demoting = user_data.role is not None and user_data.role != UserRole.ADMIN
+        is_deactivating = user_data.is_active is not None and user_data.is_active is False
+        
+        if is_demoting or is_deactivating:
+            admin_count = check_last_admin(session, ctx.tenant_id)
+            if admin_count <= 1:
+                raise HTTPException(400, "Cannot remove or deactivate the last administrator")
+
     # Update fields
     if user_data.email is not None:
         target_user.email = user_data.email
@@ -209,6 +232,8 @@ def update_user(
         target_user.role = UserRole(user_data.role)
     if user_data.is_active is not None:
         target_user.is_active = user_data.is_active
+    if user_data.password is not None:
+        target_user.hashed_password = hash_password(user_data.password)
     
     # Update branches if provided
     # For admins, we ignore branch updates or clear them as they have global access
@@ -287,6 +312,12 @@ def deactivate_user(
     if str(target_user.id) == str(user.id):
         raise HTTPException(400, "Cannot deactivate your own account")
     
+    # Safety Check: Prevent deactivating the last admin
+    if target_user.role == UserRole.ADMIN and target_user.is_active:
+        admin_count = check_last_admin(session, ctx.tenant_id)
+        if admin_count <= 1:
+            raise HTTPException(400, "Cannot deactivate the last administrator")
+
     target_user.is_active = False
     session.add(target_user)
     session.commit()
@@ -326,6 +357,13 @@ def toggle_user_active(
     if str(target_user.id) == str(user.id):
         raise HTTPException(400, "Cannot toggle your own account status")
     
+    # Safety Check: Prevent deactivating the last admin
+    if target_user.role == UserRole.ADMIN and target_user.is_active:
+        # We are about to deactivate (since currently active)
+        admin_count = check_last_admin(session, ctx.tenant_id)
+        if admin_count <= 1:
+            raise HTTPException(400, "Cannot deactivate the last administrator")
+
     target_user.is_active = not target_user.is_active
     session.add(target_user)
     session.commit()
