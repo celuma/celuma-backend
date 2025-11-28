@@ -456,7 +456,6 @@ def list_services(
             valid_from=s.valid_from,
             valid_until=s.valid_until,
             created_at=s.created_at,
-            updated_at=s.updated_at,
         )
         for s in services
     ]
@@ -521,7 +520,6 @@ def create_service(
         valid_from=service.valid_from,
         valid_until=service.valid_until,
         created_at=service.created_at,
-        updated_at=service.updated_at,
     )
 
 
@@ -588,7 +586,6 @@ def update_service(
         valid_from=service.valid_from,
         valid_until=service.valid_until,
         created_at=service.created_at,
-        updated_at=service.updated_at,
     )
 
 

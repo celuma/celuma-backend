@@ -89,7 +89,6 @@ class ServiceCatalogResponse(BaseModel):
     valid_from: Optional[datetime] = None
     valid_until: Optional[datetime] = None
     created_at: datetime
-    updated_at: datetime
 
 # Invoice Item Schemas
 class InvoiceItemCreate(BaseModel):

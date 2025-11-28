@@ -9,6 +9,7 @@ class UserCreateByAdmin(BaseModel):
     full_name: str
     role: str
     password: str
+    branch_ids: Optional[List[str]] = []
 
 class UserUpdateByAdmin(BaseModel):
     """Schema for admin updating a user"""
@@ -17,6 +18,7 @@ class UserUpdateByAdmin(BaseModel):
     full_name: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
+    branch_ids: Optional[List[str]] = None
 
 class UserDetailResponse(BaseModel):
     """Schema for user detail response"""
@@ -28,7 +30,7 @@ class UserDetailResponse(BaseModel):
     role: str
     is_active: bool
     created_at: datetime
-    updated_at: datetime
+    branch_ids: List[str] = []
 
 class UsersListResponse(BaseModel):
     """Schema for users list response"""

@@ -822,7 +822,7 @@ def create_case_event(
         order_id=order.id,
         event_type=EventType(event_data.event_type),
         description=event_data.description,
-        metadata=event_data.metadata,
+        event_metadata=event_data.metadata,
         created_by=user.id,
     )
     
@@ -847,7 +847,7 @@ def create_case_event(
         order_id=str(event.order_id),
         event_type=event.event_type,
         description=event.description,
-        metadata=event.metadata,
+        metadata=event.event_metadata,
         created_by=str(event.created_by) if event.created_by else None,
         created_at=event.created_at,
     )
@@ -884,7 +884,7 @@ def list_case_events(
                 order_id=str(e.order_id),
                 event_type=e.event_type,
                 description=e.description,
-                metadata=e.metadata,
+                metadata=e.event_metadata,
                 created_by=str(e.created_by) if e.created_by else None,
                 created_at=e.created_at,
             )

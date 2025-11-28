@@ -54,11 +54,12 @@ Authorization: Bearer <jwt_token>
 ```json
 {
   "id": "user-uuid",
-  "email": "user@example.com",
-  "username": "johndoe",
-  "full_name": "John Doe",
-  "role": "admin"
-}
+    "email": "user@example.com",
+    "username": "johndoe",
+    "full_name": "John Doe",
+    "role": "admin",
+    "branch_ids": []
+  }
 ```
 
 **Notes:**
@@ -199,7 +200,11 @@ Response body:
   "username": "johndoe",
   "full_name": "John Doe",
   "role": "admin",
-  "tenant_id": "tenant-uuid-here"
+  "tenant_id": "tenant-uuid-here",
+  "branch_ids": [
+    "branch-uuid-1",
+    "branch-uuid-2"
+  ]
 }
 ```
 
@@ -231,7 +236,10 @@ Response body:
   "username": "new-username",
   "full_name": "New Name",
   "role": "admin",
-  "tenant_id": "tenant-uuid-here"
+  "tenant_id": "tenant-uuid-here",
+  "branch_ids": [
+    "branch-uuid-1"
+  ]
 }
 ```
 
@@ -262,7 +270,9 @@ Headers: `Authorization: Bearer <token>`
       "role": "lab_tech",
       "is_active": true,
       "created_at": "2025-01-15T10:00:00Z",
-      "updated_at": "2025-01-15T10:00:00Z"
+      "branch_ids": [
+        "branch-uuid-1"
+      ]
     }
   ]
 }
@@ -278,7 +288,10 @@ Headers: `Authorization: Bearer <token>`
   "username": "newuser",
   "password": "SecurePass123!",
   "full_name": "New User",
-  "role": "lab_tech"
+  "role": "lab_tech",
+  "branch_ids": [
+    "branch-uuid-1"
+  ]
 }
 ```
 
@@ -293,7 +306,9 @@ Headers: `Authorization: Bearer <token>`
   "role": "lab_tech",
   "is_active": true,
   "created_at": "2025-01-15T10:00:00Z",
-  "updated_at": "2025-01-15T10:00:00Z"
+  "branch_ids": [
+    "branch-uuid-1"
+  ]
 }
 ```
 
@@ -302,6 +317,8 @@ Headers: `Authorization: Bearer <token>`
 - Username is optional but must be unique if provided
 - Password must meet security requirements
 - Role must be one of: `admin`, `pathologist`, `lab_tech`, `assistant`, `billing`, `viewer`
+- `branch_ids` is optional. If provided, user is assigned to these branches.
+- If role is `admin`, `branch_ids` are ignored as admins have implicit access to all branches.
 
 ### PUT /api/v1/users/{user_id}
 **Update a user (Admin only)**
@@ -313,7 +330,11 @@ Headers: `Authorization: Bearer <token>`
   "username": "updateduser",
   "full_name": "Updated Name",
   "role": "pathologist",
-  "is_active": true
+  "is_active": true,
+  "branch_ids": [
+    "branch-uuid-1",
+    "branch-uuid-2"
+  ]
 }
 ```
 
@@ -328,7 +349,10 @@ Headers: `Authorization: Bearer <token>`
   "role": "pathologist",
   "is_active": true,
   "created_at": "2025-01-15T10:00:00Z",
-  "updated_at": "2025-01-16T14:30:00Z"
+  "branch_ids": [
+    "branch-uuid-1",
+    "branch-uuid-2"
+  ]
 }
 ```
 
@@ -336,6 +360,8 @@ Headers: `Authorization: Bearer <token>`
 - All fields are optional; only provided fields will be updated
 - Cannot update password through this endpoint (use PUT /api/v1/auth/me)
 - User cannot update their own account
+- `branch_ids` replaces the existing branch assignments. Send empty list to remove all.
+- If user is `admin` (or updated to `admin`), they will have implicit access to all branches.
 
 ### DELETE /api/v1/users/{user_id}
 **Deactivate a user (Admin only)**
@@ -632,6 +658,10 @@ Headers: `Authorization: Bearer <token>`
   }
 ]
 ```
+
+**Notes:**
+- Returns users explicitly assigned to the branch
+- Also includes all tenant administrators (who have implicit access to all branches)
 
 ## 👥 Patient Management
 
@@ -2075,7 +2105,7 @@ Headers: `Authorization: Bearer <token>`
     "order_id": "order-uuid",
     "event_type": "ORDER_CREATED",
     "description": "Order created by lab tech",
-    "event_metadata": {
+    "metadata": {
       "order_code": "ORD-001",
       "patient_name": "John Doe"
     },
@@ -2089,7 +2119,7 @@ Headers: `Authorization: Bearer <token>`
     "order_id": "order-uuid",
     "event_type": "SAMPLE_RECEIVED",
     "description": "Sample received and logged",
-    "event_metadata": {
+    "metadata": {
       "sample_code": "SMP-001",
       "sample_type": "BIOPSIA"
     },
@@ -2107,7 +2137,7 @@ Headers: `Authorization: Bearer <token>`
 {
   "event_type": "STATUS_CHANGED",
   "description": "Order status changed to PROCESSING",
-  "event_metadata": {
+  "metadata": {
     "old_status": "RECEIVED",
     "new_status": "PROCESSING",
     "reason": "Sample preparation started"

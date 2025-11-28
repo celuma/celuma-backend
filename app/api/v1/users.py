@@ -2,9 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from sqlmodel import select, Session
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
-from app.models.user import AppUser
+from app.models.user import AppUser, UserBranch
 from app.models.invitation import UserInvitation
-from app.models.tenant import Tenant
+from app.models.tenant import Tenant, Branch
 from app.models.enums import UserRole
 from app.core.security import hash_password
 from app.core.config import settings
@@ -49,6 +49,14 @@ class AcceptInvitationRequest(BaseModel):
     username: Optional[str] = None
 
 
+def get_user_branch_ids(user: AppUser, session: Session) -> list[str]:
+    """Helper to get branch IDs for a user, handling implicit admin access"""
+    if user.role == UserRole.ADMIN:
+        branches = session.exec(select(Branch.id).where(Branch.tenant_id == user.tenant_id)).all()
+        return [str(bid) for bid in branches]
+    return [str(ub.branch_id) for ub in user.branches]
+
+
 @router.get("/", response_model=UsersListResponse)
 def list_users(
     session: Session = Depends(get_session),
@@ -75,7 +83,7 @@ def list_users(
                 role=u.role,
                 is_active=u.is_active,
                 created_at=u.created_at,
-                updated_at=u.updated_at,
+                branch_ids=get_user_branch_ids(u, session),
             )
             for u in users
         ]
@@ -127,6 +135,23 @@ def create_user(
     )
     
     session.add(new_user)
+    session.flush() # Generate ID
+
+    # Handle branch assignment
+    # Admins get implicit access, so we don't strictly need to create UserBranch records
+    # But if provided, we can validate them. However, for consistency with implicit access,
+    # we can choose to NOT create records for admins to keep DB clean and enforce logic.
+    if user_data.branch_ids and new_user.role != UserRole.ADMIN:
+        for branch_id in user_data.branch_ids:
+            branch = session.get(Branch, branch_id)
+            if not branch:
+                raise HTTPException(400, f"Branch {branch_id} not found")
+            if str(branch.tenant_id) != ctx.tenant_id:
+                raise HTTPException(400, f"Branch {branch_id} does not belong to this tenant")
+            
+            user_branch = UserBranch(user_id=new_user.id, branch_id=branch.id)
+            session.add(user_branch)
+
     session.commit()
     session.refresh(new_user)
     
@@ -136,6 +161,7 @@ def create_user(
             "event": "user.created",
             "user_id": str(new_user.id),
             "created_by": str(user.id),
+            "branch_count": len(user_data.branch_ids) if user_data.branch_ids else 0
         },
     )
     
@@ -148,7 +174,7 @@ def create_user(
         role=new_user.role,
         is_active=new_user.is_active,
         created_at=new_user.created_at,
-        updated_at=new_user.updated_at,
+        branch_ids=get_user_branch_ids(new_user, session),
     )
 
 
@@ -184,6 +210,34 @@ def update_user(
     if user_data.is_active is not None:
         target_user.is_active = user_data.is_active
     
+    # Update branches if provided
+    # For admins, we ignore branch updates or clear them as they have global access
+    if target_user.role == UserRole.ADMIN:
+        # If user is admin, ensure no explicit branches exist to avoid confusion
+        existing_associations = session.exec(
+            select(UserBranch).where(UserBranch.user_id == target_user.id)
+        ).all()
+        for assoc in existing_associations:
+            session.delete(assoc)
+    elif user_data.branch_ids is not None:
+        # Clear existing
+        existing_associations = session.exec(
+            select(UserBranch).where(UserBranch.user_id == target_user.id)
+        ).all()
+        for assoc in existing_associations:
+            session.delete(assoc)
+            
+        # Add new
+        for branch_id in user_data.branch_ids:
+            branch = session.get(Branch, branch_id)
+            if not branch:
+                raise HTTPException(400, f"Branch {branch_id} not found")
+            if str(branch.tenant_id) != ctx.tenant_id:
+                raise HTTPException(400, f"Branch {branch_id} does not belong to this tenant")
+            
+            user_branch = UserBranch(user_id=target_user.id, branch_id=branch.id)
+            session.add(user_branch)
+
     session.add(target_user)
     session.commit()
     session.refresh(target_user)
@@ -206,7 +260,7 @@ def update_user(
         role=target_user.role,
         is_active=target_user.is_active,
         created_at=target_user.created_at,
-        updated_at=target_user.updated_at,
+        branch_ids=get_user_branch_ids(target_user, session),
     )
 
 
@@ -485,6 +539,7 @@ def accept_invitation(
         "message": "Account created successfully",
         "user_id": str(new_user.id),
         "email": new_user.email,
+        "branch_ids": [],
     }
 
 

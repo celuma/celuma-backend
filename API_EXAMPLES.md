@@ -1549,7 +1549,8 @@ curl -X POST "http://localhost:8000/api/v1/users/" \
     "username": "newuser",
     "password": "SecurePass123!",
     "full_name": "New User",
-    "role": "lab_tech"
+    "role": "lab_tech",
+    "branch_ids": ["branch-uuid-1", "branch-uuid-2"]
   }'
 ```
 
@@ -1561,7 +1562,8 @@ user_data = {
     "username": "labtech1",
     "password": "SecurePass123!",
     "full_name": "Lab Technician 1",
-    "role": "lab_tech"
+    "role": "lab_tech",
+    "branch_ids": ["branch-uuid-1"]
 }
 
 user_response = requests.post(
@@ -1572,6 +1574,7 @@ user_response = requests.post(
 user_response.raise_for_status()
 user = user_response.json()
 print(f"✅ User created: {user['email']} (ID: {user['id']})")
+print(f"   Branches: {user['branch_ids']}")
 ```
 
 ### List Users
@@ -1593,7 +1596,8 @@ for user in users:
 update_data = {
     "full_name": "Updated Name",
     "role": "pathologist",
-    "is_active": True
+    "is_active": True,
+    "branch_ids": ["branch-uuid-1", "branch-uuid-2"] # Replace existing branches
 }
 
 update_response = requests.put(
@@ -1603,6 +1607,7 @@ update_response = requests.put(
 )
 updated_user = update_response.json()
 print(f"✅ User updated: {updated_user['full_name']}")
+print(f"   Branches: {updated_user['branch_ids']}")
 ```
 
 ### Send User Invitation

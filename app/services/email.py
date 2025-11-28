@@ -1,5 +1,5 @@
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, BotoCoreError
 from app.core.config import settings
 import logging
 
@@ -80,15 +80,22 @@ class EmailService:
             )
             return True
             
-        except ClientError as e:
+        except (ClientError, BotoCoreError) as e:
+            error_msg = str(e)
+            if hasattr(e, 'response') and 'Error' in e.response:
+                error_msg = e.response['Error']['Message']
+                
             logger.error(
-                f"Failed to send invitation email to {recipient_email}: {e.response['Error']['Message']}",
+                f"Failed to send invitation email to {recipient_email}: {error_msg}",
                 extra={
                     "event": "email.invitation_failed",
                     "recipient": recipient_email,
-                    "error": e.response['Error']['Message'],
+                    "error": error_msg,
                 },
             )
+            return False
+        except Exception as e:
+            logger.exception(f"Unexpected error sending invitation email to {recipient_email}")
             return False
     
     def send_password_reset_email(
@@ -152,14 +159,21 @@ class EmailService:
             )
             return True
             
-        except ClientError as e:
+        except (ClientError, BotoCoreError) as e:
+            error_msg = str(e)
+            if hasattr(e, 'response') and 'Error' in e.response:
+                error_msg = e.response['Error']['Message']
+                
             logger.error(
-                f"Failed to send password reset email to {recipient_email}: {e.response['Error']['Message']}",
+                f"Failed to send password reset email to {recipient_email}: {error_msg}",
                 extra={
                     "event": "email.password_reset_failed",
                     "recipient": recipient_email,
-                    "error": e.response['Error']['Message'],
+                    "error": error_msg,
                 },
             )
+            return False
+        except Exception as e:
+            logger.exception(f"Unexpected error sending password reset email to {recipient_email}")
             return False
 

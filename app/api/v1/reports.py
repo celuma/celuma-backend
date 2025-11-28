@@ -273,6 +273,85 @@ def create_report_new_version(
         is_current=new_version.is_current,
     )
 
+@router.get("/worklist", response_model=ReportsListResponse)
+def get_pathologist_worklist(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+    branch_id: str = None,
+):
+    """Get worklist of reports in review for pathologist"""
+    # This endpoint is primarily for pathologists, but we allow all users to see what's in review
+    # in case they need to check status
+    
+    # Build query for reports in IN_REVIEW status
+    query = select(Report).where(
+        Report.tenant_id == ctx.tenant_id,
+        Report.status == ReportStatus.IN_REVIEW
+    )
+    
+    # Optional branch filter
+    if branch_id:
+        query = query.where(Report.branch_id == branch_id)
+    
+    reports = session.exec(query).all()
+    results: list[ReportListItem] = []
+    
+    for r in reports:
+        # Resolve related entities
+        branch = session.get(Branch, r.branch_id)
+        order = session.get(LabOrder, r.order_id)
+        patient = session.get(Patient, order.patient_id) if order else None
+        
+        # Get current version info
+        current_version = session.exec(
+            select(ReportVersion).where(
+                ReportVersion.report_id == r.id, 
+                ReportVersion.is_current == True
+            )
+        ).first()
+        
+        version_no = current_version.version_no if current_version else None
+        has_pdf = bool(current_version and current_version.pdf_storage_id)
+        signed_by = str(current_version.signed_by) if current_version and current_version.signed_by else None
+        signed_at = current_version.signed_at if current_version else None
+        
+        results.append(
+            ReportListItem(
+                id=str(r.id),
+                status=r.status,
+                tenant_id=str(r.tenant_id),
+                branch=BranchRef(
+                    id=str(r.branch_id),
+                    name=branch.name if branch else "",
+                    code=branch.code if branch else None
+                ),
+                order=OrderRef(
+                    id=str(r.order_id),
+                    order_code=order.order_code if order else "",
+                    status=order.status if order else "",
+                    requested_by=order.requested_by if order else None,
+                    patient=PatientRef(
+                        id=str(patient.id) if patient else "",
+                        full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
+                        patient_code=patient.patient_code if patient else "",
+                    ) if patient else None
+                ),
+                title=r.title,
+                diagnosis_text=r.diagnosis_text,
+                published_at=r.published_at,
+                created_at=str(getattr(r, "created_at", "")) if getattr(r, "created_at", None) else None,
+                created_by=str(r.created_by) if r.created_by else None,
+                signed_by=signed_by,
+                signed_at=signed_at,
+                version_no=version_no,
+                has_pdf=has_pdf
+            )
+        )
+    
+    return ReportsListResponse(reports=results)
+
+
 @router.get("/{report_id}", response_model=ReportDetailResponse)
 def get_report(
     report_id: str,
@@ -975,82 +1054,3 @@ def retract_report(
         status=report.status,
         message="Report retracted"
     )
-
-
-@router.get("/worklist", response_model=ReportsListResponse)
-def get_pathologist_worklist(
-    session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx),
-    user: AppUser = Depends(current_user),
-    branch_id: str = None,
-):
-    """Get worklist of reports in review for pathologist"""
-    # This endpoint is primarily for pathologists, but we allow all users to see what's in review
-    # in case they need to check status
-    
-    # Build query for reports in IN_REVIEW status
-    query = select(Report).where(
-        Report.tenant_id == ctx.tenant_id,
-        Report.status == ReportStatus.IN_REVIEW
-    )
-    
-    # Optional branch filter
-    if branch_id:
-        query = query.where(Report.branch_id == branch_id)
-    
-    reports = session.exec(query).all()
-    results: list[ReportListItem] = []
-    
-    for r in reports:
-        # Resolve related entities
-        branch = session.get(Branch, r.branch_id)
-        order = session.get(LabOrder, r.order_id)
-        patient = session.get(Patient, order.patient_id) if order else None
-        
-        # Get current version info
-        current_version = session.exec(
-            select(ReportVersion).where(
-                ReportVersion.report_id == r.id, 
-                ReportVersion.is_current == True
-            )
-        ).first()
-        
-        version_no = current_version.version_no if current_version else None
-        has_pdf = bool(current_version and current_version.pdf_storage_id)
-        signed_by = str(current_version.signed_by) if current_version and current_version.signed_by else None
-        signed_at = current_version.signed_at if current_version else None
-        
-        results.append(
-            ReportListItem(
-                id=str(r.id),
-                status=r.status,
-                tenant_id=str(r.tenant_id),
-                branch=BranchRef(
-                    id=str(r.branch_id),
-                    name=branch.name if branch else "",
-                    code=branch.code if branch else None
-                ),
-                order=OrderRef(
-                    id=str(r.order_id),
-                    order_code=order.order_code if order else "",
-                    status=order.status if order else "",
-                    requested_by=order.requested_by if order else None,
-                    patient=PatientRef(
-                        id=str(patient.id) if patient else "",
-                        full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
-                        patient_code=patient.patient_code if patient else "",
-                    ) if patient else None
-                ),
-                title=r.title,
-                diagnosis_text=r.diagnosis_text,
-                published_at=r.published_at,
-                created_at=str(getattr(r, "created_at", "")) if getattr(r, "created_at", None) else None,
-                created_by=str(r.created_by) if r.created_by else None,
-                signed_by=signed_by,
-                signed_at=signed_at,
-                version_no=version_no,
-                has_pdf=has_pdf
-            )
-        )
-    
-    return ReportsListResponse(reports=results)

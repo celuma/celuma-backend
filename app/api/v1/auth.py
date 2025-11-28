@@ -75,7 +75,8 @@ def register(user_data: UserRegister, session: Session = Depends(get_session)):
         email=u.email, 
         username=u.username,
         full_name=u.full_name, 
-        role=u.role
+        role=u.role,
+        branch_ids=[]
     )
 
 def current_user(request: Request, token=Depends(scheme), session: Session = Depends(get_session)):
@@ -234,19 +235,28 @@ def logout(token: str = Depends(scheme), session: Session = Depends(get_session)
         raise HTTPException(500, f"Logout failed: {str(e)}")
 
 @router.get("/me", response_model=UserProfile)
-def me(request: Request, user: AppUser = Depends(current_user)):
+def me(request: Request, user: AppUser = Depends(current_user), session: Session = Depends(get_session)):
     """Get current user profile"""
     request_id = getattr(request.state, "request_id", "unknown")[:8]
     logger.info(f"🔍 [{request_id}] GET /auth/me called for user ID: {user.id}")
     logger.info(f"👤 [{request_id}] User details: email={user.email}, username={user.username}, role={user.role}")
     
+    branch_ids = []
+    if user.role == UserRole.ADMIN:
+        # Admins have implicit access to all branches in the tenant
+        branches = session.exec(select(Branch.id).where(Branch.tenant_id == user.tenant_id)).all()
+        branch_ids = [str(bid) for bid in branches]
+    else:
+        branch_ids = [str(ub.branch_id) for ub in user.branches]
+
     profile = UserProfile(
         id=str(user.id), 
         email=user.email, 
         username=user.username,
         full_name=user.full_name, 
         role=user.role, 
-        tenant_id=str(user.tenant_id)
+        tenant_id=str(user.tenant_id),
+        branch_ids=branch_ids
     )
     
     logger.info(f"📤 [{request_id}] Returning profile: {profile.dict()}")
@@ -306,6 +316,13 @@ def update_me(
     session.commit()
     session.refresh(user)
 
+    branch_ids = []
+    if user.role == UserRole.ADMIN:
+        branches = session.exec(select(Branch.id).where(Branch.tenant_id == user.tenant_id)).all()
+        branch_ids = [str(bid) for bid in branches]
+    else:
+        branch_ids = [str(ub.branch_id) for ub in user.branches]
+
     updated_profile = UserProfile(
         id=str(user.id),
         email=user.email,
@@ -313,6 +330,7 @@ def update_me(
         full_name=user.full_name,
         role=user.role,
         tenant_id=str(user.tenant_id),
+        branch_ids=branch_ids,
     )
     
     logger.info(f"✅ [{request_id}] Profile updated successfully: {updated_profile.dict()}")
