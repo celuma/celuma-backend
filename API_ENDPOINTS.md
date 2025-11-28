@@ -331,6 +331,7 @@ Headers: `Authorization: Bearer <token>`
   "full_name": "Updated Name",
   "role": "pathologist",
   "is_active": true,
+  "password": "NewSecurePassword123!",
   "branch_ids": [
     "branch-uuid-1",
     "branch-uuid-2"
@@ -358,10 +359,11 @@ Headers: `Authorization: Bearer <token>`
 
 **Notes:**
 - All fields are optional; only provided fields will be updated
-- Cannot update password through this endpoint (use PUT /api/v1/auth/me)
-- User cannot update their own account
+- Admins can set a new `password` for the user (to reset it)
+- User cannot update their own account via this endpoint (use PUT /api/v1/auth/me)
 - `branch_ids` replaces the existing branch assignments. Send empty list to remove all.
 - If user is `admin` (or updated to `admin`), they will have implicit access to all branches.
+- **Safety:** Cannot deactivate or remove the last active administrator of the tenant.
 
 ### DELETE /api/v1/users/{user_id}
 **Deactivate a user (Admin only)**
@@ -377,6 +379,7 @@ Headers: `Authorization: Bearer <token>`
 - This endpoint sets `is_active` to `false` rather than deleting the user
 - Users cannot deactivate themselves
 - Deactivated users cannot log in but their data is preserved
+- **Safety:** Cannot deactivate the last active administrator of the tenant
 
 ### POST /api/v1/users/{user_id}/toggle-active
 **Toggle user active status (Admin only)**

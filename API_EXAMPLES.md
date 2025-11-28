@@ -1597,6 +1597,7 @@ update_data = {
     "full_name": "Updated Name",
     "role": "pathologist",
     "is_active": True,
+    "password": "NewPassword123!", # Optional: Reset user password
     "branch_ids": ["branch-uuid-1", "branch-uuid-2"] # Replace existing branches
 }
 
