@@ -591,7 +591,7 @@ def upload_user_avatar(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Upload user avatar"""
+    """Upload user avatar with image processing for HDR normalization"""
     target_user = session.get(AppUser, user_id)
     if not target_user:
         raise HTTPException(404, "User not found")
@@ -603,23 +603,39 @@ def upload_user_avatar(
     if str(target_user.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "User does not belong to your tenant")
     
-    # Validate file type
+    # Validate file type - accept more formats including HEIC/HEIF
     content_type = (file.content_type or "").lower()
-    if not any(img_type in content_type for img_type in ["image/jpeg", "image/jpg", "image/png", "image/webp"]):
-        raise HTTPException(400, "Only image files (JPEG, PNG, WEBP) are allowed")
+    allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/webp", "image/heic", "image/heif"]
+    if not any(img_type in content_type for img_type in allowed_types):
+        raise HTTPException(400, "Only image files (JPEG, PNG, WEBP, HEIC) are allowed")
     
-    # Upload to S3
+    # Read file bytes
     file_bytes = file.file.read()
     if not file_bytes:
         raise HTTPException(400, "Uploaded file is empty")
     
+    # Validate file size (max 10MB for raw upload)
+    if len(file_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(400, "File size must be less than 10MB")
+    
+    # Process image: normalize HDR, convert to sRGB, resize and optimize
+    from app.services.image_processing import process_avatar_bytes
+    try:
+        processed = process_avatar_bytes(file_bytes, max_size=(512, 512), quality=90)
+    except Exception as e:
+        logger.error(f"Image processing failed: {str(e)}", extra={"event": "user.avatar_processing_failed", "user_id": user_id})
+        raise HTTPException(400, "Failed to process image. Please try a different image.")
+    
+    # Upload processed JPEG to S3
     from app.services.s3 import S3Service
     s3 = S3Service()
-    key = f"avatars/{user_id}/avatar.{file.filename.split('.')[-1]}"
-    info = s3.upload_bytes(file_bytes, key=key, content_type=content_type)
+    key = f"avatars/{user_id}/avatar.jpg"  # Always save as JPEG
+    s3.upload_bytes(processed.jpeg_bytes, key=key, content_type=processed.content_type)
     
-    # Update user avatar_url
-    target_user.avatar_url = s3.object_public_url(key)
+    # Update user avatar_url with cache-busting timestamp
+    import time
+    avatar_url = f"{s3.object_public_url(key)}?v={int(time.time())}"
+    target_user.avatar_url = avatar_url
     session.add(target_user)
     session.commit()
     

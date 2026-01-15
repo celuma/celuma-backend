@@ -55,6 +55,7 @@ class UserProfile(BaseModel):
     role: str
     tenant_id: str
     branch_ids: List[str] = []
+    avatar_url: Optional[str] = None
 
 class UserProfileUpdate(BaseModel):
     """Schema for updating user profile and password"""

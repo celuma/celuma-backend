@@ -256,7 +256,8 @@ def me(request: Request, user: AppUser = Depends(current_user), session: Session
         full_name=user.full_name, 
         role=user.role, 
         tenant_id=str(user.tenant_id),
-        branch_ids=branch_ids
+        branch_ids=branch_ids,
+        avatar_url=user.avatar_url
     )
     
     logger.info(f"📤 [{request_id}] Returning profile: {profile.dict()}")
@@ -331,6 +332,7 @@ def update_me(
         role=user.role,
         tenant_id=str(user.tenant_id),
         branch_ids=branch_ids,
+        avatar_url=user.avatar_url,
     )
     
     logger.info(f"✅ [{request_id}] Profile updated successfully: {updated_profile.dict()}")
