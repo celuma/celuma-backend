@@ -1332,6 +1332,495 @@ print(f"✅ Payment created: ${payment['amount_paid']}")
 print("\n🎉 Complete laboratory workflow created successfully!")
 ```
 
+## 🛒 Service Catalog Management
+
+### Create Service Catalog Item
+```bash
+curl -X POST "http://localhost:8000/api/v1/billing/catalog" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "service_name": "Biopsy Analysis",
+    "service_code": "BIO-001",
+    "description": "Complete biopsy analysis service",
+    "price": 1500.00,
+    "currency": "MXN",
+    "is_active": true,
+    "valid_from": "2025-01-01T00:00:00Z"
+  }'
+```
+
+**Python Example:**
+```python
+service_response = requests.post(
+    f"{BASE_URL}/api/v1/billing/catalog",
+    headers={"Authorization": f"Bearer {token}"},
+    json={
+        "service_name": "Biopsy Analysis",
+        "service_code": "BIO-001",
+        "description": "Complete biopsy analysis service",
+        "price": 1500.00,
+        "currency": "MXN",
+        "is_active": True,
+        "valid_from": "2025-01-01T00:00:00Z"
+    }
+)
+service = service_response.json()
+print(f"✅ Service created: {service['service_name']}")
+```
+
+### List Service Catalog
+```bash
+curl "http://localhost:8000/api/v1/billing/catalog" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+### Update Service Catalog Item
+```bash
+curl -X PUT "http://localhost:8000/api/v1/billing/catalog/{service_id}" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "price": 1800.00,
+    "is_active": false
+  }'
+```
+
+## 📄 Invoice Line Items
+
+### Add Item to Invoice
+```bash
+curl -X POST "http://localhost:8000/api/v1/billing/invoices/{invoice_id}/items" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "service_id": "service-uuid",
+    "description": "Biopsy Analysis",
+    "quantity": 1,
+    "unit_price": 1500.00
+  }'
+```
+
+**Python Example:**
+```python
+item_response = requests.post(
+    f"{BASE_URL}/api/v1/billing/invoices/{invoice_id}/items",
+    headers={"Authorization": f"Bearer {token}"},
+    json={
+        "service_id": service_id,
+        "description": "Biopsy Analysis",
+        "quantity": 1,
+        "unit_price": 1500.00
+    }
+)
+item = item_response.json()
+print(f"✅ Invoice item added: {item['description']}")
+```
+
+### List Invoice Items
+```bash
+curl "http://localhost:8000/api/v1/billing/invoices/{invoice_id}/items" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+## 👥 User Invitations and Portal
+
+### Send User Invitation
+```bash
+curl -X POST "http://localhost:8000/api/v1/portal/invite" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "email": "newuser@example.com",
+    "full_name": "New User",
+    "role": "lab_tech"
+  }'
+```
+
+**Python Example:**
+```python
+invitation_response = requests.post(
+    f"{BASE_URL}/api/v1/portal/invite",
+    headers={"Authorization": f"Bearer {token}"},
+    json={
+        "email": "newuser@example.com",
+        "full_name": "New User",
+        "role": "lab_tech"
+    }
+)
+invitation = invitation_response.json()
+print(f"✅ Invitation sent to: {invitation['email']}")
+print(f"   Token: {invitation['token']}")
+```
+
+### Accept Invitation
+```bash
+curl -X POST "http://localhost:8000/api/v1/portal/accept-invitation" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "token": "invitation-token",
+    "password": "SecurePassword123!"
+  }'
+```
+
+### Request Password Reset
+```bash
+curl -X POST "http://localhost:8000/api/v1/portal/request-password-reset" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com"
+  }'
+```
+
+### Reset Password
+```bash
+curl -X POST "http://localhost:8000/api/v1/portal/reset-password" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "token": "reset-token",
+    "new_password": "NewSecurePassword123!"
+  }'
+```
+
+## 📋 Event Timeline
+
+### Get Order Events
+```bash
+curl "http://localhost:8000/api/v1/laboratory/orders/{order_id}/events" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+events_response = requests.get(
+    f"{BASE_URL}/api/v1/laboratory/orders/{order_id}/events",
+    headers={"Authorization": f"Bearer {token}"}
+)
+events = events_response.json()
+print(f"📋 Timeline has {len(events)} events:")
+for event in events:
+    print(f"  - {event['event_type']}: {event['description']}")
+```
+
+### Add Event to Timeline
+```bash
+curl -X POST "http://localhost:8000/api/v1/laboratory/orders/{order_id}/events" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "event_type": "STATUS_CHANGED",
+    "description": "Order status changed to PROCESSING",
+    "event_metadata": {
+      "old_status": "RECEIVED",
+      "new_status": "PROCESSING",
+      "reason": "Sample preparation started"
+    }
+  }'
+```
+
+**Python Example:**
+```python
+event_response = requests.post(
+    f"{BASE_URL}/api/v1/laboratory/orders/{order_id}/events",
+    headers={"Authorization": f"Bearer {token}"},
+    json={
+        "event_type": "STATUS_CHANGED",
+        "description": "Order status changed to PROCESSING",
+        "event_metadata": {
+            "old_status": "RECEIVED",
+            "new_status": "PROCESSING",
+            "reason": "Sample preparation started"
+        }
+    }
+)
+event = event_response.json()
+print(f"✅ Event added: {event['event_type']}")
+```
+
+## 👤 User Management (Admin Only)
+
+### Create User
+```bash
+curl -X POST "http://localhost:8000/api/v1/users/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "newuser@example.com",
+    "username": "newuser",
+    "password": "SecurePass123!",
+    "full_name": "New User",
+    "role": "lab_tech",
+    "branch_ids": ["branch-uuid-1", "branch-uuid-2"]
+  }'
+```
+
+**Python Example:**
+```python
+# Create a new user
+user_data = {
+    "email": "labtech@example.com",
+    "username": "labtech1",
+    "password": "SecurePass123!",
+    "full_name": "Lab Technician 1",
+    "role": "lab_tech",
+    "branch_ids": ["branch-uuid-1"]
+}
+
+user_response = requests.post(
+    f"{BASE_URL}/api/v1/users/",
+    headers=headers,
+    json=user_data,
+)
+user_response.raise_for_status()
+user = user_response.json()
+print(f"✅ User created: {user['email']} (ID: {user['id']})")
+print(f"   Branches: {user['branch_ids']}")
+```
+
+### List Users
+```python
+# List all users in tenant
+users_response = requests.get(
+    f"{BASE_URL}/api/v1/users/",
+    headers=headers,
+)
+users = users_response.json()["users"]
+print(f"Found {len(users)} users")
+for user in users:
+    print(f"- {user['full_name']} ({user['email']}) - {user['role']}")
+```
+
+### Update User
+```python
+# Update user information
+update_data = {
+    "full_name": "Updated Name",
+    "role": "pathologist",
+    "is_active": True,
+    "password": "NewPassword123!", # Optional: Reset user password
+    "branch_ids": ["branch-uuid-1", "branch-uuid-2"] # Replace existing branches
+}
+
+update_response = requests.put(
+    f"{BASE_URL}/api/v1/users/{user_id}",
+    headers=headers,
+    json=update_data,
+)
+updated_user = update_response.json()
+print(f"✅ User updated: {updated_user['full_name']}")
+print(f"   Branches: {updated_user['branch_ids']}")
+```
+
+### Send User Invitation
+```python
+# Send invitation to new user
+invitation_data = {
+    "email": "newpathologist@example.com",
+    "full_name": "Dr. New Pathologist",
+    "role": "pathologist"
+}
+
+invitation_response = requests.post(
+    f"{BASE_URL}/api/v1/users/invitations",
+    headers=headers,
+    json=invitation_data,
+)
+invitation = invitation_response.json()
+print(f"✅ Invitation sent to {invitation['email']}")
+print(f"Token: {invitation['token']}")
+print(f"Expires at: {invitation['expires_at']}")
+```
+
+### Upload User Avatar
+```python
+# Upload avatar for user
+with open("avatar.jpg", "rb") as f:
+    files = {"file": ("avatar.jpg", f, "image/jpeg")}
+    avatar_response = requests.post(
+        f"{BASE_URL}/api/v1/users/{user_id}/avatar",
+        headers=headers,
+        files=files,
+    )
+    avatar_data = avatar_response.json()
+    print(f"✅ Avatar uploaded: {avatar_data['avatar_url']}")
+```
+
+## 📋 Report Workflow Management
+
+### Submit Report for Review
+```python
+# Submit a draft report for pathologist review
+submit_data = {
+    "changelog": "Initial submission for pathologist review"
+}
+
+submit_response = requests.post(
+    f"{BASE_URL}/api/v1/reports/{report_id}/submit",
+    headers=headers,
+    json=submit_data,
+)
+result = submit_response.json()
+print(f"✅ {result['message']}")
+print(f"New status: {result['status']}")  # IN_REVIEW
+```
+
+### Get Pathologist Worklist
+```python
+# Get all reports waiting for review
+worklist_response = requests.get(
+    f"{BASE_URL}/api/v1/reports/worklist",
+    headers=headers,
+)
+worklist = worklist_response.json()["reports"]
+print(f"Found {len(worklist)} reports in review")
+for report in worklist:
+    patient = report["order"]["patient"]["full_name"]
+    order_code = report["order"]["order_code"]
+    print(f"- {report['title']} (Order: {order_code}, Patient: {patient})")
+```
+
+### Approve Report (Pathologist Only)
+```python
+# Approve a report after review
+approve_data = {
+    "changelog": "Report reviewed and approved"
+}
+
+approve_response = requests.post(
+    f"{BASE_URL}/api/v1/reports/{report_id}/approve",
+    headers=headers,
+    json=approve_data,
+)
+result = approve_response.json()
+print(f"✅ {result['message']}")
+print(f"New status: {result['status']}")  # APPROVED
+```
+
+### Request Changes (Pathologist Only)
+```python
+# Request changes on a report
+changes_data = {
+    "comment": "Please add more details about the tissue morphology and revise the diagnosis section"
+}
+
+changes_response = requests.post(
+    f"{BASE_URL}/api/v1/reports/{report_id}/request-changes",
+    headers=headers,
+    json=changes_data,
+)
+result = changes_response.json()
+print(f"✅ {result['message']}")
+print(f"New status: {result['status']}")  # DRAFT
+```
+
+### Sign and Publish Report (Pathologist Only)
+```python
+# Sign and publish an approved report
+sign_data = {
+    "changelog": "Final review complete, report signed and published"
+}
+
+sign_response = requests.post(
+    f"{BASE_URL}/api/v1/reports/{report_id}/sign",
+    headers=headers,
+    json=sign_data,
+)
+result = sign_response.json()
+print(f"✅ {result['message']}")
+print(f"New status: {result['status']}")  # PUBLISHED
+
+# The report is now immutable and accessible to patients
+```
+
+### Retract Published Report (Pathologist Only)
+```python
+# Retract a published report
+retract_data = {
+    "changelog": "Report retracted due to error in diagnosis - needs revision"
+}
+
+retract_response = requests.post(
+    f"{BASE_URL}/api/v1/reports/{report_id}/retract",
+    headers=headers,
+    json=retract_data,
+)
+result = retract_response.json()
+print(f"✅ {result['message']}")
+print(f"New status: {result['status']}")  # RETRACTED
+```
+
+## 💰 Advanced Billing Management
+
+### Get Invoice with Items and Payments
+```python
+# Get complete invoice details including line items and payment history
+invoice_full_response = requests.get(
+    f"{BASE_URL}/api/v1/billing/invoices/{invoice_id}/full",
+    headers=headers,
+)
+invoice_full = invoice_full_response.json()
+
+print(f"Invoice: {invoice_full['invoice_number']}")
+print(f"Total: {invoice_full['amount_total']} {invoice_full['currency']}")
+print(f"Status: {invoice_full['status']}")
+print(f"Balance: {invoice_full['balance']} {invoice_full['currency']}")
+
+print("\nLine Items:")
+for item in invoice_full["items"]:
+    print(f"- {item['description']}: {item['quantity']} x {item['unit_price']} = {item['subtotal']}")
+
+print("\nPayments:")
+for payment in invoice_full["payments"]:
+    print(f"- {payment['method']}: {payment['amount_paid']}")
+```
+
+### Get Order Payment Balance
+```python
+# Check payment status for an order
+balance_response = requests.get(
+    f"{BASE_URL}/api/v1/billing/orders/{order_id}/balance",
+    headers=headers,
+)
+balance = balance_response.json()
+
+print(f"Order: {balance['order_id']}")
+print(f"Total Invoiced: {balance['total_invoiced']}")
+print(f"Total Paid: {balance['total_paid']}")
+print(f"Balance: {balance['balance']}")
+print(f"Is Locked: {balance['is_locked']}")
+
+if balance['is_locked']:
+    print("⚠️ Report access is blocked due to pending payment")
+
+print("\nInvoices:")
+for invoice in balance["invoices"]:
+    status_icon = "✅" if invoice['status'] == "PAID" else "⏳"
+    print(f"{status_icon} {invoice['invoice_number']}: {invoice['amount_total']} (Balance: {invoice['balance']})")
+```
+
+### Add Invoice Item
+```python
+# Add a line item to an existing invoice
+item_data = {
+    "service_id": service_catalog_id,
+    "description": "Additional Test - Immunohistochemistry",
+    "quantity": 2,
+    "unit_price": 500.00
+}
+
+item_response = requests.post(
+    f"{BASE_URL}/api/v1/billing/invoices/{invoice_id}/items",
+    headers=headers,
+    json=item_data,
+)
+item = item_response.json()
+print(f"✅ Item added: {item['description']}")
+print(f"Subtotal: {item['subtotal']}")
+
+# Note: Invoice total is automatically recalculated
+# Order payment lock is automatically updated if needed
+```
+
 ## 🔍 Error Handling
 
 ### Validation Errors

@@ -23,6 +23,7 @@ class UserResponse(BaseModel):
     username: Optional[str] = None
     full_name: str
     role: str
+    branch_ids: List[str] = []
 
 class LoginResponse(BaseModel):
     """Schema for login response"""
@@ -53,6 +54,8 @@ class UserProfile(BaseModel):
     full_name: str
     role: str
     tenant_id: str
+    branch_ids: List[str] = []
+    avatar_url: Optional[str] = None
 
 class UserProfileUpdate(BaseModel):
     """Schema for updating user profile and password"""

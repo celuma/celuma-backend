@@ -79,18 +79,46 @@ def get_branch(
         tenant_id=str(branch.tenant_id)
     )
 
+from app.models.enums import UserRole
+
 @router.get("/{branch_id}/users")
 def list_branch_users(
     branch_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
 ):
-    """List all users for a branch"""
+    """List all users for a branch (including global admins)"""
     branch = session.get(Branch, branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
     if str(branch.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Branch not found")
     
-    users = [{"id": str(ub.user.id), "email": ub.user.email, "full_name": ub.user.full_name, "role": ub.user.role} for ub in branch.users]
-    return users
+    # 1. Get explicitly assigned users
+    users_dict = {}
+    for ub in branch.users:
+        users_dict[ub.user.id] = {
+            "id": str(ub.user.id), 
+            "email": ub.user.email, 
+            "full_name": ub.user.full_name, 
+            "role": ub.user.role
+        }
+        
+    # 2. Add all tenant admins (implicit access)
+    admins = session.exec(
+        select(AppUser).where(
+            AppUser.tenant_id == ctx.tenant_id,
+            AppUser.role == UserRole.ADMIN
+        )
+    ).all()
+    
+    for admin in admins:
+        if admin.id not in users_dict:
+            users_dict[admin.id] = {
+                "id": str(admin.id), 
+                "email": admin.email, 
+                "full_name": admin.full_name, 
+                "role": admin.role
+            }
+            
+    return list(users_dict.values())

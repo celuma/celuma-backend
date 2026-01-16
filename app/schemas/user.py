@@ -1,32 +1,39 @@
-from pydantic import BaseModel, EmailStr
-from typing import Optional
+from pydantic import BaseModel
+from typing import Optional, List
 from datetime import datetime
 
-class UserRead(BaseModel):
-    id: int
-    email: EmailStr
-
-class Token(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-
-class LogoutRequest(BaseModel):
-    """Schema for logout request"""
-    pass
-
-class LogoutResponse(BaseModel):
-    """Schema for logout response"""
-    message: str
-    token_revoked: bool
-
-class UserProfile(BaseModel):
-    """Schema for user profile information"""
-    id: str
+class UserCreateByAdmin(BaseModel):
+    """Schema for admin creating a user"""
     email: str
     username: Optional[str] = None
     full_name: str
     role: str
+    password: str
+    branch_ids: Optional[List[str]] = []
+
+class UserUpdateByAdmin(BaseModel):
+    """Schema for admin updating a user"""
+    email: Optional[str] = None
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+    password: Optional[str] = None
+    branch_ids: Optional[List[str]] = None
+
+class UserDetailResponse(BaseModel):
+    """Schema for user detail response"""
+    id: str
     tenant_id: str
+    email: str
+    username: Optional[str] = None
+    full_name: str
+    role: str
     is_active: bool
     created_at: datetime
-    updated_at: datetime
+    branch_ids: List[str] = []
+    avatar_url: Optional[str] = None
+
+class UsersListResponse(BaseModel):
+    """Schema for users list response"""
+    users: List[UserDetailResponse]

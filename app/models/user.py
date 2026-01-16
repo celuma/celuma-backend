@@ -17,6 +17,7 @@ class AppUser(BaseModel, TimestampMixin, TenantMixin, table=True):
     role: UserRole
     hashed_password: str = Field(max_length=255)
     is_active: bool = Field(default=True)
+    avatar_url: Optional[str] = Field(max_length=500, default=None)
     
     # Basic relationships only
     tenant: "Tenant" = Relationship(back_populates="users")

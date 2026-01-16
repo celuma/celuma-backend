@@ -47,7 +47,8 @@ from .report import (
 )
 
 from .user import (
-    UserRead,
-    Token,
-    LogoutRequest
+    UserCreateByAdmin,
+    UserUpdateByAdmin,
+    UserDetailResponse,
+    UsersListResponse
 )

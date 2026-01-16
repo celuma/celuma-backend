@@ -6,9 +6,13 @@ import logging
 from app.core.db import get_session
 from app.models.user import AppUser, BlacklistedToken, UserBranch
 from app.models.tenant import Tenant, Branch
+from app.models.invitation import PasswordResetToken
 from app.models.enums import UserRole
 from app.core.security import hash_password, verify_password, create_jwt, decode_jwt
 from app.core.config import settings
+from app.services.email import EmailService
+from datetime import timedelta
+import secrets
 from app.schemas.auth import (
     UserRegister,
     UserLogin,
@@ -71,7 +75,8 @@ def register(user_data: UserRegister, session: Session = Depends(get_session)):
         email=u.email, 
         username=u.username,
         full_name=u.full_name, 
-        role=u.role
+        role=u.role,
+        branch_ids=[]
     )
 
 def current_user(request: Request, token=Depends(scheme), session: Session = Depends(get_session)):
@@ -230,19 +235,29 @@ def logout(token: str = Depends(scheme), session: Session = Depends(get_session)
         raise HTTPException(500, f"Logout failed: {str(e)}")
 
 @router.get("/me", response_model=UserProfile)
-def me(request: Request, user: AppUser = Depends(current_user)):
+def me(request: Request, user: AppUser = Depends(current_user), session: Session = Depends(get_session)):
     """Get current user profile"""
     request_id = getattr(request.state, "request_id", "unknown")[:8]
     logger.info(f"🔍 [{request_id}] GET /auth/me called for user ID: {user.id}")
     logger.info(f"👤 [{request_id}] User details: email={user.email}, username={user.username}, role={user.role}")
     
+    branch_ids = []
+    if user.role == UserRole.ADMIN:
+        # Admins have implicit access to all branches in the tenant
+        branches = session.exec(select(Branch.id).where(Branch.tenant_id == user.tenant_id)).all()
+        branch_ids = [str(bid) for bid in branches]
+    else:
+        branch_ids = [str(ub.branch_id) for ub in user.branches]
+
     profile = UserProfile(
         id=str(user.id), 
         email=user.email, 
         username=user.username,
         full_name=user.full_name, 
         role=user.role, 
-        tenant_id=str(user.tenant_id)
+        tenant_id=str(user.tenant_id),
+        branch_ids=branch_ids,
+        avatar_url=user.avatar_url
     )
     
     logger.info(f"📤 [{request_id}] Returning profile: {profile.dict()}")
@@ -302,6 +317,13 @@ def update_me(
     session.commit()
     session.refresh(user)
 
+    branch_ids = []
+    if user.role == UserRole.ADMIN:
+        branches = session.exec(select(Branch.id).where(Branch.tenant_id == user.tenant_id)).all()
+        branch_ids = [str(bid) for bid in branches]
+    else:
+        branch_ids = [str(ub.branch_id) for ub in user.branches]
+
     updated_profile = UserProfile(
         id=str(user.id),
         email=user.email,
@@ -309,6 +331,8 @@ def update_me(
         full_name=user.full_name,
         role=user.role,
         tenant_id=str(user.tenant_id),
+        branch_ids=branch_ids,
+        avatar_url=user.avatar_url,
     )
     
     logger.info(f"✅ [{request_id}] Profile updated successfully: {updated_profile.dict()}")
@@ -414,3 +438,148 @@ def unified_registration(payload: RegistrationRequest, session: Session = Depend
         session.rollback()
         logger.exception("Unified registration failed")
         raise HTTPException(500, f"Registration failed: {str(e)}")
+
+
+# Password Recovery Endpoints
+
+class PasswordResetRequest(BaseModel):
+    """Schema for password reset request"""
+    email: str
+
+
+class PasswordResetConfirm(BaseModel):
+    """Schema for password reset confirmation"""
+    token: str
+    new_password: str
+
+
+@router.post("/password-reset/request")
+def request_password_reset(
+    request_data: PasswordResetRequest,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    """Request password reset - sends email with reset link"""
+    # Find user by email (across all tenants)
+    users = session.exec(
+        select(AppUser).where(AppUser.email == request_data.email)
+    ).all()
+    
+    # For security, don't reveal if user exists
+    # But only send email if user found
+    if users:
+        for user in users:
+            # Generate secure token
+            token = secrets.token_urlsafe(32)
+            
+            # Create reset token
+            reset_token = PasswordResetToken(
+                user_id=user.id,
+                token=token,
+                expires_at=datetime.utcnow() + timedelta(hours=1),
+                ip_address=request.client.host if request.client else None,
+            )
+            
+            session.add(reset_token)
+            session.flush()
+            
+            # Build reset URL
+            base_url = getattr(settings, 'frontend_url', 'http://localhost:5173')
+            reset_url = f"{base_url}/reset-password?token={token}"
+            
+            # Send email
+            email_service = EmailService()
+            email_service.send_password_reset_email(
+                recipient_email=user.email,
+                recipient_name=user.full_name,
+                reset_url=reset_url,
+            )
+            
+            logger.info(
+                f"Password reset requested for {user.email}",
+                extra={
+                    "event": "auth.password_reset_requested",
+                    "user_id": str(user.id),
+                    "ip": reset_token.ip_address,
+                },
+            )
+        
+        session.commit()
+    
+    # Always return success to avoid user enumeration
+    return {
+        "message": "If an account with this email exists, a password reset link has been sent"
+    }
+
+
+@router.post("/password-reset/verify")
+def verify_reset_token(
+    token_data: BaseModel,
+    session: Session = Depends(get_session),
+):
+    """Verify if reset token is valid"""
+    class TokenData(BaseModel):
+        token: str
+    
+    data = TokenData(**token_data.dict())
+    
+    reset_token = session.exec(
+        select(PasswordResetToken).where(
+            PasswordResetToken.token == data.token,
+            PasswordResetToken.is_used == False
+        )
+    ).first()
+    
+    if not reset_token:
+        raise HTTPException(404, "Invalid or expired reset token")
+    
+    if reset_token.expires_at < datetime.utcnow():
+        raise HTTPException(400, "Reset token has expired")
+    
+    return {"message": "Token is valid", "valid": True}
+
+
+@router.post("/password-reset/confirm")
+def confirm_password_reset(
+    confirm_data: PasswordResetConfirm,
+    session: Session = Depends(get_session),
+):
+    """Confirm password reset with token and new password"""
+    reset_token = session.exec(
+        select(PasswordResetToken).where(
+            PasswordResetToken.token == confirm_data.token,
+            PasswordResetToken.is_used == False
+        )
+    ).first()
+    
+    if not reset_token:
+        raise HTTPException(404, "Invalid or expired reset token")
+    
+    if reset_token.expires_at < datetime.utcnow():
+        raise HTTPException(400, "Reset token has expired")
+    
+    # Get user
+    user = session.get(AppUser, reset_token.user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    
+    # Update password
+    user.hashed_password = hash_password(confirm_data.new_password)
+    session.add(user)
+    
+    # Mark token as used
+    reset_token.is_used = True
+    reset_token.used_at = datetime.utcnow()
+    session.add(reset_token)
+    
+    session.commit()
+    
+    logger.info(
+        f"Password reset confirmed for {user.email}",
+        extra={
+            "event": "auth.password_reset_confirmed",
+            "user_id": str(user.id),
+        },
+    )
+    
+    return {"message": "Password reset successfully"}

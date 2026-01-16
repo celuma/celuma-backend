@@ -19,6 +19,8 @@ This document describes the complete database schema for the Celuma laboratory m
 #### Tenant
 - Represents a laboratory organization
 - Contains basic organization information (name, legal name, tax ID)
+- **Logo URL**: Optional organization logo URL (max 500 characters)
+- **Active Status**: Boolean flag for tenant activation state
 - All other entities are scoped to a tenant
 
 #### Branch
@@ -33,7 +35,20 @@ This document describes the complete database schema for the Celuma laboratory m
 - **Username Field**: Optional unique identifier per tenant (max 50 characters)
 - **Email Field**: Required unique identifier per tenant
 - **Flexible Login**: Users can authenticate using username OR email
+- **Avatar URL**: Optional profile picture URL (max 500 characters)
 - Can be associated with multiple branches through UserBranch
+
+#### UserInvitation
+- User invitation system for onboarding
+- Generates unique tokens for invitation links
+- Tracks invitation status and expiration
+- Links to inviting user for audit trail
+
+#### PasswordResetToken
+- Secure password reset system
+- Time-limited tokens for password recovery
+- Tracks usage and IP addresses
+- Automatic expiration for security
 
 ### 2. Patient Management
 
@@ -49,6 +64,10 @@ This document describes the complete database schema for the Celuma laboratory m
 - Tracks order status through workflow
 - Links patients to samples and reports
 - Supports billing locks for payment control
+- Fields:
+  - `billed_lock` (boolean): When true, blocks report PDF access due to pending payments
+  - Automatically updated when invoice balance changes
+  - Lock is removed when all invoices for the order are fully paid
 
 #### Sample
 - Physical samples associated with orders
@@ -71,7 +90,16 @@ This document describes the complete database schema for the Celuma laboratory m
 - Versioned reports with JSON (report body), PDF and HTML storage
 - Tracks authorship and changes
 - Maintains current version flags
-  - Fields: `json_storage_id` (nullable, S3 JSON body), `pdf_storage_id` (nullable), `html_storage_id` (nullable)
+- Supports digital signatures for published reports
+- Fields:
+  - `json_storage_id` (nullable, S3 JSON body)
+  - `pdf_storage_id` (nullable)
+  - `html_storage_id` (nullable)
+  - `authored_by` (user who created the version)
+  - `signed_by` (pathologist who signed, nullable)
+  - `signed_at` (timestamp of signature, nullable)
+  - `is_current` (boolean flag for active version)
+  - `changelog` (optional notes about version changes)
 
 ### 5. Storage Management
 
@@ -82,22 +110,40 @@ This document describes the complete database schema for the Celuma laboratory m
 
 ### 6. Billing System
 
+#### ServiceCatalog
+- Catalog of services and pricing
+- Tenant-scoped service definitions
+- Supports time-based pricing validity
+- Active/inactive status for service management
+
 #### Invoice
 - Billing records for laboratory orders
 - Tracks amounts, currency, and payment status
 - Unique invoice numbers per branch
+
+#### InvoiceItem
+- Detailed line items for invoices
+- Links to service catalog for pricing
+- Supports custom descriptions and quantities
+- Calculates subtotals for each item
 
 #### Payment
 - Payment records linked to invoices
 - Supports multiple payment methods
 - Tracks payment amounts and timing
 
-### 7. Audit System
+### 7. Audit and Event System
 
 #### AuditLog
 - Complete audit trail for compliance
 - Tracks all entity changes with before/after values
 - Links to users, branches, and specific entities
+
+#### CaseEvent
+- Timeline tracking for case workflow
+- Records all significant case events
+- Stores event metadata as JSON for flexibility
+- Links to orders, users, and branches for context
 
 ## Data Relationships
 
@@ -162,11 +208,18 @@ Invoice (1) ←→ (N) Payment
 - `OTRO`: Other sample types
 
 ### ReportStatus
-- `DRAFT`: Initial draft
-- `IN_REVIEW`: Under review
-- `APPROVED`: Approved by reviewer
-- `PUBLISHED`: Published to patient
-- `RETRACTED`: Report retracted
+- `DRAFT`: Initial draft (can be edited freely)
+- `IN_REVIEW`: Under review by pathologist
+- `APPROVED`: Approved by pathologist (ready for signing)
+- `PUBLISHED`: Signed and published to patient (immutable)
+- `RETRACTED`: Report retracted (withdrawn after publication)
+
+**Workflow Transitions:**
+- DRAFT → IN_REVIEW (submit for review)
+- IN_REVIEW → APPROVED (pathologist approves)
+- IN_REVIEW → DRAFT (pathologist requests changes)
+- APPROVED → PUBLISHED (pathologist signs)
+- PUBLISHED → RETRACTED (pathologist retracts)
 
 ### PaymentStatus
 - `PENDING`: Payment pending
@@ -174,6 +227,23 @@ Invoice (1) ←→ (N) Payment
 - `FAILED`: Payment failed
 - `REFUNDED`: Payment refunded
 - `PARTIAL`: Partial payment
+
+### EventType
+- `ORDER_CREATED`: New order created
+- `SAMPLE_RECEIVED`: Sample received at lab
+- `SAMPLE_PREPARED`: Sample preparation complete
+- `IMAGE_UPLOADED`: Sample image uploaded
+- `REPORT_CREATED`: Report created
+- `REPORT_SUBMITTED`: Report submitted for review
+- `REPORT_APPROVED`: Report approved
+- `REPORT_CHANGES_REQUESTED`: Changes requested on report
+- `REPORT_SIGNED`: Report digitally signed
+- `INVOICE_CREATED`: Invoice generated
+- `PAYMENT_RECEIVED`: Payment received
+- `ORDER_DELIVERED`: Results delivered
+- `ORDER_CANCELLED`: Order cancelled
+- `STATUS_CHANGED`: General status change
+- `NOTE_ADDED`: Note added to case
 
 ## Performance Considerations
 
@@ -221,6 +291,33 @@ The username feature provides flexible authentication options for users, allowin
 - **No Data Loss**: All existing user data preserved
 - **Gradual Adoption**: Users can add usernames later without breaking functionality
 
+### Service Catalog
+The service catalog system enables flexible pricing management:
+- **Service Definitions**: Name, code, description for each service
+- **Pricing**: Decimal precision for accurate amounts
+- **Validity Periods**: Time-based pricing with start/end dates
+- **Active Management**: Enable/disable services without deletion
+
+### Event Timeline
+Complete case history tracking:
+- **Event Types**: 16 predefined event types for workflow tracking
+- **Flexible Metadata**: JSON storage for event-specific data
+- **Audit Trail**: Links to users and timestamps for compliance
+- **Query Optimization**: Indexed for fast timeline reconstruction
+
+### User Management Enhancements
+- **Invitations**: Email-based user onboarding with expiring tokens
+- **Password Reset**: Secure token-based password recovery
+- **Avatar Support**: Profile picture URLs for user identification
+- **Tenant Branding**: Logo URLs for organization identity
+
+### Invoice Line Items
+Detailed billing with:
+- **Service Linkage**: Connect items to catalog for consistency
+- **Custom Descriptions**: Override catalog descriptions as needed
+- **Quantity Support**: Handle multiple units of same service
+- **Automatic Subtotals**: Calculated from unit price and quantity
+
 ### Usage Examples
 ```sql
 -- User with username
@@ -239,3 +336,5 @@ VALUES ('tenant-uuid', 'jane@example.com', 'Jane Smith', 'user', 'hashed_pass');
 - Advanced search indexing
 - Real-time notifications
 - API rate limiting per tenant
+- Email notification system integration
+- Event-driven workflows

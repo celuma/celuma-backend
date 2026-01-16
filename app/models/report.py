@@ -36,6 +36,8 @@ class ReportVersion(BaseModel, TimestampMixin, table=True):
     authored_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
     authored_at: datetime = Field(default_factory=datetime.utcnow)
     is_current: bool = Field(default=False)
+    signed_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
+    signed_at: Optional[datetime] = Field(default=None)
     
     # Basic relationships only
     report: Report = Relationship(back_populates="versions")

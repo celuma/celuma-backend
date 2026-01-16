@@ -42,6 +42,35 @@ curl http://localhost:8000/api/v1/health
 - **Auto-generated Documentation**: Complete OpenAPI/Swagger documentation
 - **Comprehensive Testing**: Full test suite with automatic cleanup
 
+### 👤 User Management
+- **Admin User Control**: Complete CRUD operations for user management
+- **User Invitations**: Streamlined email-based user onboarding with expiring tokens
+- **User Profiles**: Avatar support for user identification
+- **Role-Based Access**: Support for admin, pathologist, lab_tech, assistant, billing, and viewer roles
+- **Active Status Management**: Enable/disable user access without data loss
+
+### 📋 Report Workflow
+- **Status Tracking**: Complete workflow from DRAFT → IN_REVIEW → APPROVED → PUBLISHED
+- **Pathologist Review**: Dedicated endpoints for report approval and change requests
+- **Digital Signatures**: Pathologist signing with timestamp tracking
+- **Report Retraction**: Ability to withdraw published reports when necessary
+- **Worklist Management**: Dedicated worklist for pathologists to track reports in review
+- **Audit Trail**: Complete logging of all workflow transitions
+
+### 💰 Billing & Invoicing
+- **Service Catalog**: Manage pricing and service offerings with validity periods
+- **Invoice Line Items**: Detailed billing with service linkage and quantity support
+- **Payment Tracking**: Automatic invoice status updates based on payments
+- **Billing Locks**: Control report access based on payment status
+- **Balance Calculations**: Automatic tracking of invoice and order balances
+
+### 📊 Advanced Features
+- **Event Timeline**: Complete case history tracking with 16+ event types
+- **Dashboard**: Aggregated statistics and recent activity across the system
+- **Password Reset**: Secure token-based password recovery system
+- **Tenant Branding**: Logo support and active status management
+- **Enriched APIs**: Related data included in responses (branch, patient, order info)
+
 ### 🎯 Design Principles
 The API is designed with JSON request bodies for all POST endpoints, providing:
 - Excellent data validation with Pydantic schemas
@@ -206,14 +235,57 @@ make clean                # Clean up containers and data
 - **Authentication**: 
   - `POST /api/v1/auth/login` - Flexible login with username or email
   - `POST /api/v1/auth/register` - User registration with optional username
+  - `POST /api/v1/auth/register/unified` - Unified registration (tenant + branch + admin)
   - `GET /api/v1/auth/me` - Get current user profile
+  - `PUT /api/v1/auth/me` - Update profile and password
   - `POST /api/v1/auth/logout` - Logout and token blacklisting
+- **User Management** (Admin only):
+  - `GET/POST/PUT/DELETE /api/v1/users/` - Complete user CRUD operations
+  - `POST /api/v1/users/{id}/toggle-active` - Toggle user active status
+  - `POST /api/v1/users/invitations` - Send user invitation
+  - `GET /api/v1/users/invitations/{token}` - Get invitation details
+  - `POST /api/v1/users/invitations/{token}/accept` - Accept invitation
+  - `POST /api/v1/users/{id}/avatar` - Upload user avatar
 - **Tenants**: `GET/POST /api/v1/tenants/`
 - **Branches**: `GET/POST /api/v1/branches/`
 - **Patients**: `GET/POST /api/v1/patients/`
-- **Laboratory**: `GET/POST /api/v1/laboratory/orders/`, `GET/POST /api/v1/laboratory/samples/`
-- **Reports**: `GET/POST /api/v1/reports/`
-- **Billing**: `GET/POST /api/v1/billing/invoices/`, `GET/POST /api/v1/billing/payments/`
+- **Laboratory**: 
+  - `GET/POST /api/v1/laboratory/orders/` - Laboratory orders
+  - `POST /api/v1/laboratory/orders/unified` - Create order with samples
+  - `GET /api/v1/laboratory/orders/{id}/full` - Get full order details
+  - `GET /api/v1/laboratory/patients/{id}/orders` - Patient orders
+  - `GET /api/v1/laboratory/patients/{id}/cases` - Patient cases
+  - `GET/POST /api/v1/laboratory/samples/` - Samples management
+  - `GET /api/v1/laboratory/orders/{id}/events` - Order timeline events
+  - `POST /api/v1/laboratory/orders/{id}/events` - Add timeline event
+- **Reports**: 
+  - `GET/POST /api/v1/reports/` - Reports management
+  - `POST /api/v1/reports/{id}/new_version` - Create new report version
+  - `GET /api/v1/reports/{id}/versions` - List report versions
+  - `POST /api/v1/reports/{id}/pdf` - Upload report PDF
+  - `GET /api/v1/reports/{id}/pdf` - Get report PDF presigned URL
+  - **Workflow** (Pathologist endpoints):
+    - `POST /api/v1/reports/{id}/submit` - Submit for review
+    - `POST /api/v1/reports/{id}/approve` - Approve report
+    - `POST /api/v1/reports/{id}/request-changes` - Request changes
+    - `POST /api/v1/reports/{id}/sign` - Sign and publish
+    - `POST /api/v1/reports/{id}/retract` - Retract published report
+    - `GET /api/v1/reports/worklist` - Get pathologist worklist
+- **Billing**: 
+  - `GET/POST /api/v1/billing/invoices/` - Invoices management
+  - `GET /api/v1/billing/invoices/{id}` - Get invoice details
+  - `GET /api/v1/billing/invoices/{id}/full` - Get invoice with items and payments
+  - `POST /api/v1/billing/invoices/{id}/items` - Add invoice item
+  - `GET/POST /api/v1/billing/payments/` - Payments management
+  - `GET /api/v1/billing/orders/{id}/balance` - Get order payment balance
+  - `GET/POST/PUT/DELETE /api/v1/billing/catalog/` - Service catalog management
+- **Dashboard**:
+  - `GET /api/v1/dashboard/` - Get dashboard statistics and recent activity
+- **Portal**: 
+  - `POST /api/v1/portal/invite` - Send user invitations
+  - `POST /api/v1/portal/accept-invitation` - Accept invitation and create user
+  - `POST /api/v1/portal/request-password-reset` - Request password reset
+  - `POST /api/v1/portal/reset-password` - Reset password with token
 
 ### 🔐 Authentication Features
 - **Flexible Login**: Users can authenticate using either username or email
