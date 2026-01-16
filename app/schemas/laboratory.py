@@ -35,6 +35,12 @@ class LabOrderDetailResponse(BaseModel):
     notes: Optional[str] = None
     billed_lock: Optional[bool] = None
 
+
+class OrderNotesUpdate(BaseModel):
+    """Schema for updating order notes/description"""
+    notes: Optional[str] = None
+
+
 class SampleCreate(BaseModel):
     """Schema for creating a sample"""
     tenant_id: str
@@ -60,6 +66,11 @@ class SampleResponse(BaseModel):
 class SampleStateUpdate(BaseModel):
     """Schema for updating sample state"""
     state: str  # RECEIVED, PROCESSING, READY
+
+
+class SampleNotesUpdate(BaseModel):
+    """Schema for updating sample notes/description"""
+    notes: Optional[str] = None
 
 
 class SampleImageInfo(BaseModel):

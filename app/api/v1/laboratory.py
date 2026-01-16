@@ -15,9 +15,11 @@ from app.schemas.laboratory import (
     LabOrderCreate,
     LabOrderResponse,
     LabOrderDetailResponse,
+    OrderNotesUpdate,
     SampleCreate,
     SampleResponse,
     SampleStateUpdate,
+    SampleNotesUpdate,
     SampleImagesListResponse,
     SampleImageInfo,
     SampleImageUploadResponse,
@@ -238,6 +240,63 @@ def get_order(
         billed_lock=order.billed_lock
     )
 
+
+@router.patch("/orders/{order_id}/notes", response_model=LabOrderDetailResponse)
+def update_order_notes(
+    order_id: str,
+    notes_data: OrderNotesUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update the notes/description of an order"""
+    order = session.get(LabOrder, order_id)
+    if not order:
+        raise HTTPException(404, "Order not found")
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Order not found")
+    
+    old_notes = order.notes
+    new_notes = notes_data.notes
+    
+    # Only update and create event if notes actually changed
+    if old_notes != new_notes:
+        order.notes = new_notes
+        session.add(order)
+        
+        # Create timeline event for notes update
+        event = CaseEvent(
+            tenant_id=order.tenant_id,
+            branch_id=order.branch_id,
+            order_id=order.id,
+            sample_id=None,
+            event_type=EventType.ORDER_NOTES_UPDATED,
+            description="",  # Not used - message built in UI from metadata
+            event_metadata={
+                "old_notes": old_notes or "",
+                "new_notes": new_notes or "",
+                "order_id": str(order.id),
+                "order_code": order.order_code,
+            },
+            created_by=user.id,
+        )
+        session.add(event)
+        session.commit()
+        session.refresh(order)
+    
+    return LabOrderDetailResponse(
+        id=str(order.id),
+        order_code=order.order_code,
+        status=order.status,
+        patient_id=str(order.patient_id),
+        tenant_id=str(order.tenant_id),
+        branch_id=str(order.branch_id),
+        requested_by=order.requested_by,
+        notes=order.notes,
+        billed_lock=order.billed_lock
+    )
+
+
 @router.get("/samples/", response_model=SamplesListResponse)
 def list_samples(
     session: Session = Depends(get_session),
@@ -377,6 +436,60 @@ def update_sample_state(
     
     session.commit()
     session.refresh(sample)
+    
+    return SampleResponse(
+        id=str(sample.id),
+        sample_code=sample.sample_code,
+        type=sample.type,
+        state=sample.state,
+        order_id=str(sample.order_id),
+        tenant_id=str(sample.tenant_id),
+        branch_id=str(sample.branch_id),
+    )
+
+
+@router.patch("/samples/{sample_id}/notes", response_model=SampleResponse)
+def update_sample_notes(
+    sample_id: str,
+    notes_data: SampleNotesUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update the notes/description of a sample"""
+    sample = session.get(Sample, sample_id)
+    if not sample:
+        raise HTTPException(404, "Sample not found")
+    if str(sample.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Sample not found")
+    
+    old_notes = sample.notes
+    new_notes = notes_data.notes
+    
+    # Only update and create event if notes actually changed
+    if old_notes != new_notes:
+        sample.notes = new_notes
+        session.add(sample)
+        
+        # Create timeline event for notes update
+        event = CaseEvent(
+            tenant_id=sample.tenant_id,
+            branch_id=sample.branch_id,
+            order_id=sample.order_id,
+            sample_id=sample.id,
+            event_type=EventType.SAMPLE_NOTES_UPDATED,
+            description="",  # Not used - message built in UI from metadata
+            event_metadata={
+                "old_notes": old_notes or "",
+                "new_notes": new_notes or "",
+                "sample_id": str(sample.id),
+                "sample_code": sample.sample_code,
+            },
+            created_by=user.id,
+        )
+        session.add(event)
+        session.commit()
+        session.refresh(sample)
     
     return SampleResponse(
         id=str(sample.id),
@@ -845,6 +958,91 @@ def list_sample_images(sample_id: str, session: Session = Depends(get_session)):
         )
 
     return SampleImagesListResponse(sample_id=str(sample.id), images=results)
+
+
+@router.delete("/samples/{sample_id}/images/{image_id}")
+def delete_sample_image(
+    sample_id: str,
+    image_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Delete a sample image and its associated storage objects"""
+    # Verify sample exists and belongs to tenant
+    sample = session.get(Sample, sample_id)
+    if not sample:
+        raise HTTPException(404, "Sample not found")
+    if str(sample.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Sample not found")
+    
+    # Verify image exists and belongs to this sample
+    sample_image = session.get(SampleImage, image_id)
+    if not sample_image:
+        raise HTTPException(404, "Image not found")
+    if str(sample_image.sample_id) != sample_id:
+        raise HTTPException(404, "Image not found")
+    
+    # Get the storage object to get the filename for the event
+    storage = session.get(StorageObject, sample_image.storage_id)
+    filename = storage.object_key.split("/")[-1] if storage else "imagen"
+    
+    # Collect storage IDs before deleting anything
+    storage_ids_to_delete = [sample_image.storage_id]
+    
+    # Delete renditions first (thumbnail, original_raw, etc.)
+    renditions = session.exec(
+        select(SampleImageRendition).where(SampleImageRendition.sample_image_id == sample_image.id)
+    ).all()
+    
+    for rendition in renditions:
+        storage_ids_to_delete.append(rendition.storage_id)
+        session.delete(rendition)
+    
+    # Delete the sample image record
+    session.delete(sample_image)
+    
+    # Flush to ensure SampleImage and renditions are deleted before we delete storage objects
+    session.flush()
+    
+    # Delete storage objects (optional: could also delete from S3 here)
+    # For now, we just remove the DB records - S3 cleanup can be done via lifecycle rules
+    for storage_id in storage_ids_to_delete:
+        storage_obj = session.get(StorageObject, storage_id)
+        if storage_obj:
+            session.delete(storage_obj)
+    
+    # Create timeline event for image deletion
+    event = CaseEvent(
+        tenant_id=sample.tenant_id,
+        branch_id=sample.branch_id,
+        order_id=sample.order_id,
+        sample_id=sample.id,
+        event_type=EventType.IMAGE_DELETED,
+        description="",  # Not used - message built in UI from metadata
+        event_metadata={
+            "filename": filename,
+            "image_id": image_id,
+            "sample_id": str(sample.id),
+            "sample_code": sample.sample_code,
+        },
+        created_by=user.id,
+    )
+    session.add(event)
+    
+    session.commit()
+    
+    logger.info(
+        f"Image deleted from sample {sample_id}",
+        extra={
+            "event": "sample_image.deleted",
+            "sample_id": sample_id,
+            "image_id": image_id,
+            "user_id": str(user.id),
+        },
+    )
+    
+    return {"message": "Image deleted successfully", "image_id": image_id}
 
 
 @router.get("/orders/{order_id}/full", response_model=LabOrderFullDetailResponse)
