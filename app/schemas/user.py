@@ -32,6 +32,7 @@ class UserDetailResponse(BaseModel):
     is_active: bool
     created_at: datetime
     branch_ids: List[str] = []
+    avatar_url: Optional[str] = None
 
 class UsersListResponse(BaseModel):
     """Schema for users list response"""

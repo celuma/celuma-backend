@@ -96,6 +96,7 @@ def list_users(
                 is_active=u.is_active,
                 created_at=u.created_at,
                 branch_ids=get_user_branch_ids(u, session),
+                avatar_url=u.avatar_url,
             )
             for u in users
         ]
