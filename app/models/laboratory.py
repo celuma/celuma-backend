@@ -3,7 +3,7 @@ from typing import Optional, List
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field, Relationship
 from .base import BaseModel, TimestampMixin, TenantMixin, BranchMixin
-from .enums import OrderStatus, SampleType
+from .enums import OrderStatus, SampleType, SampleState
 
 class LabOrder(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     """Laboratory order model"""
@@ -33,7 +33,7 @@ class Sample(BaseModel, TenantMixin, BranchMixin, table=True):
     order_id: UUID = Field(foreign_key="lab_order.id")
     sample_code: str = Field(max_length=100)  # Unique per order or branch
     type: SampleType
-    state: OrderStatus = Field(default=OrderStatus.RECEIVED)
+    state: SampleState = Field(default=SampleState.RECEIVED)
     collected_at: Optional[datetime] = Field(default=None)
     received_at: Optional[datetime] = Field(default=None)
     notes: Optional[str] = Field(default=None)

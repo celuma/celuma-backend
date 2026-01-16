@@ -1,6 +1,6 @@
 # Import all models to ensure they are registered with SQLModel
 from .base import BaseModel, TimestampMixin, TenantMixin, BranchMixin
-from .enums import UserRole, OrderStatus, SampleType, ReportStatus, PaymentStatus, EventType
+from .enums import UserRole, OrderStatus, SampleType, SampleState, ReportStatus, PaymentStatus, EventType
 from .tenant import Tenant, Branch
 from .user import AppUser, UserBranch
 from .patient import Patient
@@ -21,6 +21,7 @@ __all__ = [
     "UserRole",
     "OrderStatus", 
     "SampleType",
+    "SampleState",
     "ReportStatus",
     "PaymentStatus",
     "EventType",

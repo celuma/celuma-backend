@@ -57,6 +57,11 @@ class SampleResponse(BaseModel):
     branch_id: str
 
 
+class SampleStateUpdate(BaseModel):
+    """Schema for updating sample state"""
+    state: str  # RECEIVED, PROCESSING, READY
+
+
 class SampleImageInfo(BaseModel):
     """Schema for a sample image with URLs to renditions."""
     id: str

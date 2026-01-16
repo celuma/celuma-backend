@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reports")
 
+# Import update_order_status to sync order status with report status
+# We do this here to avoid circular imports
+def update_order_status_for_report(order_id: str, session: Session) -> None:
+    """Wrapper to update order status after report changes"""
+    from app.api.v1.laboratory import update_order_status
+    update_order_status(order_id, session)
+
 @router.get("/", response_model=ReportsListResponse)
 def list_reports(
     session: Session = Depends(get_session),
@@ -149,6 +156,29 @@ def create_report(
     )
     
     session.add(report)
+    session.flush()
+    
+    # Create timeline event for report creation
+    from app.models.events import CaseEvent
+    from app.models.enums import EventType
+    
+    creation_event = CaseEvent(
+        tenant_id=report.tenant_id,
+        branch_id=report.branch_id,
+        order_id=report.order_id,
+        event_type=EventType.REPORT_CREATED,
+        description="",  # Not used - message built in UI
+        event_metadata={
+            "report_id": str(report.id),
+            "report_title": report.title,
+        },
+        created_by=report.created_by,
+    )
+    session.add(creation_event)
+    
+    # Update order status based on report creation (PROCESSING -> DIAGNOSIS)
+    update_order_status_for_report(str(report.order_id), session)
+    
     session.commit()
     session.refresh(report)
     
@@ -263,6 +293,26 @@ def create_report_new_version(
         is_current=True,
     )
     session.add(new_version)
+    
+    # Create timeline event for new version
+    from app.models.events import CaseEvent
+    from app.models.enums import EventType
+    
+    version_event = CaseEvent(
+        tenant_id=report.tenant_id,
+        branch_id=report.branch_id,
+        order_id=report.order_id,
+        event_type=EventType.REPORT_VERSION_CREATED,
+        description="",  # Not used - message built in UI
+        event_metadata={
+            "report_id": str(report.id),
+            "report_title": report.title,
+            "version_no": next_version_no,
+        },
+        created_by=report_data.created_by,
+    )
+    session.add(version_event)
+    
     session.commit()
     session.refresh(new_version)
 
@@ -773,6 +823,28 @@ def submit_report(
         new_values={"status": report.status, "changelog": data.changelog},
     )
     
+    # Create timeline event for report submission
+    from app.models.events import CaseEvent
+    from app.models.enums import EventType
+    
+    submit_event = CaseEvent(
+        tenant_id=report.tenant_id,
+        branch_id=report.branch_id,
+        order_id=report.order_id,
+        event_type=EventType.REPORT_SUBMITTED,
+        description="",  # Not used - message built in UI
+        event_metadata={
+            "report_id": str(report.id),
+            "report_title": report.title,
+        },
+        created_by=user.id,
+    )
+    session.add(submit_event)
+    
+    # Update order status (DIAGNOSIS -> REVIEW)
+    if report.order_id:
+        update_order_status_for_report(str(report.order_id), session)
+    
     session.commit()
     session.refresh(report)
     
@@ -977,6 +1049,10 @@ def sign_report(
         },
     )
     
+    # Update order status based on report being published
+    if current_version.order_id:
+        update_order_status_for_report(str(current_version.order_id), session)
+    
     session.commit()
     session.refresh(report)
     
@@ -1036,6 +1112,29 @@ def retract_report(
         old_values={"status": old_status},
         new_values={"status": report.status, "changelog": data.changelog},
     )
+    
+    # Create timeline event for report retraction
+    from app.models.events import CaseEvent
+    from app.models.enums import EventType
+    
+    retract_event = CaseEvent(
+        tenant_id=report.tenant_id,
+        branch_id=report.branch_id,
+        order_id=report.order_id,
+        event_type=EventType.REPORT_RETRACTED,
+        description="",  # Not used - message built in UI
+        event_metadata={
+            "report_id": str(report.id),
+            "report_title": report.title,
+            "reason": data.changelog if data.changelog else "Sin razón especificada",
+        },
+        created_by=user.id,
+    )
+    session.add(retract_event)
+    
+    # Update order status based on report being retracted (CLOSED -> REVIEW)
+    if report.order_id:
+        update_order_status_for_report(str(report.order_id), session)
     
     session.commit()
     session.refresh(report)

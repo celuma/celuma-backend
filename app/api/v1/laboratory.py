@@ -10,13 +10,14 @@ from app.models.patient import Patient
 from app.models.report import Report, ReportVersion
 from app.models.user import AppUser
 from app.models.events import CaseEvent
-from app.models.enums import EventType
+from app.models.enums import EventType, SampleState
 from app.schemas.laboratory import (
     LabOrderCreate,
     LabOrderResponse,
     LabOrderDetailResponse,
     SampleCreate,
     SampleResponse,
+    SampleStateUpdate,
     SampleImagesListResponse,
     SampleImageInfo,
     SampleImageUploadResponse,
@@ -49,6 +50,81 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/laboratory")
+
+
+def update_order_status(order_id: str, session: Session) -> None:
+    """
+    Automatically update order status based on current state of samples and reports.
+    
+    Rules:
+    - RECEIVED: order created + at least 1 sample
+    - PROCESSING: at least 1 sample is PROCESSING, READY, CANCELLED, or DAMAGED
+    - DIAGNOSIS: meets PROCESSING + at least 1 report exists
+    - REVIEW: report is in REVIEW or RETRACTED status
+    - CLOSED: report is PUBLISHED
+    - RELEASED: payment cleared (billed_lock=False) + meets CLOSED
+    - CANCELLED: if report is CANCELLED
+    """
+    from app.models.enums import OrderStatus, SampleState, ReportStatus
+    
+    # Get order with samples
+    order = session.get(LabOrder, order_id)
+    if not order:
+        return
+    
+    # Get all samples for this order
+    samples = session.exec(
+        select(Sample).where(Sample.order_id == order_id)
+    ).all()
+    
+    # Check if there are any reports for this order
+    reports = session.exec(
+        select(Report)
+        .where(Report.order_id == order_id)
+        .order_by(Report.created_at.desc())
+    ).all()
+    
+    latest_report = reports[0] if reports else None
+    
+    # Rule: At least 1 sample required
+    if not samples:
+        # Keep as RECEIVED if no samples yet
+        if order.status != OrderStatus.RECEIVED:
+            order.status = OrderStatus.RECEIVED
+            session.add(order)
+            session.flush()
+        return
+    
+    # Check sample states
+    has_processing_or_beyond = any(
+        s.state in [SampleState.PROCESSING, SampleState.READY, SampleState.DAMAGED, SampleState.CANCELLED]
+        for s in samples
+    )
+    
+    # Determine new status
+    new_status = OrderStatus.RECEIVED
+    
+    if has_processing_or_beyond:
+        new_status = OrderStatus.PROCESSING
+        
+        if latest_report:
+            # Has report - move to DIAGNOSIS or beyond
+            new_status = OrderStatus.DIAGNOSIS
+            
+            if latest_report.status in [ReportStatus.IN_REVIEW, ReportStatus.RETRACTED]:
+                new_status = OrderStatus.REVIEW
+            elif latest_report.status == ReportStatus.PUBLISHED:
+                new_status = OrderStatus.CLOSED
+                
+                # Check if can be released (payment cleared)
+                if not order.billed_lock:
+                    new_status = OrderStatus.RELEASED
+    
+    # Update if changed
+    if order.status != new_status:
+        order.status = new_status
+        session.add(order)
+        session.flush()
 
 @router.get("/orders/", response_model=OrdersListResponse)
 def list_orders(
@@ -242,6 +318,77 @@ def get_sample_detail(
         ),
     )
 
+
+@router.patch("/samples/{sample_id}/state", response_model=SampleResponse)
+def update_sample_state(
+    sample_id: str,
+    state_data: SampleStateUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update the state of a sample (RECEIVED, PROCESSING, READY, DAMAGED, CANCELLED)"""
+    sample = session.get(Sample, sample_id)
+    if not sample:
+        raise HTTPException(404, "Sample not found")
+    if str(sample.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Sample not found")
+    
+    # Validate state
+    try:
+        new_state = SampleState(state_data.state)
+    except ValueError:
+        raise HTTPException(400, f"Invalid state. Must be one of: {[s.value for s in SampleState]}")
+    
+    old_state = sample.state
+    sample.state = new_state
+    session.add(sample)
+    
+    # Determine event type based on new state
+    if new_state == SampleState.DAMAGED:
+        event_type = EventType.SAMPLE_DAMAGED
+    elif new_state == SampleState.CANCELLED:
+        event_type = EventType.SAMPLE_CANCELLED
+    else:
+        event_type = EventType.SAMPLE_STATE_CHANGED
+    
+    # Create timeline event with structured metadata (no localized description)
+    # The UI will build the message based on event_type and metadata
+    event = CaseEvent(
+        tenant_id=sample.tenant_id,
+        branch_id=sample.branch_id,
+        order_id=sample.order_id,
+        sample_id=sample.id,
+        event_type=event_type,
+        description="",  # Not used - message built in UI from metadata
+        event_metadata={
+            "old_state": old_state.value if hasattr(old_state, 'value') else str(old_state),
+            "new_state": new_state.value,
+            "sample_id": str(sample.id),
+            "sample_code": sample.sample_code,
+            "sample_type": sample.type.value if hasattr(sample.type, 'value') else str(sample.type),
+        },
+        created_by=user.id,
+    )
+    session.add(event)
+    
+    # Update order status based on sample state change
+    update_order_status(str(sample.order_id), session)
+    
+    session.commit()
+    session.refresh(sample)
+    
+    return SampleResponse(
+        id=str(sample.id),
+        sample_code=sample.sample_code,
+        type=sample.type,
+        state=sample.state,
+        order_id=str(sample.order_id),
+        tenant_id=str(sample.tenant_id),
+        branch_id=str(sample.branch_id),
+    )
+
+
 @router.post("/samples/", response_model=SampleResponse)
 def create_sample(sample_data: SampleCreate, session: Session = Depends(get_session)):
     """Create a new sample"""
@@ -281,6 +428,27 @@ def create_sample(sample_data: SampleCreate, session: Session = Depends(get_sess
     )
     
     session.add(sample)
+    session.flush()  # Get sample.id for event
+    
+    # Create SAMPLE_CREATED event
+    sample_created_event = CaseEvent(
+        order_id=sample_data.order_id,
+        sample_id=sample.id,
+        event_type=EventType.SAMPLE_CREATED,
+        description="Muestra registrada",
+        event_metadata={
+            "sample_id": str(sample.id),
+            "sample_code": sample.sample_code,
+            "sample_type": sample.type,
+            "initial_state": SampleState.RECEIVED.value,
+        },
+        created_by=sample_data.created_by if hasattr(sample_data, 'created_by') else None,
+    )
+    session.add(sample_created_event)
+    
+    # Update order status based on new sample
+    update_order_status(str(sample_data.order_id), session)
+    
     session.commit()
     session.refresh(sample)
     
@@ -367,7 +535,27 @@ def create_order_with_samples(payload: LabOrderUnifiedCreate, session: Session =
             received_at=s.received_at,
         )
         session.add(sample)
+        session.flush()  # Get sample.id for event
+        
+        # Create SAMPLE_CREATED event for each sample
+        sample_created_event = CaseEvent(
+            order_id=order.id,
+            sample_id=sample.id,
+            event_type=EventType.SAMPLE_CREATED,
+            description="Muestra registrada",
+            event_metadata={
+                "sample_id": str(sample.id),
+                "sample_code": sample.sample_code,
+                "sample_type": sample.type,
+                "initial_state": SampleState.RECEIVED.value,
+            },
+            created_by=payload.created_by,
+        )
+        session.add(sample_created_event)
         created_samples.append(sample)
+
+    # Update order status based on new samples
+    update_order_status(str(order.id), session)
 
     # Commit transaction
     session.commit()
@@ -400,7 +588,13 @@ def create_order_with_samples(payload: LabOrderUnifiedCreate, session: Session =
 
 
 @router.post("/samples/{sample_id}/images", response_model=SampleImageUploadResponse)
-def upload_sample_image(sample_id: str, file: UploadFile = File(...), session: Session = Depends(get_session)):
+def upload_sample_image(
+    sample_id: str,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
     """Upload an image (regular or RAW) for a sample, store S3 keys and DB mapping.
 
     Stores:
@@ -533,6 +727,62 @@ def upload_sample_image(sample_id: str, file: UploadFile = File(...), session: S
             storage_id=original_storage.id,
         )
         session.add(rendition_original)
+
+    # Auto-update sample state to PROCESSING only on first image upload
+    # Check if this is the first image (only the one we just added)
+    existing_images_count = session.exec(
+        select(SampleImage).where(SampleImage.sample_id == sample.id)
+    ).all()
+    is_first_image = len(existing_images_count) == 1
+    if is_first_image and sample.state == SampleState.RECEIVED:
+        sample.state = SampleState.PROCESSING
+        session.add(sample)
+    
+    # Create timeline event for image upload with structured metadata
+    event = CaseEvent(
+        tenant_id=sample.tenant_id,
+        branch_id=sample.branch_id,
+        order_id=sample.order_id,
+        sample_id=sample.id,
+        event_type=EventType.IMAGE_UPLOADED,
+        description="",  # Not used - message built in UI from metadata
+        event_metadata={
+            "filename": filename,
+            "is_raw": is_raw,
+            "file_size": len(data),
+            "sample_id": str(sample.id),
+            "sample_code": sample.sample_code,
+            "sample_type": sample.type.value if hasattr(sample.type, 'value') else str(sample.type),
+            "image_id": str(sample_image.id),
+        },
+        created_by=user.id,
+    )
+    session.add(event)
+    
+    # If state changed, also add state change event
+    if is_first_image and sample.state == SampleState.PROCESSING:
+        state_event = CaseEvent(
+            tenant_id=sample.tenant_id,
+            branch_id=sample.branch_id,
+            order_id=sample.order_id,
+            sample_id=sample.id,
+            event_type=EventType.SAMPLE_STATE_CHANGED,
+            description="",  # Not used - message built in UI from metadata
+            event_metadata={
+                "old_state": "RECEIVED",
+                "new_state": "PROCESSING",
+                "sample_id": str(sample.id),
+                "sample_code": sample.sample_code,
+                "sample_type": sample.type.value if hasattr(sample.type, 'value') else str(sample.type),
+                "trigger": "first_image_upload",
+            },
+            created_by=user.id,
+        )
+        session.add(state_event)
+
+    # Update order status based on sample state change (if it changed)
+    if is_first_image and sample.state == SampleState.PROCESSING:
+        update_order_status(str(sample.order_id), session)
 
     session.commit()
 
@@ -859,7 +1109,7 @@ def list_case_events(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
 ):
-    """Get timeline of events for a case"""
+    """Get timeline of events for a case (order + all samples + report)"""
     # Verify order exists and belongs to tenant
     order = session.get(LabOrder, order_id)
     if not order:
@@ -868,12 +1118,23 @@ def list_case_events(
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Order does not belong to your tenant")
     
-    # Get events ordered by creation date
+    # Get events ordered by creation date (oldest first, top to bottom)
     events = session.exec(
         select(CaseEvent)
         .where(CaseEvent.order_id == order_id)
-        .order_by(CaseEvent.created_at.desc())
+        .order_by(CaseEvent.created_at.asc())
     ).all()
+    
+    # Get user info for display (name + avatar)
+    user_info: dict[str, dict] = {}
+    for e in events:
+        if e.created_by and str(e.created_by) not in user_info:
+            user = session.get(AppUser, e.created_by)
+            if user:
+                user_info[str(e.created_by)] = {
+                    "name": user.full_name,
+                    "avatar": user.avatar_url,
+                }
     
     return EventsListResponse(
         events=[
@@ -882,10 +1143,67 @@ def list_case_events(
                 tenant_id=str(e.tenant_id),
                 branch_id=str(e.branch_id),
                 order_id=str(e.order_id),
+                sample_id=str(e.sample_id) if e.sample_id else None,
                 event_type=e.event_type,
                 description=e.description,
                 metadata=e.event_metadata,
                 created_by=str(e.created_by) if e.created_by else None,
+                created_by_name=user_info.get(str(e.created_by), {}).get("name") if e.created_by else None,
+                created_by_avatar=user_info.get(str(e.created_by), {}).get("avatar") if e.created_by else None,
+                created_at=e.created_at,
+            )
+            for e in events
+        ]
+    )
+
+
+@router.get("/samples/{sample_id}/events", response_model=EventsListResponse)
+def list_sample_events(
+    sample_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
+    """Get timeline of events for a specific sample"""
+    # Verify sample exists and belongs to tenant
+    sample = session.get(Sample, sample_id)
+    if not sample:
+        raise HTTPException(404, "Sample not found")
+    
+    if str(sample.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Sample does not belong to your tenant")
+    
+    # Get events for this sample ordered by creation date (oldest first, top to bottom)
+    events = session.exec(
+        select(CaseEvent)
+        .where(CaseEvent.sample_id == sample_id)
+        .order_by(CaseEvent.created_at.asc())
+    ).all()
+    
+    # Get user info for display (name + avatar)
+    user_info: dict[str, dict] = {}
+    for e in events:
+        if e.created_by and str(e.created_by) not in user_info:
+            user = session.get(AppUser, e.created_by)
+            if user:
+                user_info[str(e.created_by)] = {
+                    "name": user.full_name,
+                    "avatar": user.avatar_url,
+                }
+    
+    return EventsListResponse(
+        events=[
+            EventResponse(
+                id=str(e.id),
+                tenant_id=str(e.tenant_id),
+                branch_id=str(e.branch_id),
+                order_id=str(e.order_id),
+                sample_id=str(e.sample_id) if e.sample_id else None,
+                event_type=e.event_type,
+                description=e.description,
+                metadata=e.event_metadata,
+                created_by=str(e.created_by) if e.created_by else None,
+                created_by_name=user_info.get(str(e.created_by), {}).get("name") if e.created_by else None,
+                created_by_avatar=user_info.get(str(e.created_by), {}).get("avatar") if e.created_by else None,
                 created_at=e.created_at,
             )
             for e in events
