@@ -41,6 +41,51 @@ class OrderNotesUpdate(BaseModel):
     notes: Optional[str] = None
 
 
+class MentionedUser(BaseModel):
+    """Schema for mentioned user info"""
+    user_id: str
+    username: str
+    name: str
+    avatar: Optional[str] = None
+
+class ConversationComment(BaseModel):
+    """Schema for a single comment in conversation"""
+    id: str
+    user_id: str
+    user_name: str
+    user_avatar: Optional[str] = None
+    text: str
+    mentions: List[str] = []  # List of mentioned user IDs
+    mentioned_users: List[MentionedUser] = []  # Full info of mentioned users
+    created_at: str
+
+
+class ConversationResponse(BaseModel):
+    """Schema for conversation response"""
+    comments: List[ConversationComment] = []
+
+
+class CommentCreate(BaseModel):
+    """Schema for creating a new comment"""
+    text: str
+    mentions: List[str] = []  # List of mentioned user IDs
+    mentioned_users: List[MentionedUser] = []  # Full info of mentioned users
+
+
+class UserMentionItem(BaseModel):
+    """Schema for user mention suggestion"""
+    id: str
+    name: str
+    username: Optional[str] = None
+    email: str
+    avatar_url: Optional[str] = None
+
+
+class UserMentionListResponse(BaseModel):
+    """Schema for user mention list response"""
+    users: List[UserMentionItem]
+
+
 class SampleCreate(BaseModel):
     """Schema for creating a sample"""
     tenant_id: str

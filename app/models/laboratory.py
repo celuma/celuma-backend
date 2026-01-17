@@ -1,7 +1,8 @@
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from uuid import UUID, uuid4
-from sqlmodel import SQLModel, Field, Relationship
+from sqlmodel import SQLModel, Field, Relationship, Column
+from sqlalchemy import JSON
 from .base import BaseModel, TimestampMixin, TenantMixin, BranchMixin
 from .enums import OrderStatus, SampleType, SampleState
 
@@ -17,6 +18,7 @@ class LabOrder(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     status: OrderStatus = Field(default=OrderStatus.RECEIVED)
     requested_by: Optional[str] = Field(max_length=255, default=None)  # External requesting physician
     notes: Optional[str] = Field(default=None)
+    conversation: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))  # Conversation thread
     billed_lock: bool = Field(default=False)  # Lock release if no payment
     created_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
     

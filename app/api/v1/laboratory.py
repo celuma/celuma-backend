@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from typing import Dict
 from sqlmodel import select, Session
+from sqlalchemy.orm.attributes import flag_modified
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.models.laboratory import LabOrder, Sample, SampleImage
@@ -16,6 +17,11 @@ from app.schemas.laboratory import (
     LabOrderResponse,
     LabOrderDetailResponse,
     OrderNotesUpdate,
+    ConversationResponse,
+    ConversationComment,
+    CommentCreate,
+    UserMentionItem,
+    UserMentionListResponse,
     SampleCreate,
     SampleResponse,
     SampleStateUpdate,
@@ -48,6 +54,7 @@ from uuid import uuid4
 import os
 from sqlmodel import select
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -294,6 +301,173 @@ def update_order_notes(
         requested_by=order.requested_by,
         notes=order.notes,
         billed_lock=order.billed_lock
+    )
+
+
+@router.get("/orders/{order_id}/conversation", response_model=ConversationResponse)
+def get_order_conversation(
+    order_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
+    """Get the conversation thread for an order"""
+    order = session.get(LabOrder, order_id)
+    if not order:
+        raise HTTPException(404, "Order not found")
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Order not found")
+    
+    # Get conversation from JSON field
+    conversation_data = order.conversation or {"comments": []}
+    comments = []
+    
+    for comment_data in conversation_data.get("comments", []):
+        # Convert mentioned_users from dict to MentionedUser objects
+        from app.schemas.laboratory import MentionedUser
+        mentioned_users_list = []
+        for mu_data in comment_data.get("mentioned_users", []):
+            mentioned_users_list.append(MentionedUser(
+                user_id=mu_data["user_id"],
+                username=mu_data["username"],
+                name=mu_data["name"],
+                avatar=mu_data.get("avatar")
+            ))
+        
+        comments.append(ConversationComment(
+            id=comment_data["id"],
+            user_id=comment_data["user_id"],
+            user_name=comment_data["user_name"],
+            user_avatar=comment_data.get("user_avatar"),
+            text=comment_data["text"],
+            mentions=comment_data.get("mentions", []),
+            mentioned_users=mentioned_users_list,
+            created_at=comment_data["created_at"],
+        ))
+    
+    return ConversationResponse(comments=comments)
+
+
+@router.post("/orders/{order_id}/conversation", response_model=ConversationComment)
+def add_order_comment(
+    order_id: str,
+    comment: CommentCreate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Add a comment to the order conversation"""
+    order = session.get(LabOrder, order_id)
+    if not order:
+        raise HTTPException(404, "Order not found")
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Order not found")
+    
+    # Get or initialize conversation
+    conversation_data = order.conversation or {"comments": []}
+    
+    # Create new comment
+    comment_id = str(uuid4())
+    now = datetime.utcnow().isoformat() + "Z"
+    
+    # Get user info
+    user_name = user.full_name if user.full_name else user.email
+    
+    # Convert mentioned_users to dict format for JSON storage
+    mentioned_users_data = [
+        {
+            "user_id": mu.user_id,
+            "username": mu.username,
+            "name": mu.name,
+            "avatar": mu.avatar
+        }
+        for mu in comment.mentioned_users
+    ]
+    
+    new_comment = {
+        "id": comment_id,
+        "user_id": str(user.id),
+        "user_name": user_name,
+        "user_avatar": user.avatar_url,
+        "text": comment.text,
+        "mentions": comment.mentions,
+        "mentioned_users": mentioned_users_data,
+        "created_at": now,
+    }
+    
+    # Add comment to conversation
+    if "comments" not in conversation_data:
+        conversation_data["comments"] = []
+    conversation_data["comments"].append(new_comment)
+    
+    # Update order
+    order.conversation = conversation_data
+    # Mark the JSON field as modified so SQLAlchemy knows to update it
+    flag_modified(order, "conversation")
+    session.add(order)
+    
+    # Create timeline event
+    event = CaseEvent(
+        tenant_id=order.tenant_id,
+        branch_id=order.branch_id,
+        order_id=order.id,
+        sample_id=None,
+        event_type=EventType.COMMENT_ADDED,
+        description="",
+        event_metadata={
+            "comment_id": comment_id,
+            "comment_preview": comment.text[:50] + "..." if len(comment.text) > 50 else comment.text,
+            "order_id": str(order.id),
+            "order_code": order.order_code,
+        },
+        created_by=user.id,
+    )
+    session.add(event)
+    session.commit()
+    
+    return ConversationComment(
+        id=new_comment["id"],
+        user_id=new_comment["user_id"],
+        user_name=new_comment["user_name"],
+        user_avatar=new_comment["user_avatar"],
+        text=new_comment["text"],
+        mentions=new_comment["mentions"],
+        mentioned_users=comment.mentioned_users,
+        created_at=new_comment["created_at"],
+    )
+
+
+@router.get("/users/search", response_model=UserMentionListResponse)
+def search_users_for_mention(
+    q: str = "",
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
+    """Search users for mention suggestions"""
+    # Get all users from the same tenant
+    query = select(AppUser).where(AppUser.tenant_id == ctx.tenant_id, AppUser.is_active == True)
+    
+    # Filter by search query if provided
+    if q:
+        search_term = f"%{q.lower()}%"
+        query = query.where(
+            (AppUser.full_name.ilike(search_term)) |
+            (AppUser.username.ilike(search_term)) |
+            (AppUser.email.ilike(search_term))
+        )
+    
+    users = session.exec(query.limit(10)).all()
+    
+    return UserMentionListResponse(
+        users=[
+            UserMentionItem(
+                id=str(u.id),
+                name=u.full_name if u.full_name else u.email,
+                username=u.username,
+                email=u.email,
+                avatar_url=u.avatar_url,
+            )
+            for u in users
+        ]
     )
 
 

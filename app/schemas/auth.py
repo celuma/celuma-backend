@@ -1,5 +1,6 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional, List
+import re
 
 class UserRegister(BaseModel):
     """Schema for user registration"""
@@ -9,6 +10,19 @@ class UserRegister(BaseModel):
     full_name: str
     role: str
     tenant_id: str
+    
+    @field_validator('username')
+    @classmethod
+    def validate_username(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v != "":
+            # Only allow alphanumeric characters and underscores
+            if not re.match(r'^[a-zA-Z0-9_]+$', v):
+                raise ValueError('Username must contain only alphanumeric characters and underscores')
+            if len(v) < 3:
+                raise ValueError('Username must be at least 3 characters long')
+            if len(v) > 30:
+                raise ValueError('Username must be at most 30 characters long')
+        return v
 
 class UserLogin(BaseModel):
     """Schema for user login - can use either username or email"""
@@ -64,6 +78,19 @@ class UserProfileUpdate(BaseModel):
     email: Optional[EmailStr] = None
     current_password: Optional[str] = None
     new_password: Optional[str] = None
+    
+    @field_validator('username')
+    @classmethod
+    def validate_username(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v != "":
+            # Only allow alphanumeric characters and underscores
+            if not re.match(r'^[a-zA-Z0-9_]+$', v):
+                raise ValueError('Username must contain only alphanumeric characters and underscores')
+            if len(v) < 3:
+                raise ValueError('Username must be at least 3 characters long')
+            if len(v) > 30:
+                raise ValueError('Username must be at most 30 characters long')
+        return v
 
 
 class RegistrationTenant(BaseModel):
@@ -93,6 +120,19 @@ class RegistrationAdminUser(BaseModel):
     password: str
     full_name: str
     # Role will always be admin for initial registration
+    
+    @field_validator('username')
+    @classmethod
+    def validate_username(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v != "":
+            # Only allow alphanumeric characters and underscores
+            if not re.match(r'^[a-zA-Z0-9_]+$', v):
+                raise ValueError('Username must contain only alphanumeric characters and underscores')
+            if len(v) < 3:
+                raise ValueError('Username must be at least 3 characters long')
+            if len(v) > 30:
+                raise ValueError('Username must be at most 30 characters long')
+        return v
 
 
 class RegistrationRequest(BaseModel):
