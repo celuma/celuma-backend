@@ -4,6 +4,35 @@ from datetime import datetime
 from app.schemas.report import ReportMetaResponse
 from app.schemas.patient import PatientFullResponse
 
+
+# --- User Reference for Collaboration (defined early) ---
+
+class UserRef(BaseModel):
+    """Minimal user reference for assignees/reviewers"""
+    id: str
+    name: str
+    email: str
+    avatar_url: Optional[str] = None
+
+
+# --- Label Schemas (defined early) ---
+
+class LabelResponse(BaseModel):
+    """Schema for label response"""
+    id: str
+    name: str
+    color: str
+    tenant_id: str
+    created_at: datetime
+
+class LabelWithInheritance(BaseModel):
+    """Schema for label with inheritance flag (for samples)"""
+    id: str
+    name: str
+    color: str
+    inherited: bool  # True if inherited from order, False if own label
+
+
 class LabOrderCreate(BaseModel):
     """Schema for creating a laboratory order"""
     tenant_id: str
@@ -34,11 +63,63 @@ class LabOrderDetailResponse(BaseModel):
     requested_by: Optional[str] = None
     notes: Optional[str] = None
     billed_lock: Optional[bool] = None
+    assignees: Optional[List[UserRef]] = None
+    reviewers: Optional[List[UserRef]] = None
+    labels: Optional[List[LabelResponse]] = None
 
 
 class OrderNotesUpdate(BaseModel):
     """Schema for updating order notes/description"""
     notes: Optional[str] = None
+
+
+# --- Collaboration: Labels ---
+
+class LabelCreate(BaseModel):
+    """Schema for creating a label"""
+    name: str
+    color: str
+    
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError('Name cannot be empty')
+        if len(v) > 100:
+            raise ValueError('Name cannot exceed 100 characters')
+        return v
+    
+    @field_validator('color')
+    @classmethod
+    def validate_color(cls, v: str) -> str:
+        # Validate hex color format
+        if not v.startswith('#') or len(v) != 7:
+            raise ValueError('Color must be in hex format (#RRGGBB)')
+        try:
+            int(v[1:], 16)
+        except ValueError:
+            raise ValueError('Invalid hex color')
+        return v.upper()
+
+class LabelsListResponse(BaseModel):
+    """Schema for labels list response"""
+    labels: List[LabelResponse]
+
+
+# --- Collaboration: Assignees and Reviewers ---
+
+class AssigneesUpdate(BaseModel):
+    """Schema for updating assignees"""
+    assignee_ids: List[str]
+
+class ReviewersUpdate(BaseModel):
+    """Schema for updating reviewers"""
+    reviewer_ids: List[str]
+
+class LabelsUpdate(BaseModel):
+    """Schema for updating labels"""
+    label_ids: List[str]
 
 
 # --- Order Comments ---
@@ -320,3 +401,5 @@ class SampleDetailResponse(BaseModel):
     branch: BranchRef
     order: OrderSlim
     patient: PatientRef
+    assignees: Optional[List[UserRef]] = None
+    labels: Optional[List[LabelWithInheritance]] = None  # Includes inherited + own labels
