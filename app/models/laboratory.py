@@ -18,7 +18,6 @@ class LabOrder(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     status: OrderStatus = Field(default=OrderStatus.RECEIVED)
     requested_by: Optional[str] = Field(max_length=255, default=None)  # External requesting physician
     notes: Optional[str] = Field(default=None)
-    conversation: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))  # Conversation thread
     billed_lock: bool = Field(default=False)  # Lock release if no payment
     created_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
     
@@ -60,3 +59,25 @@ class SampleImage(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=Tru
     # Basic relationships only
     sample: Sample = Relationship(back_populates="images")
     renditions: List["SampleImageRendition"] = Relationship(back_populates="sample_image")
+
+class OrderComment(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
+    """Order comment model for normalized conversation"""
+    __tablename__ = "order_comment"
+    
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    tenant_id: UUID = Field(foreign_key="tenant.id")
+    branch_id: UUID = Field(foreign_key="branch.id")
+    order_id: UUID = Field(foreign_key="lab_order.id")
+    # created_at inherited from TimestampMixin
+    created_by: UUID = Field(foreign_key="app_user.id")
+    text: str = Field(max_length=5000)
+    comment_metadata: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
+    edited_at: Optional[datetime] = Field(default=None)
+    deleted_at: Optional[datetime] = Field(default=None)
+
+class OrderCommentMention(BaseModel, table=True):
+    """Mention relationship for order comments"""
+    __tablename__ = "order_comment_mention"
+    
+    comment_id: UUID = Field(foreign_key="order_comment.id", primary_key=True)
+    user_id: UUID = Field(foreign_key="app_user.id", primary_key=True)

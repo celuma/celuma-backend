@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from typing import Dict
+from typing import Dict, Optional
 from sqlmodel import select, Session
-from sqlalchemy.orm.attributes import flag_modified
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.models.laboratory import LabOrder, Sample, SampleImage
@@ -17,9 +16,11 @@ from app.schemas.laboratory import (
     LabOrderResponse,
     LabOrderDetailResponse,
     OrderNotesUpdate,
-    ConversationResponse,
-    ConversationComment,
     CommentCreate,
+    CommentResponse,
+    CommentsListResponse,
+    PageInfo,
+    MentionedUser,
     UserMentionItem,
     UserMentionListResponse,
     SampleCreate,
@@ -304,135 +305,236 @@ def update_order_notes(
     )
 
 
-@router.get("/orders/{order_id}/conversation", response_model=ConversationResponse)
-def get_order_conversation(
+# --- Order Comments Endpoints ---
+
+@router.get("/orders/{order_id}/comments", response_model=CommentsListResponse)
+def get_order_comments(
     order_id: str,
+    limit: int = 20,
+    before: Optional[str] = None,
+    after: Optional[str] = None,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
 ):
-    """Get the conversation thread for an order"""
+    """Get paginated comments for an order with cursor pagination"""
+    from app.services.cursor_pagination import decode_cursor, encode_cursor
+    from app.models.laboratory import OrderComment, OrderCommentMention
+    
+    # Validate order access
     order = session.get(LabOrder, order_id)
-    if not order:
-        raise HTTPException(404, "Order not found")
-    if str(order.tenant_id) != ctx.tenant_id:
+    if not order or str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Order not found")
     
-    # Get conversation from JSON field
-    conversation_data = order.conversation or {"comments": []}
-    comments = []
+    # Validate limit
+    if limit < 1 or limit > 100:
+        raise HTTPException(400, "Limit must be between 1 and 100")
     
-    for comment_data in conversation_data.get("comments", []):
-        # Convert mentioned_users from dict to MentionedUser objects
-        from app.schemas.laboratory import MentionedUser
-        mentioned_users_list = []
-        for mu_data in comment_data.get("mentioned_users", []):
-            mentioned_users_list.append(MentionedUser(
-                user_id=mu_data["user_id"],
-                username=mu_data["username"],
-                name=mu_data["name"],
-                avatar=mu_data.get("avatar")
-            ))
+    # Build base query
+    query = select(OrderComment).where(
+        OrderComment.tenant_id == ctx.tenant_id,
+        OrderComment.order_id == order_id,
+        OrderComment.deleted_at.is_(None)
+    )
+    
+    # Apply cursor filters
+    if before:
+        try:
+            cursor_time, cursor_id = decode_cursor(before)
+            query = query.where(
+                (OrderComment.created_at < cursor_time) |
+                ((OrderComment.created_at == cursor_time) & (OrderComment.id < cursor_id))
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    
+    if after:
+        try:
+            cursor_time, cursor_id = decode_cursor(after)
+            query = query.where(
+                (OrderComment.created_at > cursor_time) |
+                ((OrderComment.created_at == cursor_time) & (OrderComment.id > cursor_id))
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    
+    # Order and limit (fetch limit+1 to check has_more)
+    # ASC = oldest first (top) to newest (bottom) like a normal chat
+    query = query.order_by(OrderComment.created_at.asc(), OrderComment.id.asc())
+    comments = session.exec(query.limit(limit + 1)).all()
+    
+    # Check if there are more results
+    has_more = len(comments) > limit
+    if has_more:
+        comments = comments[:limit]
+    
+    # Resolve mentions for all comments
+    comment_ids = [c.id for c in comments]
+    mentions_query = select(OrderCommentMention).where(
+        OrderCommentMention.comment_id.in_(comment_ids)
+    )
+    all_mentions = session.exec(mentions_query).all()
+    
+    # Group mentions by comment
+    mentions_by_comment = {}
+    user_ids = set()
+    for mention in all_mentions:
+        if mention.comment_id not in mentions_by_comment:
+            mentions_by_comment[mention.comment_id] = []
+        mentions_by_comment[mention.comment_id].append(str(mention.user_id))
+        user_ids.add(mention.user_id)
+    
+    # Also collect comment creators for user info
+    creator_ids = set(c.created_by for c in comments)
+    all_user_ids = user_ids | creator_ids
+    
+    # Fetch user info for mentions and creators
+    users_map = {}
+    creator_info = {}
+    if all_user_ids:
+        users = session.exec(select(AppUser).where(AppUser.id.in_(all_user_ids))).all()
+        for u in users:
+            user_id_str = str(u.id)
+            users_map[user_id_str] = MentionedUser(
+                user_id=user_id_str,
+                username=u.username,
+                name=u.full_name or u.email,
+                avatar=u.avatar_url
+            )
+            creator_info[user_id_str] = {
+                "name": u.full_name or u.email,
+                "avatar": u.avatar_url
+            }
+    
+    # Build response items
+    items = []
+    for comment in comments:
+        mention_ids = mentions_by_comment.get(comment.id, [])
+        mentioned_users = [users_map[uid] for uid in mention_ids if uid in users_map]
         
-        comments.append(ConversationComment(
-            id=comment_data["id"],
-            user_id=comment_data["user_id"],
-            user_name=comment_data["user_name"],
-            user_avatar=comment_data.get("user_avatar"),
-            text=comment_data["text"],
-            mentions=comment_data.get("mentions", []),
-            mentioned_users=mentioned_users_list,
-            created_at=comment_data["created_at"],
+        creator_id_str = str(comment.created_by)
+        creator_data = creator_info.get(creator_id_str, {})
+        
+        items.append(CommentResponse(
+            id=str(comment.id),
+            tenant_id=str(comment.tenant_id),
+            branch_id=str(comment.branch_id),
+            order_id=str(comment.order_id),
+            created_at=comment.created_at,
+            created_by=creator_id_str,
+            created_by_name=creator_data.get("name"),
+            created_by_avatar=creator_data.get("avatar"),
+            text=comment.text,
+            mentions=mention_ids,
+            mentioned_users=mentioned_users,
+            metadata=comment.comment_metadata,
+            edited_at=comment.edited_at,
+            deleted_at=comment.deleted_at,
         ))
     
-    return ConversationResponse(comments=comments)
+    # Build page info
+    page_info = PageInfo(has_more=has_more)
+    if items:
+        last_item = comments[-1]
+        page_info.next_before = encode_cursor(last_item.created_at, str(last_item.id))
+        if before:  # If scrolling up, provide after cursor to go back
+            first_item = comments[0]
+            page_info.next_after = encode_cursor(first_item.created_at, str(first_item.id))
+    
+    return CommentsListResponse(items=items, page_info=page_info)
 
 
-@router.post("/orders/{order_id}/conversation", response_model=ConversationComment)
-def add_order_comment(
+@router.post("/orders/{order_id}/comments", response_model=CommentResponse)
+def create_order_comment(
     order_id: str,
-    comment: CommentCreate,
+    comment_data: CommentCreate,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Add a comment to the order conversation"""
+    """Create a new comment on an order"""
+    from app.models.laboratory import OrderComment, OrderCommentMention
+    
+    # Validate order access
     order = session.get(LabOrder, order_id)
-    if not order:
-        raise HTTPException(404, "Order not found")
-    if str(order.tenant_id) != ctx.tenant_id:
+    if not order or str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Order not found")
     
-    # Get or initialize conversation
-    conversation_data = order.conversation or {"comments": []}
+    # Verify user has branch access
+    user_branch_ids = [str(b.branch_id) for b in user.branches]
+    if str(order.branch_id) not in user_branch_ids:
+        raise HTTPException(403, "No access to this order's branch")
     
-    # Create new comment
-    comment_id = str(uuid4())
-    now = datetime.utcnow().isoformat() + "Z"
+    # Create comment
+    comment = OrderComment(
+        tenant_id=order.tenant_id,
+        branch_id=order.branch_id,
+        order_id=order.id,
+        created_by=user.id,
+        text=comment_data.text,
+        comment_metadata=comment_data.metadata or {},
+    )
+    session.add(comment)
+    session.flush()
     
-    # Get user info
-    user_name = user.full_name if user.full_name else user.email
-    
-    # Convert mentioned_users to dict format for JSON storage
-    mentioned_users_data = [
-        {
-            "user_id": mu.user_id,
-            "username": mu.username,
-            "name": mu.name,
-            "avatar": mu.avatar
-        }
-        for mu in comment.mentioned_users
-    ]
-    
-    new_comment = {
-        "id": comment_id,
-        "user_id": str(user.id),
-        "user_name": user_name,
-        "user_avatar": user.avatar_url,
-        "text": comment.text,
-        "mentions": comment.mentions,
-        "mentioned_users": mentioned_users_data,
-        "created_at": now,
-    }
-    
-    # Add comment to conversation
-    if "comments" not in conversation_data:
-        conversation_data["comments"] = []
-    conversation_data["comments"].append(new_comment)
-    
-    # Update order
-    order.conversation = conversation_data
-    # Mark the JSON field as modified so SQLAlchemy knows to update it
-    flag_modified(order, "conversation")
-    session.add(order)
+    # Create mentions
+    mentioned_users = []
+    if comment_data.mentions:
+        # Validate mentioned users exist and belong to tenant
+        mentioned_user_objs = session.exec(
+            select(AppUser).where(
+                AppUser.id.in_(comment_data.mentions),
+                AppUser.tenant_id == ctx.tenant_id,
+                AppUser.is_active == True
+            )
+        ).all()
+        
+        for mentioned_user in mentioned_user_objs:
+            mention = OrderCommentMention(
+                comment_id=comment.id,
+                user_id=mentioned_user.id
+            )
+            session.add(mention)
+            
+            mentioned_users.append(MentionedUser(
+                user_id=str(mentioned_user.id),
+                username=mentioned_user.username,
+                name=mentioned_user.full_name or mentioned_user.email,
+                avatar=mentioned_user.avatar_url
+            ))
     
     # Create timeline event
     event = CaseEvent(
         tenant_id=order.tenant_id,
         branch_id=order.branch_id,
         order_id=order.id,
-        sample_id=None,
         event_type=EventType.COMMENT_ADDED,
         description="",
         event_metadata={
-            "comment_id": comment_id,
+            "comment_id": str(comment.id),
             "comment_preview": comment.text[:50] + "..." if len(comment.text) > 50 else comment.text,
             "order_id": str(order.id),
             "order_code": order.order_code,
+            "mentions_count": len(mentioned_users),
         },
         created_by=user.id,
     )
     session.add(event)
     session.commit()
+    session.refresh(comment)
     
-    return ConversationComment(
-        id=new_comment["id"],
-        user_id=new_comment["user_id"],
-        user_name=new_comment["user_name"],
-        user_avatar=new_comment["user_avatar"],
-        text=new_comment["text"],
-        mentions=new_comment["mentions"],
-        mentioned_users=comment.mentioned_users,
-        created_at=new_comment["created_at"],
+    return CommentResponse(
+        id=str(comment.id),
+        tenant_id=str(comment.tenant_id),
+        branch_id=str(comment.branch_id),
+        order_id=str(comment.order_id),
+        created_at=comment.created_at,
+        created_by=str(comment.created_by),
+        created_by_name=user.full_name or user.email,
+        created_by_avatar=user.avatar_url,
+        text=comment.text,
+        mentions=[str(u.user_id) for u in mentioned_users],
+        mentioned_users=mentioned_users,
+        metadata=comment.comment_metadata,
     )
 
 

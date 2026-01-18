@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Optional, List, Dict
+from pydantic import BaseModel, field_validator
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from app.schemas.report import ReportMetaResponse
 from app.schemas.patient import PatientFullResponse
@@ -41,35 +41,58 @@ class OrderNotesUpdate(BaseModel):
     notes: Optional[str] = None
 
 
+# --- Order Comments ---
+
 class MentionedUser(BaseModel):
-    """Schema for mentioned user info"""
+    """User information for mentions"""
     user_id: str
-    username: str
+    username: Optional[str] = None
     name: str
     avatar: Optional[str] = None
 
-class ConversationComment(BaseModel):
-    """Schema for a single comment in conversation"""
-    id: str
-    user_id: str
-    user_name: str
-    user_avatar: Optional[str] = None
-    text: str
-    mentions: List[str] = []  # List of mentioned user IDs
-    mentioned_users: List[MentionedUser] = []  # Full info of mentioned users
-    created_at: str
-
-
-class ConversationResponse(BaseModel):
-    """Schema for conversation response"""
-    comments: List[ConversationComment] = []
-
-
 class CommentCreate(BaseModel):
-    """Schema for creating a new comment"""
+    """Create new comment"""
     text: str
-    mentions: List[str] = []  # List of mentioned user IDs
-    mentioned_users: List[MentionedUser] = []  # Full info of mentioned users
+    mentions: List[str] = []  # List of user_id UUIDs
+    metadata: Optional[Dict[str, Any]] = None
+    
+    @field_validator('text')
+    @classmethod
+    def validate_text(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError('Text cannot be empty')
+        if len(v) > 5000:
+            raise ValueError('Text cannot exceed 5000 characters')
+        return v
+
+class CommentResponse(BaseModel):
+    """Comment response with resolved mentions"""
+    id: str
+    tenant_id: str
+    branch_id: str
+    order_id: str
+    created_at: datetime
+    created_by: str
+    created_by_name: Optional[str] = None
+    created_by_avatar: Optional[str] = None
+    text: str
+    mentions: List[str]
+    mentioned_users: List[MentionedUser]
+    metadata: Optional[Dict[str, Any]] = None
+    edited_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
+
+class PageInfo(BaseModel):
+    """Pagination information"""
+    has_more: bool
+    next_before: Optional[str] = None
+    next_after: Optional[str] = None
+
+class CommentsListResponse(BaseModel):
+    """Paginated comments list"""
+    items: List[CommentResponse]
+    page_info: PageInfo
 
 
 class UserMentionItem(BaseModel):
