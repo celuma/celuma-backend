@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Optional, List, Dict
+from pydantic import BaseModel, field_validator
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from app.schemas.report import ReportMetaResponse
 from app.schemas.patient import PatientFullResponse
@@ -35,6 +35,80 @@ class LabOrderDetailResponse(BaseModel):
     notes: Optional[str] = None
     billed_lock: Optional[bool] = None
 
+
+class OrderNotesUpdate(BaseModel):
+    """Schema for updating order notes/description"""
+    notes: Optional[str] = None
+
+
+# --- Order Comments ---
+
+class MentionedUser(BaseModel):
+    """User information for mentions"""
+    user_id: str
+    username: Optional[str] = None
+    name: str
+    avatar: Optional[str] = None
+
+class CommentCreate(BaseModel):
+    """Create new comment"""
+    text: str
+    mentions: List[str] = []  # List of user_id UUIDs
+    metadata: Optional[Dict[str, Any]] = None
+    
+    @field_validator('text')
+    @classmethod
+    def validate_text(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError('Text cannot be empty')
+        if len(v) > 5000:
+            raise ValueError('Text cannot exceed 5000 characters')
+        return v
+
+class CommentResponse(BaseModel):
+    """Comment response with resolved mentions"""
+    id: str
+    tenant_id: str
+    branch_id: str
+    order_id: str
+    created_at: datetime
+    created_by: str
+    created_by_name: Optional[str] = None
+    created_by_avatar: Optional[str] = None
+    text: str
+    mentions: List[str]
+    mentioned_users: List[MentionedUser]
+    metadata: Optional[Dict[str, Any]] = None
+    edited_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
+
+class PageInfo(BaseModel):
+    """Pagination information"""
+    has_more: bool
+    next_before: Optional[str] = None
+    next_after: Optional[str] = None
+
+class CommentsListResponse(BaseModel):
+    """Paginated comments list"""
+    items: List[CommentResponse]
+    page_info: PageInfo
+
+
+class UserMentionItem(BaseModel):
+    """Schema for user mention suggestion"""
+    id: str
+    name: str
+    username: Optional[str] = None
+    email: str
+    avatar_url: Optional[str] = None
+
+
+class UserMentionListResponse(BaseModel):
+    """Schema for user mention list response"""
+    users: List[UserMentionItem]
+
+
 class SampleCreate(BaseModel):
     """Schema for creating a sample"""
     tenant_id: str
@@ -55,6 +129,16 @@ class SampleResponse(BaseModel):
     order_id: str
     tenant_id: str
     branch_id: str
+
+
+class SampleStateUpdate(BaseModel):
+    """Schema for updating sample state"""
+    state: str  # RECEIVED, PROCESSING, READY
+
+
+class SampleNotesUpdate(BaseModel):
+    """Schema for updating sample notes/description"""
+    notes: Optional[str] = None
 
 
 class SampleImageInfo(BaseModel):

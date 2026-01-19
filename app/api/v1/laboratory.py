@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from typing import Dict
+from typing import Dict, Optional
 from sqlmodel import select, Session
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
@@ -10,13 +10,23 @@ from app.models.patient import Patient
 from app.models.report import Report, ReportVersion
 from app.models.user import AppUser
 from app.models.events import CaseEvent
-from app.models.enums import EventType
+from app.models.enums import EventType, SampleState
 from app.schemas.laboratory import (
     LabOrderCreate,
     LabOrderResponse,
     LabOrderDetailResponse,
+    OrderNotesUpdate,
+    CommentCreate,
+    CommentResponse,
+    CommentsListResponse,
+    PageInfo,
+    MentionedUser,
+    UserMentionItem,
+    UserMentionListResponse,
     SampleCreate,
     SampleResponse,
+    SampleStateUpdate,
+    SampleNotesUpdate,
     SampleImagesListResponse,
     SampleImageInfo,
     SampleImageUploadResponse,
@@ -45,10 +55,86 @@ from uuid import uuid4
 import os
 from sqlmodel import select
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/laboratory")
+
+
+def update_order_status(order_id: str, session: Session) -> None:
+    """
+    Automatically update order status based on current state of samples and reports.
+    
+    Rules:
+    - RECEIVED: order created + at least 1 sample
+    - PROCESSING: at least 1 sample is PROCESSING, READY, CANCELLED, or DAMAGED
+    - DIAGNOSIS: meets PROCESSING + at least 1 report exists
+    - REVIEW: report is in REVIEW or RETRACTED status
+    - CLOSED: report is PUBLISHED
+    - RELEASED: payment cleared (billed_lock=False) + meets CLOSED
+    - CANCELLED: if report is CANCELLED
+    """
+    from app.models.enums import OrderStatus, SampleState, ReportStatus
+    
+    # Get order with samples
+    order = session.get(LabOrder, order_id)
+    if not order:
+        return
+    
+    # Get all samples for this order
+    samples = session.exec(
+        select(Sample).where(Sample.order_id == order_id)
+    ).all()
+    
+    # Check if there are any reports for this order
+    reports = session.exec(
+        select(Report)
+        .where(Report.order_id == order_id)
+        .order_by(Report.created_at.desc())
+    ).all()
+    
+    latest_report = reports[0] if reports else None
+    
+    # Rule: At least 1 sample required
+    if not samples:
+        # Keep as RECEIVED if no samples yet
+        if order.status != OrderStatus.RECEIVED:
+            order.status = OrderStatus.RECEIVED
+            session.add(order)
+            session.flush()
+        return
+    
+    # Check sample states
+    has_processing_or_beyond = any(
+        s.state in [SampleState.PROCESSING, SampleState.READY, SampleState.DAMAGED, SampleState.CANCELLED]
+        for s in samples
+    )
+    
+    # Determine new status
+    new_status = OrderStatus.RECEIVED
+    
+    if has_processing_or_beyond:
+        new_status = OrderStatus.PROCESSING
+        
+        if latest_report:
+            # Has report - move to DIAGNOSIS or beyond
+            new_status = OrderStatus.DIAGNOSIS
+            
+            if latest_report.status in [ReportStatus.IN_REVIEW, ReportStatus.RETRACTED]:
+                new_status = OrderStatus.REVIEW
+            elif latest_report.status == ReportStatus.PUBLISHED:
+                new_status = OrderStatus.CLOSED
+                
+                # Check if can be released (payment cleared)
+                if not order.billed_lock:
+                    new_status = OrderStatus.RELEASED
+    
+    # Update if changed
+    if order.status != new_status:
+        order.status = new_status
+        session.add(order)
+        session.flush()
 
 @router.get("/orders/", response_model=OrdersListResponse)
 def list_orders(
@@ -162,6 +248,331 @@ def get_order(
         billed_lock=order.billed_lock
     )
 
+
+@router.patch("/orders/{order_id}/notes", response_model=LabOrderDetailResponse)
+def update_order_notes(
+    order_id: str,
+    notes_data: OrderNotesUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update the notes/description of an order"""
+    order = session.get(LabOrder, order_id)
+    if not order:
+        raise HTTPException(404, "Order not found")
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Order not found")
+    
+    old_notes = order.notes
+    new_notes = notes_data.notes
+    
+    # Only update and create event if notes actually changed
+    if old_notes != new_notes:
+        order.notes = new_notes
+        session.add(order)
+        
+        # Create timeline event for notes update
+        event = CaseEvent(
+            tenant_id=order.tenant_id,
+            branch_id=order.branch_id,
+            order_id=order.id,
+            sample_id=None,
+            event_type=EventType.ORDER_NOTES_UPDATED,
+            description="",  # Not used - message built in UI from metadata
+            event_metadata={
+                "old_notes": old_notes or "",
+                "new_notes": new_notes or "",
+                "order_id": str(order.id),
+                "order_code": order.order_code,
+            },
+            created_by=user.id,
+        )
+        session.add(event)
+        session.commit()
+        session.refresh(order)
+    
+    return LabOrderDetailResponse(
+        id=str(order.id),
+        order_code=order.order_code,
+        status=order.status,
+        patient_id=str(order.patient_id),
+        tenant_id=str(order.tenant_id),
+        branch_id=str(order.branch_id),
+        requested_by=order.requested_by,
+        notes=order.notes,
+        billed_lock=order.billed_lock
+    )
+
+
+# --- Order Comments Endpoints ---
+
+@router.get("/orders/{order_id}/comments", response_model=CommentsListResponse)
+def get_order_comments(
+    order_id: str,
+    limit: int = 20,
+    before: Optional[str] = None,
+    after: Optional[str] = None,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
+    """Get paginated comments for an order with cursor pagination"""
+    from app.services.cursor_pagination import decode_cursor, encode_cursor
+    from app.models.laboratory import OrderComment, OrderCommentMention
+    
+    # Validate order access
+    order = session.get(LabOrder, order_id)
+    if not order or str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Order not found")
+    
+    # Validate limit
+    if limit < 1 or limit > 100:
+        raise HTTPException(400, "Limit must be between 1 and 100")
+    
+    # Build base query
+    query = select(OrderComment).where(
+        OrderComment.tenant_id == ctx.tenant_id,
+        OrderComment.order_id == order_id,
+        OrderComment.deleted_at.is_(None)
+    )
+    
+    # Apply cursor filters
+    if before:
+        try:
+            cursor_time, cursor_id = decode_cursor(before)
+            query = query.where(
+                (OrderComment.created_at < cursor_time) |
+                ((OrderComment.created_at == cursor_time) & (OrderComment.id < cursor_id))
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    
+    if after:
+        try:
+            cursor_time, cursor_id = decode_cursor(after)
+            query = query.where(
+                (OrderComment.created_at > cursor_time) |
+                ((OrderComment.created_at == cursor_time) & (OrderComment.id > cursor_id))
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    
+    # Order and limit (fetch limit+1 to check has_more)
+    # ASC = oldest first (top) to newest (bottom) like a normal chat
+    query = query.order_by(OrderComment.created_at.asc(), OrderComment.id.asc())
+    comments = session.exec(query.limit(limit + 1)).all()
+    
+    # Check if there are more results
+    has_more = len(comments) > limit
+    if has_more:
+        comments = comments[:limit]
+    
+    # Resolve mentions for all comments
+    comment_ids = [c.id for c in comments]
+    mentions_query = select(OrderCommentMention).where(
+        OrderCommentMention.comment_id.in_(comment_ids)
+    )
+    all_mentions = session.exec(mentions_query).all()
+    
+    # Group mentions by comment
+    mentions_by_comment = {}
+    user_ids = set()
+    for mention in all_mentions:
+        if mention.comment_id not in mentions_by_comment:
+            mentions_by_comment[mention.comment_id] = []
+        mentions_by_comment[mention.comment_id].append(str(mention.user_id))
+        user_ids.add(mention.user_id)
+    
+    # Also collect comment creators for user info
+    creator_ids = set(c.created_by for c in comments)
+    all_user_ids = user_ids | creator_ids
+    
+    # Fetch user info for mentions and creators
+    users_map = {}
+    creator_info = {}
+    if all_user_ids:
+        users = session.exec(select(AppUser).where(AppUser.id.in_(all_user_ids))).all()
+        for u in users:
+            user_id_str = str(u.id)
+            users_map[user_id_str] = MentionedUser(
+                user_id=user_id_str,
+                username=u.username,
+                name=u.full_name or u.email,
+                avatar=u.avatar_url
+            )
+            creator_info[user_id_str] = {
+                "name": u.full_name or u.email,
+                "avatar": u.avatar_url
+            }
+    
+    # Build response items
+    items = []
+    for comment in comments:
+        mention_ids = mentions_by_comment.get(comment.id, [])
+        mentioned_users = [users_map[uid] for uid in mention_ids if uid in users_map]
+        
+        creator_id_str = str(comment.created_by)
+        creator_data = creator_info.get(creator_id_str, {})
+        
+        items.append(CommentResponse(
+            id=str(comment.id),
+            tenant_id=str(comment.tenant_id),
+            branch_id=str(comment.branch_id),
+            order_id=str(comment.order_id),
+            created_at=comment.created_at,
+            created_by=creator_id_str,
+            created_by_name=creator_data.get("name"),
+            created_by_avatar=creator_data.get("avatar"),
+            text=comment.text,
+            mentions=mention_ids,
+            mentioned_users=mentioned_users,
+            metadata=comment.comment_metadata,
+            edited_at=comment.edited_at,
+            deleted_at=comment.deleted_at,
+        ))
+    
+    # Build page info
+    page_info = PageInfo(has_more=has_more)
+    if items:
+        last_item = comments[-1]
+        page_info.next_before = encode_cursor(last_item.created_at, str(last_item.id))
+        if before:  # If scrolling up, provide after cursor to go back
+            first_item = comments[0]
+            page_info.next_after = encode_cursor(first_item.created_at, str(first_item.id))
+    
+    return CommentsListResponse(items=items, page_info=page_info)
+
+
+@router.post("/orders/{order_id}/comments", response_model=CommentResponse)
+def create_order_comment(
+    order_id: str,
+    comment_data: CommentCreate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Create a new comment on an order"""
+    from app.models.laboratory import OrderComment, OrderCommentMention
+    
+    # Validate order access
+    order = session.get(LabOrder, order_id)
+    if not order or str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Order not found")
+    
+    # Verify user has branch access
+    user_branch_ids = [str(b.branch_id) for b in user.branches]
+    if str(order.branch_id) not in user_branch_ids:
+        raise HTTPException(403, "No access to this order's branch")
+    
+    # Create comment
+    comment = OrderComment(
+        tenant_id=order.tenant_id,
+        branch_id=order.branch_id,
+        order_id=order.id,
+        created_by=user.id,
+        text=comment_data.text,
+        comment_metadata=comment_data.metadata or {},
+    )
+    session.add(comment)
+    session.flush()
+    
+    # Create mentions
+    mentioned_users = []
+    if comment_data.mentions:
+        # Validate mentioned users exist and belong to tenant
+        mentioned_user_objs = session.exec(
+            select(AppUser).where(
+                AppUser.id.in_(comment_data.mentions),
+                AppUser.tenant_id == ctx.tenant_id,
+                AppUser.is_active == True
+            )
+        ).all()
+        
+        for mentioned_user in mentioned_user_objs:
+            mention = OrderCommentMention(
+                comment_id=comment.id,
+                user_id=mentioned_user.id
+            )
+            session.add(mention)
+            
+            mentioned_users.append(MentionedUser(
+                user_id=str(mentioned_user.id),
+                username=mentioned_user.username,
+                name=mentioned_user.full_name or mentioned_user.email,
+                avatar=mentioned_user.avatar_url
+            ))
+    
+    # Create timeline event
+    event = CaseEvent(
+        tenant_id=order.tenant_id,
+        branch_id=order.branch_id,
+        order_id=order.id,
+        event_type=EventType.COMMENT_ADDED,
+        description="",
+        event_metadata={
+            "comment_id": str(comment.id),
+            "comment_preview": comment.text[:50] + "..." if len(comment.text) > 50 else comment.text,
+            "order_id": str(order.id),
+            "order_code": order.order_code,
+            "mentions_count": len(mentioned_users),
+        },
+        created_by=user.id,
+    )
+    session.add(event)
+    session.commit()
+    session.refresh(comment)
+    
+    return CommentResponse(
+        id=str(comment.id),
+        tenant_id=str(comment.tenant_id),
+        branch_id=str(comment.branch_id),
+        order_id=str(comment.order_id),
+        created_at=comment.created_at,
+        created_by=str(comment.created_by),
+        created_by_name=user.full_name or user.email,
+        created_by_avatar=user.avatar_url,
+        text=comment.text,
+        mentions=[str(u.user_id) for u in mentioned_users],
+        mentioned_users=mentioned_users,
+        metadata=comment.comment_metadata,
+    )
+
+
+@router.get("/users/search", response_model=UserMentionListResponse)
+def search_users_for_mention(
+    q: str = "",
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
+    """Search users for mention suggestions"""
+    # Get all users from the same tenant
+    query = select(AppUser).where(AppUser.tenant_id == ctx.tenant_id, AppUser.is_active == True)
+    
+    # Filter by search query if provided
+    if q:
+        search_term = f"%{q.lower()}%"
+        query = query.where(
+            (AppUser.full_name.ilike(search_term)) |
+            (AppUser.username.ilike(search_term)) |
+            (AppUser.email.ilike(search_term))
+        )
+    
+    users = session.exec(query.limit(10)).all()
+    
+    return UserMentionListResponse(
+        users=[
+            UserMentionItem(
+                id=str(u.id),
+                name=u.full_name if u.full_name else u.email,
+                username=u.username,
+                email=u.email,
+                avatar_url=u.avatar_url,
+            )
+            for u in users
+        ]
+    )
+
+
 @router.get("/samples/", response_model=SamplesListResponse)
 def list_samples(
     session: Session = Depends(get_session),
@@ -242,6 +653,131 @@ def get_sample_detail(
         ),
     )
 
+
+@router.patch("/samples/{sample_id}/state", response_model=SampleResponse)
+def update_sample_state(
+    sample_id: str,
+    state_data: SampleStateUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update the state of a sample (RECEIVED, PROCESSING, READY, DAMAGED, CANCELLED)"""
+    sample = session.get(Sample, sample_id)
+    if not sample:
+        raise HTTPException(404, "Sample not found")
+    if str(sample.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Sample not found")
+    
+    # Validate state
+    try:
+        new_state = SampleState(state_data.state)
+    except ValueError:
+        raise HTTPException(400, f"Invalid state. Must be one of: {[s.value for s in SampleState]}")
+    
+    old_state = sample.state
+    sample.state = new_state
+    session.add(sample)
+    
+    # Determine event type based on new state
+    if new_state == SampleState.DAMAGED:
+        event_type = EventType.SAMPLE_DAMAGED
+    elif new_state == SampleState.CANCELLED:
+        event_type = EventType.SAMPLE_CANCELLED
+    else:
+        event_type = EventType.SAMPLE_STATE_CHANGED
+    
+    # Create timeline event with structured metadata (no localized description)
+    # The UI will build the message based on event_type and metadata
+    event = CaseEvent(
+        tenant_id=sample.tenant_id,
+        branch_id=sample.branch_id,
+        order_id=sample.order_id,
+        sample_id=sample.id,
+        event_type=event_type,
+        description="",  # Not used - message built in UI from metadata
+        event_metadata={
+            "old_state": old_state.value if hasattr(old_state, 'value') else str(old_state),
+            "new_state": new_state.value,
+            "sample_id": str(sample.id),
+            "sample_code": sample.sample_code,
+            "sample_type": sample.type.value if hasattr(sample.type, 'value') else str(sample.type),
+        },
+        created_by=user.id,
+    )
+    session.add(event)
+    
+    # Update order status based on sample state change
+    update_order_status(str(sample.order_id), session)
+    
+    session.commit()
+    session.refresh(sample)
+    
+    return SampleResponse(
+        id=str(sample.id),
+        sample_code=sample.sample_code,
+        type=sample.type,
+        state=sample.state,
+        order_id=str(sample.order_id),
+        tenant_id=str(sample.tenant_id),
+        branch_id=str(sample.branch_id),
+    )
+
+
+@router.patch("/samples/{sample_id}/notes", response_model=SampleResponse)
+def update_sample_notes(
+    sample_id: str,
+    notes_data: SampleNotesUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update the notes/description of a sample"""
+    sample = session.get(Sample, sample_id)
+    if not sample:
+        raise HTTPException(404, "Sample not found")
+    if str(sample.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Sample not found")
+    
+    old_notes = sample.notes
+    new_notes = notes_data.notes
+    
+    # Only update and create event if notes actually changed
+    if old_notes != new_notes:
+        sample.notes = new_notes
+        session.add(sample)
+        
+        # Create timeline event for notes update
+        event = CaseEvent(
+            tenant_id=sample.tenant_id,
+            branch_id=sample.branch_id,
+            order_id=sample.order_id,
+            sample_id=sample.id,
+            event_type=EventType.SAMPLE_NOTES_UPDATED,
+            description="",  # Not used - message built in UI from metadata
+            event_metadata={
+                "old_notes": old_notes or "",
+                "new_notes": new_notes or "",
+                "sample_id": str(sample.id),
+                "sample_code": sample.sample_code,
+            },
+            created_by=user.id,
+        )
+        session.add(event)
+        session.commit()
+        session.refresh(sample)
+    
+    return SampleResponse(
+        id=str(sample.id),
+        sample_code=sample.sample_code,
+        type=sample.type,
+        state=sample.state,
+        order_id=str(sample.order_id),
+        tenant_id=str(sample.tenant_id),
+        branch_id=str(sample.branch_id),
+    )
+
+
 @router.post("/samples/", response_model=SampleResponse)
 def create_sample(sample_data: SampleCreate, session: Session = Depends(get_session)):
     """Create a new sample"""
@@ -281,6 +817,27 @@ def create_sample(sample_data: SampleCreate, session: Session = Depends(get_sess
     )
     
     session.add(sample)
+    session.flush()  # Get sample.id for event
+    
+    # Create SAMPLE_CREATED event
+    sample_created_event = CaseEvent(
+        order_id=sample_data.order_id,
+        sample_id=sample.id,
+        event_type=EventType.SAMPLE_CREATED,
+        description="Muestra registrada",
+        event_metadata={
+            "sample_id": str(sample.id),
+            "sample_code": sample.sample_code,
+            "sample_type": sample.type,
+            "initial_state": SampleState.RECEIVED.value,
+        },
+        created_by=sample_data.created_by if hasattr(sample_data, 'created_by') else None,
+    )
+    session.add(sample_created_event)
+    
+    # Update order status based on new sample
+    update_order_status(str(sample_data.order_id), session)
+    
     session.commit()
     session.refresh(sample)
     
@@ -367,7 +924,27 @@ def create_order_with_samples(payload: LabOrderUnifiedCreate, session: Session =
             received_at=s.received_at,
         )
         session.add(sample)
+        session.flush()  # Get sample.id for event
+        
+        # Create SAMPLE_CREATED event for each sample
+        sample_created_event = CaseEvent(
+            order_id=order.id,
+            sample_id=sample.id,
+            event_type=EventType.SAMPLE_CREATED,
+            description="Muestra registrada",
+            event_metadata={
+                "sample_id": str(sample.id),
+                "sample_code": sample.sample_code,
+                "sample_type": sample.type,
+                "initial_state": SampleState.RECEIVED.value,
+            },
+            created_by=payload.created_by,
+        )
+        session.add(sample_created_event)
         created_samples.append(sample)
+
+    # Update order status based on new samples
+    update_order_status(str(order.id), session)
 
     # Commit transaction
     session.commit()
@@ -400,7 +977,13 @@ def create_order_with_samples(payload: LabOrderUnifiedCreate, session: Session =
 
 
 @router.post("/samples/{sample_id}/images", response_model=SampleImageUploadResponse)
-def upload_sample_image(sample_id: str, file: UploadFile = File(...), session: Session = Depends(get_session)):
+def upload_sample_image(
+    sample_id: str,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
     """Upload an image (regular or RAW) for a sample, store S3 keys and DB mapping.
 
     Stores:
@@ -534,6 +1117,62 @@ def upload_sample_image(sample_id: str, file: UploadFile = File(...), session: S
         )
         session.add(rendition_original)
 
+    # Auto-update sample state to PROCESSING only on first image upload
+    # Check if this is the first image (only the one we just added)
+    existing_images_count = session.exec(
+        select(SampleImage).where(SampleImage.sample_id == sample.id)
+    ).all()
+    is_first_image = len(existing_images_count) == 1
+    if is_first_image and sample.state == SampleState.RECEIVED:
+        sample.state = SampleState.PROCESSING
+        session.add(sample)
+    
+    # Create timeline event for image upload with structured metadata
+    event = CaseEvent(
+        tenant_id=sample.tenant_id,
+        branch_id=sample.branch_id,
+        order_id=sample.order_id,
+        sample_id=sample.id,
+        event_type=EventType.IMAGE_UPLOADED,
+        description="",  # Not used - message built in UI from metadata
+        event_metadata={
+            "filename": filename,
+            "is_raw": is_raw,
+            "file_size": len(data),
+            "sample_id": str(sample.id),
+            "sample_code": sample.sample_code,
+            "sample_type": sample.type.value if hasattr(sample.type, 'value') else str(sample.type),
+            "image_id": str(sample_image.id),
+        },
+        created_by=user.id,
+    )
+    session.add(event)
+    
+    # If state changed, also add state change event
+    if is_first_image and sample.state == SampleState.PROCESSING:
+        state_event = CaseEvent(
+            tenant_id=sample.tenant_id,
+            branch_id=sample.branch_id,
+            order_id=sample.order_id,
+            sample_id=sample.id,
+            event_type=EventType.SAMPLE_STATE_CHANGED,
+            description="",  # Not used - message built in UI from metadata
+            event_metadata={
+                "old_state": "RECEIVED",
+                "new_state": "PROCESSING",
+                "sample_id": str(sample.id),
+                "sample_code": sample.sample_code,
+                "sample_type": sample.type.value if hasattr(sample.type, 'value') else str(sample.type),
+                "trigger": "first_image_upload",
+            },
+            created_by=user.id,
+        )
+        session.add(state_event)
+
+    # Update order status based on sample state change (if it changed)
+    if is_first_image and sample.state == SampleState.PROCESSING:
+        update_order_status(str(sample.order_id), session)
+
     session.commit()
 
     urls: Dict[str, str] = {
@@ -595,6 +1234,91 @@ def list_sample_images(sample_id: str, session: Session = Depends(get_session)):
         )
 
     return SampleImagesListResponse(sample_id=str(sample.id), images=results)
+
+
+@router.delete("/samples/{sample_id}/images/{image_id}")
+def delete_sample_image(
+    sample_id: str,
+    image_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Delete a sample image and its associated storage objects"""
+    # Verify sample exists and belongs to tenant
+    sample = session.get(Sample, sample_id)
+    if not sample:
+        raise HTTPException(404, "Sample not found")
+    if str(sample.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Sample not found")
+    
+    # Verify image exists and belongs to this sample
+    sample_image = session.get(SampleImage, image_id)
+    if not sample_image:
+        raise HTTPException(404, "Image not found")
+    if str(sample_image.sample_id) != sample_id:
+        raise HTTPException(404, "Image not found")
+    
+    # Get the storage object to get the filename for the event
+    storage = session.get(StorageObject, sample_image.storage_id)
+    filename = storage.object_key.split("/")[-1] if storage else "imagen"
+    
+    # Collect storage IDs before deleting anything
+    storage_ids_to_delete = [sample_image.storage_id]
+    
+    # Delete renditions first (thumbnail, original_raw, etc.)
+    renditions = session.exec(
+        select(SampleImageRendition).where(SampleImageRendition.sample_image_id == sample_image.id)
+    ).all()
+    
+    for rendition in renditions:
+        storage_ids_to_delete.append(rendition.storage_id)
+        session.delete(rendition)
+    
+    # Delete the sample image record
+    session.delete(sample_image)
+    
+    # Flush to ensure SampleImage and renditions are deleted before we delete storage objects
+    session.flush()
+    
+    # Delete storage objects (optional: could also delete from S3 here)
+    # For now, we just remove the DB records - S3 cleanup can be done via lifecycle rules
+    for storage_id in storage_ids_to_delete:
+        storage_obj = session.get(StorageObject, storage_id)
+        if storage_obj:
+            session.delete(storage_obj)
+    
+    # Create timeline event for image deletion
+    event = CaseEvent(
+        tenant_id=sample.tenant_id,
+        branch_id=sample.branch_id,
+        order_id=sample.order_id,
+        sample_id=sample.id,
+        event_type=EventType.IMAGE_DELETED,
+        description="",  # Not used - message built in UI from metadata
+        event_metadata={
+            "filename": filename,
+            "image_id": image_id,
+            "sample_id": str(sample.id),
+            "sample_code": sample.sample_code,
+        },
+        created_by=user.id,
+    )
+    session.add(event)
+    
+    session.commit()
+    
+    logger.info(
+        f"Image deleted from sample {sample_id}",
+        extra={
+            "event": "sample_image.deleted",
+            "sample_id": sample_id,
+            "image_id": image_id,
+            "user_id": str(user.id),
+        },
+    )
+    
+    return {"message": "Image deleted successfully", "image_id": image_id}
 
 
 @router.get("/orders/{order_id}/full", response_model=LabOrderFullDetailResponse)
@@ -859,7 +1583,7 @@ def list_case_events(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
 ):
-    """Get timeline of events for a case"""
+    """Get timeline of events for a case (order + all samples + report)"""
     # Verify order exists and belongs to tenant
     order = session.get(LabOrder, order_id)
     if not order:
@@ -868,12 +1592,23 @@ def list_case_events(
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Order does not belong to your tenant")
     
-    # Get events ordered by creation date
+    # Get events ordered by creation date (oldest first, top to bottom)
     events = session.exec(
         select(CaseEvent)
         .where(CaseEvent.order_id == order_id)
-        .order_by(CaseEvent.created_at.desc())
+        .order_by(CaseEvent.created_at.asc())
     ).all()
+    
+    # Get user info for display (name + avatar)
+    user_info: dict[str, dict] = {}
+    for e in events:
+        if e.created_by and str(e.created_by) not in user_info:
+            user = session.get(AppUser, e.created_by)
+            if user:
+                user_info[str(e.created_by)] = {
+                    "name": user.full_name,
+                    "avatar": user.avatar_url,
+                }
     
     return EventsListResponse(
         events=[
@@ -882,10 +1617,67 @@ def list_case_events(
                 tenant_id=str(e.tenant_id),
                 branch_id=str(e.branch_id),
                 order_id=str(e.order_id),
+                sample_id=str(e.sample_id) if e.sample_id else None,
                 event_type=e.event_type,
                 description=e.description,
                 metadata=e.event_metadata,
                 created_by=str(e.created_by) if e.created_by else None,
+                created_by_name=user_info.get(str(e.created_by), {}).get("name") if e.created_by else None,
+                created_by_avatar=user_info.get(str(e.created_by), {}).get("avatar") if e.created_by else None,
+                created_at=e.created_at,
+            )
+            for e in events
+        ]
+    )
+
+
+@router.get("/samples/{sample_id}/events", response_model=EventsListResponse)
+def list_sample_events(
+    sample_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
+    """Get timeline of events for a specific sample"""
+    # Verify sample exists and belongs to tenant
+    sample = session.get(Sample, sample_id)
+    if not sample:
+        raise HTTPException(404, "Sample not found")
+    
+    if str(sample.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Sample does not belong to your tenant")
+    
+    # Get events for this sample ordered by creation date (oldest first, top to bottom)
+    events = session.exec(
+        select(CaseEvent)
+        .where(CaseEvent.sample_id == sample_id)
+        .order_by(CaseEvent.created_at.asc())
+    ).all()
+    
+    # Get user info for display (name + avatar)
+    user_info: dict[str, dict] = {}
+    for e in events:
+        if e.created_by and str(e.created_by) not in user_info:
+            user = session.get(AppUser, e.created_by)
+            if user:
+                user_info[str(e.created_by)] = {
+                    "name": user.full_name,
+                    "avatar": user.avatar_url,
+                }
+    
+    return EventsListResponse(
+        events=[
+            EventResponse(
+                id=str(e.id),
+                tenant_id=str(e.tenant_id),
+                branch_id=str(e.branch_id),
+                order_id=str(e.order_id),
+                sample_id=str(e.sample_id) if e.sample_id else None,
+                event_type=e.event_type,
+                description=e.description,
+                metadata=e.event_metadata,
+                created_by=str(e.created_by) if e.created_by else None,
+                created_by_name=user_info.get(str(e.created_by), {}).get("name") if e.created_by else None,
+                created_by_avatar=user_info.get(str(e.created_by), {}).get("avatar") if e.created_by else None,
                 created_at=e.created_at,
             )
             for e in events

@@ -1,9 +1,10 @@
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from uuid import UUID, uuid4
-from sqlmodel import SQLModel, Field, Relationship
+from sqlmodel import SQLModel, Field, Relationship, Column
+from sqlalchemy import JSON
 from .base import BaseModel, TimestampMixin, TenantMixin, BranchMixin
-from .enums import OrderStatus, SampleType
+from .enums import OrderStatus, SampleType, SampleState
 
 class LabOrder(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     """Laboratory order model"""
@@ -33,7 +34,7 @@ class Sample(BaseModel, TenantMixin, BranchMixin, table=True):
     order_id: UUID = Field(foreign_key="lab_order.id")
     sample_code: str = Field(max_length=100)  # Unique per order or branch
     type: SampleType
-    state: OrderStatus = Field(default=OrderStatus.RECEIVED)
+    state: SampleState = Field(default=SampleState.RECEIVED)
     collected_at: Optional[datetime] = Field(default=None)
     received_at: Optional[datetime] = Field(default=None)
     notes: Optional[str] = Field(default=None)
@@ -58,3 +59,25 @@ class SampleImage(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=Tru
     # Basic relationships only
     sample: Sample = Relationship(back_populates="images")
     renditions: List["SampleImageRendition"] = Relationship(back_populates="sample_image")
+
+class OrderComment(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
+    """Order comment model for normalized conversation"""
+    __tablename__ = "order_comment"
+    
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    tenant_id: UUID = Field(foreign_key="tenant.id")
+    branch_id: UUID = Field(foreign_key="branch.id")
+    order_id: UUID = Field(foreign_key="lab_order.id")
+    # created_at inherited from TimestampMixin
+    created_by: UUID = Field(foreign_key="app_user.id")
+    text: str = Field(max_length=5000)
+    comment_metadata: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
+    edited_at: Optional[datetime] = Field(default=None)
+    deleted_at: Optional[datetime] = Field(default=None)
+
+class OrderCommentMention(BaseModel, table=True):
+    """Mention relationship for order comments"""
+    __tablename__ = "order_comment_mention"
+    
+    comment_id: UUID = Field(foreign_key="order_comment.id", primary_key=True)
+    user_id: UUID = Field(foreign_key="app_user.id", primary_key=True)

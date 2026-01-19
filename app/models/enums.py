@@ -24,6 +24,14 @@ class SampleType(str, Enum):
     TEJIDO = "TEJIDO"
     OTRO = "OTRO"
 
+class SampleState(str, Enum):
+    """Sample-specific states: Received -> Processing -> Ready (or Damaged/Cancelled)"""
+    RECEIVED = "RECEIVED"      # Recibida - default when created
+    PROCESSING = "PROCESSING"  # En Proceso - when images uploaded
+    READY = "READY"            # Lista - manually set or when complete
+    DAMAGED = "DAMAGED"        # Dañada - sample physically damaged
+    CANCELLED = "CANCELLED"    # Cancelada - cannot be used for other reasons
+
 class ReportStatus(str, Enum):
     DRAFT = "DRAFT"
     IN_REVIEW = "IN_REVIEW"
@@ -39,18 +47,41 @@ class PaymentStatus(str, Enum):
     PARTIAL = "PARTIAL"
 
 class EventType(str, Enum):
+    # Order events
     ORDER_CREATED = "ORDER_CREATED"
+    ORDER_DELIVERED = "ORDER_DELIVERED"
+    ORDER_CANCELLED = "ORDER_CANCELLED"
+    ORDER_STATUS_CHANGED = "ORDER_STATUS_CHANGED"
+    ORDER_NOTES_UPDATED = "ORDER_NOTES_UPDATED"
+    
+    # Sample events
+    SAMPLE_CREATED = "SAMPLE_CREATED"
     SAMPLE_RECEIVED = "SAMPLE_RECEIVED"
     SAMPLE_PREPARED = "SAMPLE_PREPARED"
+    SAMPLE_STATE_CHANGED = "SAMPLE_STATE_CHANGED"
+    SAMPLE_NOTES_UPDATED = "SAMPLE_NOTES_UPDATED"
+    SAMPLE_DAMAGED = "SAMPLE_DAMAGED"
+    SAMPLE_CANCELLED = "SAMPLE_CANCELLED"
+    
+    # Image events
     IMAGE_UPLOADED = "IMAGE_UPLOADED"
+    IMAGE_DELETED = "IMAGE_DELETED"
+    
+    # Report events
     REPORT_CREATED = "REPORT_CREATED"
+    REPORT_VERSION_CREATED = "REPORT_VERSION_CREATED"
     REPORT_SUBMITTED = "REPORT_SUBMITTED"
     REPORT_APPROVED = "REPORT_APPROVED"
     REPORT_CHANGES_REQUESTED = "REPORT_CHANGES_REQUESTED"
     REPORT_SIGNED = "REPORT_SIGNED"
+    REPORT_PUBLISHED = "REPORT_PUBLISHED"
+    REPORT_RETRACTED = "REPORT_RETRACTED"
+    
+    # Billing events
     INVOICE_CREATED = "INVOICE_CREATED"
     PAYMENT_RECEIVED = "PAYMENT_RECEIVED"
-    ORDER_DELIVERED = "ORDER_DELIVERED"
-    ORDER_CANCELLED = "ORDER_CANCELLED"
-    STATUS_CHANGED = "STATUS_CHANGED"
+    
+    # Generic events
+    STATUS_CHANGED = "STATUS_CHANGED"  # Legacy/generic
     NOTE_ADDED = "NOTE_ADDED"
+    COMMENT_ADDED = "COMMENT_ADDED"
