@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from typing import Dict, Optional
+from uuid import UUID
 from sqlmodel import select, Session
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
-from app.models.laboratory import LabOrder, Sample, SampleImage
+from app.models.laboratory import LabOrder, Sample, SampleImage, Label, LabOrderLabel, SampleLabel
 from app.models.storage import StorageObject, SampleImageRendition
 from app.models.tenant import Tenant, Branch
 from app.models.patient import Patient
@@ -45,13 +46,21 @@ from app.schemas.laboratory import (
     SampleListItem,
     SampleDetailResponse,
     OrderSlim,
+    LabelCreate,
+    LabelResponse,
+    LabelWithInheritance,
+    LabelsListResponse,
+    AssigneesUpdate,
+    ReviewersUpdate,
+    LabelsUpdate,
+    UserRef,
 )
 from app.schemas.report import ReportMetaResponse
 from app.schemas.patient import PatientFullResponse
 from app.schemas.events import EventCreate, EventResponse, EventsListResponse
 from app.services.s3 import S3Service
 from app.services.image_processing import process_image_bytes
-from uuid import uuid4
+from uuid import uuid4, UUID
 import os
 from sqlmodel import select
 import logging
@@ -122,6 +131,9 @@ def update_order_status(order_id: str, session: Session) -> None:
             new_status = OrderStatus.DIAGNOSIS
             
             if latest_report.status in [ReportStatus.IN_REVIEW, ReportStatus.RETRACTED]:
+                # Validate reviewers are assigned before moving to REVIEW
+                if not order.reviewers or len(order.reviewers) == 0:
+                    raise HTTPException(400, "Cannot move to REVIEW status without reviewers assigned")
                 new_status = OrderStatus.REVIEW
             elif latest_report.status == ReportStatus.PUBLISHED:
                 new_status = OrderStatus.CLOSED
@@ -236,6 +248,22 @@ def get_order(
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Order not found")
     
+    # Get assignees
+    assignee_users = []
+    if order.assignees:
+        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(order.assignees))).all()
+    
+    # Get reviewers
+    reviewer_users = []
+    if order.reviewers:
+        reviewer_users = session.exec(select(AppUser).where(AppUser.id.in_(order.reviewers))).all()
+    
+    # Get labels
+    label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
+    labels = []
+    if label_ids:
+        labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
+    
     return LabOrderDetailResponse(
         id=str(order.id),
         order_code=order.order_code,
@@ -245,7 +273,10 @@ def get_order(
         branch_id=str(order.branch_id),
         requested_by=order.requested_by,
         notes=order.notes,
-        billed_lock=order.billed_lock
+        billed_lock=order.billed_lock,
+        assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
+        reviewers=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in reviewer_users],
+        labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
     )
 
 
@@ -625,6 +656,36 @@ def get_sample_detail(
     order = session.get(LabOrder, s.order_id)
     patient = session.get(Patient, order.patient_id) if order else None
 
+    # Get assignees
+    assignee_users = []
+    if s.assignees:
+        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(s.assignees))).all()
+    
+    # Get labels (inherited from order + own labels)
+    order_label_ids = set(
+        session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == s.order_id)).all()
+    )
+    sample_label_ids = set(
+        session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == sample_id)).all()
+    )
+    
+    # Combine all label IDs
+    all_label_ids = order_label_ids | sample_label_ids
+    
+    # Get label objects with inheritance flag
+    labels_with_inheritance = []
+    if all_label_ids:
+        all_labels = session.exec(select(Label).where(Label.id.in_(all_label_ids))).all()
+        for label in all_labels:
+            labels_with_inheritance.append(
+                LabelWithInheritance(
+                    id=str(label.id),
+                    name=label.name,
+                    color=label.color,
+                    inherited=(label.id in order_label_ids),
+                )
+            )
+
     return SampleDetailResponse(
         id=str(s.id),
         sample_code=s.sample_code,
@@ -651,6 +712,8 @@ def get_sample_detail(
             full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
             patient_code=patient.patient_code if patient else "",
         ),
+        assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
+        labels=labels_with_inheritance,
     )
 
 
@@ -1341,6 +1404,22 @@ def get_order_full_detail(
     # Fetch samples for this order
     samples = session.exec(select(Sample).where(Sample.order_id == order.id)).all()
 
+    # Get assignees
+    assignee_users = []
+    if order.assignees:
+        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(order.assignees))).all()
+    
+    # Get reviewers
+    reviewer_users = []
+    if order.reviewers:
+        reviewer_users = session.exec(select(AppUser).where(AppUser.id.in_(order.reviewers))).all()
+    
+    # Get labels
+    label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
+    labels = []
+    if label_ids:
+        labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
+
     # Build response objects
     order_resp = LabOrderDetailResponse(
         id=str(order.id),
@@ -1352,6 +1431,9 @@ def get_order_full_detail(
         requested_by=order.requested_by,
         notes=order.notes,
         billed_lock=order.billed_lock,
+        assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
+        reviewers=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in reviewer_users],
+        labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
     )
 
     patient_resp = PatientFullResponse(
@@ -1682,4 +1764,671 @@ def list_sample_events(
             )
             for e in events
         ]
+    )
+
+
+# --- Labels Endpoints ---
+
+@router.get("/labels/", response_model=LabelsListResponse)
+def list_labels(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
+    """List all labels for the tenant"""
+    labels = session.exec(
+        select(Label)
+        .where(Label.tenant_id == ctx.tenant_id)
+        .order_by(Label.name)
+    ).all()
+    
+    return LabelsListResponse(
+        labels=[
+            LabelResponse(
+                id=str(label.id),
+                name=label.name,
+                color=label.color,
+                tenant_id=str(label.tenant_id),
+                created_at=label.created_at,
+            )
+            for label in labels
+        ]
+    )
+
+
+@router.post("/labels/", response_model=LabelResponse)
+def create_label(
+    label_data: LabelCreate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Create a new label"""
+    # Check if label with same name already exists for this tenant
+    existing_label = session.exec(
+        select(Label)
+        .where(Label.tenant_id == ctx.tenant_id, Label.name == label_data.name)
+    ).first()
+    
+    if existing_label:
+        raise HTTPException(400, f"Label with name '{label_data.name}' already exists")
+    
+    # Create label
+    label = Label(
+        tenant_id=ctx.tenant_id,
+        name=label_data.name,
+        color=label_data.color,
+    )
+    
+    session.add(label)
+    session.commit()
+    session.refresh(label)
+    
+    logger.info(
+        f"Label created: {label.name}",
+        extra={
+            "event": "label.created",
+            "label_id": str(label.id),
+            "user_id": str(user.id),
+        },
+    )
+    
+    return LabelResponse(
+        id=str(label.id),
+        name=label.name,
+        color=label.color,
+        tenant_id=str(label.tenant_id),
+        created_at=label.created_at,
+    )
+
+
+@router.delete("/labels/{label_id}")
+def delete_label(
+    label_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Delete a label (only if not in use)"""
+    # Verify label exists and belongs to tenant
+    label = session.get(Label, label_id)
+    if not label:
+        raise HTTPException(404, "Label not found")
+    
+    if str(label.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Label does not belong to your tenant")
+    
+    # Check if label is in use
+    order_usage = session.exec(
+        select(LabOrderLabel).where(LabOrderLabel.label_id == label_id).limit(1)
+    ).first()
+    
+    sample_usage = session.exec(
+        select(SampleLabel).where(SampleLabel.label_id == label_id).limit(1)
+    ).first()
+    
+    if order_usage or sample_usage:
+        raise HTTPException(400, "Cannot delete label that is in use")
+    
+    # Delete label
+    session.delete(label)
+    session.commit()
+    
+    logger.info(
+        f"Label deleted: {label.name}",
+        extra={
+            "event": "label.deleted",
+            "label_id": label_id,
+            "user_id": str(user.id),
+        },
+    )
+    
+    return {"message": "Label deleted successfully"}
+
+
+# --- Order Assignees Endpoint ---
+
+@router.put("/orders/{order_id}/assignees", response_model=LabOrderDetailResponse)
+def update_order_assignees(
+    order_id: str,
+    data: AssigneesUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update assignees for an order"""
+    # Verify order exists and belongs to tenant
+    order = session.get(LabOrder, order_id)
+    if not order:
+        raise HTTPException(404, "Order not found")
+    
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Order does not belong to your tenant")
+    
+    # Validate all assignee IDs belong to tenant
+    new_assignees = [UUID(aid) for aid in data.assignee_ids]
+    for assignee_id in new_assignees:
+        assignee_user = session.get(AppUser, assignee_id)
+        if not assignee_user or str(assignee_user.tenant_id) != ctx.tenant_id:
+            raise HTTPException(400, f"User {assignee_id} not found or not in tenant")
+    
+    # Calculate diff
+    old_assignees = set(order.assignees or [])
+    new_assignees_set = set(new_assignees)
+    added = new_assignees_set - old_assignees
+    removed = old_assignees - new_assignees_set
+    
+    # Update order
+    order.assignees = new_assignees if new_assignees else None
+    session.add(order)
+    
+    # Generate events if there were changes
+    if added:
+        added_users = session.exec(select(AppUser).where(AppUser.id.in_(added))).all()
+        event = CaseEvent(
+            tenant_id=order.tenant_id,
+            branch_id=order.branch_id,
+            order_id=order.id,
+            event_type=EventType.ASSIGNEES_ADDED,
+            description="",
+            event_metadata={
+                "added": [{"id": str(u.id), "name": u.full_name, "username": u.username, "avatar": u.avatar_url} for u in added_users],
+                "total_count": len(new_assignees),
+            },
+            created_by=user.id,
+        )
+        session.add(event)
+    
+    if removed:
+        removed_users = session.exec(select(AppUser).where(AppUser.id.in_(removed))).all()
+        event = CaseEvent(
+            tenant_id=order.tenant_id,
+            branch_id=order.branch_id,
+            order_id=order.id,
+            event_type=EventType.ASSIGNEES_REMOVED,
+            description="",
+            event_metadata={
+                "removed": [{"id": str(u.id), "name": u.full_name, "username": u.username, "avatar": u.avatar_url} for u in removed_users],
+                "total_count": len(new_assignees),
+            },
+            created_by=user.id,
+        )
+        session.add(event)
+    
+    session.commit()
+    session.refresh(order)
+    
+    # Build response with user details
+    assignee_users = []
+    if order.assignees:
+        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(order.assignees))).all()
+    
+    return LabOrderDetailResponse(
+        id=str(order.id),
+        order_code=order.order_code,
+        status=order.status,
+        patient_id=str(order.patient_id),
+        tenant_id=str(order.tenant_id),
+        branch_id=str(order.branch_id),
+        requested_by=order.requested_by,
+        notes=order.notes,
+        billed_lock=order.billed_lock,
+        assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
+        reviewers=None,
+        labels=None,
+    )
+
+
+# --- Order Reviewers Endpoint ---
+
+@router.put("/orders/{order_id}/reviewers", response_model=LabOrderDetailResponse)
+def update_order_reviewers(
+    order_id: str,
+    data: ReviewersUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update reviewers for an order"""
+    # Verify order exists and belongs to tenant
+    order = session.get(LabOrder, order_id)
+    if not order:
+        raise HTTPException(404, "Order not found")
+    
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Order does not belong to your tenant")
+    
+    # Validate all reviewer IDs belong to tenant
+    new_reviewers = [UUID(rid) for rid in data.reviewer_ids]
+    for reviewer_id in new_reviewers:
+        reviewer_user = session.get(AppUser, reviewer_id)
+        if not reviewer_user or str(reviewer_user.tenant_id) != ctx.tenant_id:
+            raise HTTPException(400, f"User {reviewer_id} not found or not in tenant")
+    
+    # Calculate diff
+    old_reviewers = set(order.reviewers or [])
+    new_reviewers_set = set(new_reviewers)
+    added = new_reviewers_set - old_reviewers
+    removed = old_reviewers - new_reviewers_set
+    
+    # Update order
+    order.reviewers = new_reviewers if new_reviewers else None
+    session.add(order)
+    
+    # Generate events if there were changes
+    if added:
+        added_users = session.exec(select(AppUser).where(AppUser.id.in_(added))).all()
+        event = CaseEvent(
+            tenant_id=order.tenant_id,
+            branch_id=order.branch_id,
+            order_id=order.id,
+            event_type=EventType.REVIEWERS_ADDED,
+            description="",
+            event_metadata={
+                "added": [{"id": str(u.id), "name": u.full_name, "username": u.username, "avatar": u.avatar_url} for u in added_users],
+                "total_count": len(new_reviewers),
+            },
+            created_by=user.id,
+        )
+        session.add(event)
+    
+    if removed:
+        removed_users = session.exec(select(AppUser).where(AppUser.id.in_(removed))).all()
+        event = CaseEvent(
+            tenant_id=order.tenant_id,
+            branch_id=order.branch_id,
+            order_id=order.id,
+            event_type=EventType.REVIEWERS_REMOVED,
+            description="",
+            event_metadata={
+                "removed": [{"id": str(u.id), "name": u.full_name, "username": u.username, "avatar": u.avatar_url} for u in removed_users],
+                "total_count": len(new_reviewers),
+            },
+            created_by=user.id,
+        )
+        session.add(event)
+    
+    session.commit()
+    session.refresh(order)
+    
+    # Build response with user details
+    reviewer_users = []
+    if order.reviewers:
+        reviewer_users = session.exec(select(AppUser).where(AppUser.id.in_(order.reviewers))).all()
+    
+    return LabOrderDetailResponse(
+        id=str(order.id),
+        order_code=order.order_code,
+        status=order.status,
+        patient_id=str(order.patient_id),
+        tenant_id=str(order.tenant_id),
+        branch_id=str(order.branch_id),
+        requested_by=order.requested_by,
+        notes=order.notes,
+        billed_lock=order.billed_lock,
+        assignees=None,
+        reviewers=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in reviewer_users],
+        labels=None,
+    )
+
+
+# --- Order Labels Endpoint ---
+
+@router.put("/orders/{order_id}/labels", response_model=LabOrderDetailResponse)
+def update_order_labels(
+    order_id: str,
+    data: LabelsUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update labels for an order"""
+    # Verify order exists and belongs to tenant
+    order = session.get(LabOrder, order_id)
+    if not order:
+        raise HTTPException(404, "Order not found")
+    
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Order does not belong to your tenant")
+    
+    # Validate all label IDs belong to tenant
+    new_label_ids = [UUID(lid) for lid in data.label_ids]
+    for label_id in new_label_ids:
+        label = session.get(Label, label_id)
+        if not label or str(label.tenant_id) != ctx.tenant_id:
+            raise HTTPException(400, f"Label {label_id} not found or not in tenant")
+    
+    # Get current labels
+    old_label_ids = set(
+        session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
+    )
+    new_label_ids_set = set(new_label_ids)
+    
+    # Calculate diff
+    added = new_label_ids_set - old_label_ids
+    removed = old_label_ids - new_label_ids_set
+    
+    # Delete all existing labels
+    session.exec(
+        select(LabOrderLabel).where(LabOrderLabel.order_id == order_id)
+    ).all()
+    for ol in session.exec(select(LabOrderLabel).where(LabOrderLabel.order_id == order_id)).all():
+        session.delete(ol)
+    
+    # Add new labels
+    for label_id in new_label_ids:
+        order_label = LabOrderLabel(order_id=order.id, label_id=label_id)
+        session.add(order_label)
+    
+    # Generate events if there were changes
+    if added:
+        added_labels = session.exec(select(Label).where(Label.id.in_(added))).all()
+        event = CaseEvent(
+            tenant_id=order.tenant_id,
+            branch_id=order.branch_id,
+            order_id=order.id,
+            event_type=EventType.LABELS_ADDED,
+            description="",
+            event_metadata={
+                "added": [{"id": str(l.id), "name": l.name, "color": l.color} for l in added_labels],
+                "total_count": len(new_label_ids),
+            },
+            created_by=user.id,
+        )
+        session.add(event)
+    
+    if removed:
+        removed_labels = session.exec(select(Label).where(Label.id.in_(removed))).all()
+        event = CaseEvent(
+            tenant_id=order.tenant_id,
+            branch_id=order.branch_id,
+            order_id=order.id,
+            event_type=EventType.LABELS_REMOVED,
+            description="",
+            event_metadata={
+                "removed": [{"id": str(l.id), "name": l.name, "color": l.color} for l in removed_labels],
+                "total_count": len(new_label_ids),
+            },
+            created_by=user.id,
+        )
+        session.add(event)
+    
+    session.commit()
+    session.refresh(order)
+    
+    # Build response with label details
+    labels = []
+    if new_label_ids:
+        labels = session.exec(select(Label).where(Label.id.in_(new_label_ids))).all()
+    
+    return LabOrderDetailResponse(
+        id=str(order.id),
+        order_code=order.order_code,
+        status=order.status,
+        patient_id=str(order.patient_id),
+        tenant_id=str(order.tenant_id),
+        branch_id=str(order.branch_id),
+        requested_by=order.requested_by,
+        notes=order.notes,
+        billed_lock=order.billed_lock,
+        assignees=None,
+        reviewers=None,
+        labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
+    )
+
+
+# --- Sample Assignees Endpoint ---
+
+@router.put("/samples/{sample_id}/assignees", response_model=SampleDetailResponse)
+def update_sample_assignees(
+    sample_id: str,
+    data: AssigneesUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update assignees for a sample"""
+    # Verify sample exists and belongs to tenant
+    sample = session.get(Sample, sample_id)
+    if not sample:
+        raise HTTPException(404, "Sample not found")
+    
+    if str(sample.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Sample does not belong to your tenant")
+    
+    # Validate all assignee IDs belong to tenant
+    new_assignees = [UUID(aid) for aid in data.assignee_ids]
+    for assignee_id in new_assignees:
+        assignee_user = session.get(AppUser, assignee_id)
+        if not assignee_user or str(assignee_user.tenant_id) != ctx.tenant_id:
+            raise HTTPException(400, f"User {assignee_id} not found or not in tenant")
+    
+    # Calculate diff
+    old_assignees = set(sample.assignees or [])
+    new_assignees_set = set(new_assignees)
+    added = new_assignees_set - old_assignees
+    removed = old_assignees - new_assignees_set
+    
+    # Update sample
+    sample.assignees = new_assignees if new_assignees else None
+    session.add(sample)
+    
+    # Generate events if there were changes
+    if added:
+        added_users = session.exec(select(AppUser).where(AppUser.id.in_(added))).all()
+        event = CaseEvent(
+            tenant_id=sample.tenant_id,
+            branch_id=sample.branch_id,
+            order_id=sample.order_id,
+            sample_id=sample.id,
+            event_type=EventType.ASSIGNEES_ADDED,
+            description="",
+            event_metadata={
+                "added": [{"id": str(u.id), "name": u.full_name, "username": u.username, "avatar": u.avatar_url} for u in added_users],
+                "total_count": len(new_assignees),
+                "sample_code": sample.sample_code,
+            },
+            created_by=user.id,
+        )
+        session.add(event)
+    
+    if removed:
+        removed_users = session.exec(select(AppUser).where(AppUser.id.in_(removed))).all()
+        event = CaseEvent(
+            tenant_id=sample.tenant_id,
+            branch_id=sample.branch_id,
+            order_id=sample.order_id,
+            sample_id=sample.id,
+            event_type=EventType.ASSIGNEES_REMOVED,
+            description="",
+            event_metadata={
+                "removed": [{"id": str(u.id), "name": u.full_name, "username": u.username, "avatar": u.avatar_url} for u in removed_users],
+                "total_count": len(new_assignees),
+                "sample_code": sample.sample_code,
+            },
+            created_by=user.id,
+        )
+        session.add(event)
+    
+    session.commit()
+    session.refresh(sample)
+    
+    # Build full response
+    order = session.get(LabOrder, sample.order_id)
+    branch = session.get(Branch, sample.branch_id)
+    patient = session.get(Patient, order.patient_id if order else None)
+    
+    # Get assignees
+    assignee_users = []
+    if sample.assignees:
+        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(sample.assignees))).all()
+    
+    # Get labels (inherited + own) - will implement full logic later
+    labels = []
+    
+    return SampleDetailResponse(
+        id=str(sample.id),
+        sample_code=sample.sample_code,
+        type=sample.type,
+        state=sample.state,
+        collected_at=str(sample.collected_at) if sample.collected_at else None,
+        received_at=str(sample.received_at) if sample.received_at else None,
+        notes=sample.notes,
+        tenant_id=str(sample.tenant_id),
+        branch=BranchRef(id=str(branch.id), name=branch.name if branch else "", code=branch.code if branch else None),
+        order=OrderSlim(
+            id=str(order.id),
+            order_code=order.order_code,
+            status=order.status,
+            requested_by=order.requested_by,
+            patient=None,
+        ) if order else None,
+        patient=PatientRef(
+            id=str(patient.id),
+            full_name=f"{patient.first_name} {patient.last_name}",
+            patient_code=patient.patient_code,
+        ) if patient else None,
+        assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
+        labels=labels,
+    )
+
+
+# --- Sample Labels Endpoint ---
+
+@router.put("/samples/{sample_id}/labels", response_model=SampleDetailResponse)
+def update_sample_labels(
+    sample_id: str,
+    data: LabelsUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update OWN labels for a sample (not including inherited from order)"""
+    # Verify sample exists and belongs to tenant
+    sample = session.get(Sample, sample_id)
+    if not sample:
+        raise HTTPException(404, "Sample not found")
+    
+    if str(sample.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Sample does not belong to your tenant")
+    
+    # Validate all label IDs belong to tenant
+    new_label_ids = [UUID(lid) for lid in data.label_ids]
+    for label_id in new_label_ids:
+        label = session.get(Label, label_id)
+        if not label or str(label.tenant_id) != ctx.tenant_id:
+            raise HTTPException(400, f"Label {label_id} not found or not in tenant")
+    
+    # Get current OWN labels (not inherited)
+    old_label_ids = set(
+        session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == sample_id)).all()
+    )
+    new_label_ids_set = set(new_label_ids)
+    
+    # Calculate diff
+    added = new_label_ids_set - old_label_ids
+    removed = old_label_ids - new_label_ids_set
+    
+    # Delete all existing own labels
+    for sl in session.exec(select(SampleLabel).where(SampleLabel.sample_id == sample_id)).all():
+        session.delete(sl)
+    
+    # Add new own labels
+    for label_id in new_label_ids:
+        sample_label = SampleLabel(sample_id=sample.id, label_id=label_id)
+        session.add(sample_label)
+    
+    # Generate events if there were changes
+    if added:
+        added_labels = session.exec(select(Label).where(Label.id.in_(added))).all()
+        event = CaseEvent(
+            tenant_id=sample.tenant_id,
+            branch_id=sample.branch_id,
+            order_id=sample.order_id,
+            sample_id=sample.id,
+            event_type=EventType.LABELS_ADDED,
+            description="",
+            event_metadata={
+                "added": [{"id": str(l.id), "name": l.name, "color": l.color} for l in added_labels],
+                "total_count": len(new_label_ids),
+                "sample_code": sample.sample_code,
+            },
+            created_by=user.id,
+        )
+        session.add(event)
+    
+    if removed:
+        removed_labels = session.exec(select(Label).where(Label.id.in_(removed))).all()
+        event = CaseEvent(
+            tenant_id=sample.tenant_id,
+            branch_id=sample.branch_id,
+            order_id=sample.order_id,
+            sample_id=sample.id,
+            event_type=EventType.LABELS_REMOVED,
+            description="",
+            event_metadata={
+                "removed": [{"id": str(l.id), "name": l.name, "color": l.color} for l in removed_labels],
+                "total_count": len(new_label_ids),
+                "sample_code": sample.sample_code,
+            },
+            created_by=user.id,
+        )
+        session.add(event)
+    
+    session.commit()
+    session.refresh(sample)
+    
+    # Build full response with inherited + own labels
+    order = session.get(LabOrder, sample.order_id)
+    branch = session.get(Branch, sample.branch_id)
+    patient = session.get(Patient, order.patient_id if order else None)
+    
+    # Get order labels (inherited)
+    order_label_ids = set(
+        session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == sample.order_id)).all()
+    )
+    
+    # Get own labels
+    own_label_ids = set(new_label_ids)
+    
+    # Combine all label IDs
+    all_label_ids = order_label_ids | own_label_ids
+    
+    # Get label objects
+    labels_with_inheritance = []
+    if all_label_ids:
+        all_labels = session.exec(select(Label).where(Label.id.in_(all_label_ids))).all()
+        for label in all_labels:
+            labels_with_inheritance.append(
+                LabelWithInheritance(
+                    id=str(label.id),
+                    name=label.name,
+                    color=label.color,
+                    inherited=(label.id in order_label_ids),
+                )
+            )
+    
+    return SampleDetailResponse(
+        id=str(sample.id),
+        sample_code=sample.sample_code,
+        type=sample.type,
+        state=sample.state,
+        collected_at=str(sample.collected_at) if sample.collected_at else None,
+        received_at=str(sample.received_at) if sample.received_at else None,
+        notes=sample.notes,
+        tenant_id=str(sample.tenant_id),
+        branch=BranchRef(id=str(branch.id), name=branch.name if branch else "", code=branch.code if branch else None),
+        order=OrderSlim(
+            id=str(order.id),
+            order_code=order.order_code,
+            status=order.status,
+            requested_by=order.requested_by,
+            patient=None,
+        ) if order else None,
+        patient=PatientRef(
+            id=str(patient.id),
+            full_name=f"{patient.first_name} {patient.last_name}",
+            patient_code=patient.patient_code,
+        ) if patient else None,
+        assignees=None,
+        labels=labels_with_inheritance,
     )

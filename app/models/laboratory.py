@@ -2,7 +2,8 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field, Relationship, Column
-from sqlalchemy import JSON
+from sqlalchemy import JSON, ARRAY
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from .base import BaseModel, TimestampMixin, TenantMixin, BranchMixin
 from .enums import OrderStatus, SampleType, SampleState
 
@@ -20,6 +21,8 @@ class LabOrder(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     notes: Optional[str] = Field(default=None)
     billed_lock: bool = Field(default=False)  # Lock release if no payment
     created_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
+    assignees: Optional[List[UUID]] = Field(default=None, sa_column=Column(ARRAY(PG_UUID(as_uuid=True))))
+    reviewers: Optional[List[UUID]] = Field(default=None, sa_column=Column(ARRAY(PG_UUID(as_uuid=True))))
     
     # Basic relationships only
     samples: List["Sample"] = Relationship(back_populates="order")
@@ -38,6 +41,7 @@ class Sample(BaseModel, TenantMixin, BranchMixin, table=True):
     collected_at: Optional[datetime] = Field(default=None)
     received_at: Optional[datetime] = Field(default=None)
     notes: Optional[str] = Field(default=None)
+    assignees: Optional[List[UUID]] = Field(default=None, sa_column=Column(ARRAY(PG_UUID(as_uuid=True))))
     
     # Basic relationships only
     order: LabOrder = Relationship(back_populates="samples")
@@ -81,3 +85,33 @@ class OrderCommentMention(BaseModel, table=True):
     
     comment_id: UUID = Field(foreign_key="order_comment.id", primary_key=True)
     user_id: UUID = Field(foreign_key="app_user.id", primary_key=True)
+
+class Label(BaseModel, TimestampMixin, TenantMixin, table=True):
+    """Label model for categorizing orders and samples"""
+    __tablename__ = "label"
+    
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    name: str = Field(max_length=100, index=True)
+    color: str = Field(max_length=7)  # Hex color code like #FF5733
+    tenant_id: UUID = Field(foreign_key="tenant.id", index=True)
+    
+    # Override updated_at to ensure it has a default value
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class LabOrderLabel(BaseModel, table=True):
+    """Junction table for order-label many-to-many relationship"""
+    __tablename__ = "lab_order_labels"
+    
+    order_id: UUID = Field(foreign_key="lab_order.id", primary_key=True, ondelete="CASCADE")
+    label_id: UUID = Field(foreign_key="label.id", primary_key=True, ondelete="CASCADE")
+
+class SampleLabel(BaseModel, table=True):
+    """Junction table for sample-label many-to-many relationship
+    
+    Note: These are ADDITIONAL labels specific to the sample.
+    Labels from the order are inherited automatically.
+    """
+    __tablename__ = "sample_labels"
+    
+    sample_id: UUID = Field(foreign_key="sample.id", primary_key=True, ondelete="CASCADE")
+    label_id: UUID = Field(foreign_key="label.id", primary_key=True, ondelete="CASCADE")

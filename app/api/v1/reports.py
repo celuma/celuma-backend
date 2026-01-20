@@ -805,6 +805,11 @@ def submit_report(
     if report.status != ReportStatus.DRAFT:
         raise HTTPException(400, f"Cannot submit report in {report.status} status")
     
+    # Validate that order has reviewers assigned
+    order = session.get(LabOrder, report.order_id)
+    if not order or not order.reviewers or len(order.reviewers) == 0:
+        raise HTTPException(400, "Cannot submit report for review without reviewers assigned to the order")
+    
     # Update status
     old_status = report.status
     report.status = ReportStatus.IN_REVIEW
