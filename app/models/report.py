@@ -1,7 +1,8 @@
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field, Relationship
+from sqlalchemy import JSON
 from .base import BaseModel, TimestampMixin, TenantMixin, BranchMixin
 from .enums import ReportStatus
 
@@ -41,3 +42,16 @@ class ReportVersion(BaseModel, TimestampMixin, table=True):
     
     # Basic relationships only
     report: Report = Relationship(back_populates="versions")
+
+
+class ReportTemplate(BaseModel, TimestampMixin, TenantMixin, table=True):
+    """Template model for storing report templates in JSON format"""
+    __tablename__ = "report_template"
+    
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    tenant_id: UUID = Field(foreign_key="tenant.id")
+    name: str = Field(max_length=255)
+    description: Optional[str] = Field(default=None)
+    template_json: Dict[str, Any] = Field(sa_type=JSON, default={})
+    created_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
+    is_active: bool = Field(default=True)

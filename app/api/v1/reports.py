@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlmodel import select, Session
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
-from app.models.report import Report, ReportVersion
+from app.models.report import Report, ReportVersion, ReportTemplate
 from app.models.laboratory import LabOrder
 from app.models.tenant import Tenant, Branch
 from app.models.patient import Patient
@@ -25,7 +25,12 @@ from app.schemas.report import (
     ReportStatusUpdate,
     ReportSignRequest,
     ReportReviewComment,
-    ReportActionResponse
+    ReportActionResponse,
+    ReportTemplateCreate,
+    ReportTemplateUpdate,
+    ReportTemplateResponse,
+    ReportTemplateDetailResponse,
+    ReportTemplatesListResponse,
 )
 import json
 from datetime import datetime
@@ -400,6 +405,203 @@ def get_pathologist_worklist(
         )
     
     return ReportsListResponse(reports=results)
+
+
+# ============================================================================
+# Report Templates CRUD Endpoints
+# ============================================================================
+
+@router.get("/templates/", response_model=ReportTemplatesListResponse)
+def list_templates(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    active_only: bool = True,
+):
+    """List all report templates for the tenant"""
+    query = select(ReportTemplate).where(ReportTemplate.tenant_id == ctx.tenant_id)
+    
+    if active_only:
+        query = query.where(ReportTemplate.is_active == True)
+    
+    templates = session.exec(query).all()
+    
+    return ReportTemplatesListResponse(
+        templates=[
+            ReportTemplateResponse(
+                id=str(t.id),
+                tenant_id=str(t.tenant_id),
+                name=t.name,
+                description=t.description,
+                is_active=t.is_active,
+                created_at=t.created_at,
+            )
+            for t in templates
+        ]
+    )
+
+
+@router.get("/templates/{template_id}", response_model=ReportTemplateDetailResponse)
+def get_template(
+    template_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
+    """Get a specific report template by ID"""
+    template = session.get(ReportTemplate, template_id)
+    if not template:
+        raise HTTPException(404, "Template not found")
+    
+    if str(template.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Template not found")
+    
+    return ReportTemplateDetailResponse(
+        id=str(template.id),
+        tenant_id=str(template.tenant_id),
+        name=template.name,
+        description=template.description,
+        template_json=template.template_json,
+        created_by=str(template.created_by) if template.created_by else None,
+        is_active=template.is_active,
+        created_at=template.created_at,
+    )
+
+
+@router.post("/templates/", response_model=ReportTemplateResponse)
+def create_template(
+    template_data: ReportTemplateCreate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Create a new report template"""
+    template = ReportTemplate(
+        tenant_id=ctx.tenant_id,
+        name=template_data.name,
+        description=template_data.description,
+        template_json=template_data.template_json,
+        created_by=user.id,
+        is_active=True,
+    )
+    
+    session.add(template)
+    session.commit()
+    session.refresh(template)
+    
+    logger.info(
+        f"Report template '{template.name}' created",
+        extra={
+            "event": "report_template.created",
+            "template_id": str(template.id),
+            "user_id": str(user.id),
+        },
+    )
+    
+    return ReportTemplateResponse(
+        id=str(template.id),
+        tenant_id=str(template.tenant_id),
+        name=template.name,
+        description=template.description,
+        is_active=template.is_active,
+        created_at=template.created_at,
+    )
+
+
+@router.put("/templates/{template_id}", response_model=ReportTemplateResponse)
+def update_template(
+    template_id: str,
+    template_data: ReportTemplateUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update an existing report template"""
+    template = session.get(ReportTemplate, template_id)
+    if not template:
+        raise HTTPException(404, "Template not found")
+    
+    if str(template.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Template does not belong to your tenant")
+    
+    # Update fields if provided
+    if template_data.name is not None:
+        template.name = template_data.name
+    if template_data.description is not None:
+        template.description = template_data.description
+    if template_data.template_json is not None:
+        template.template_json = template_data.template_json
+    if template_data.is_active is not None:
+        template.is_active = template_data.is_active
+    
+    session.add(template)
+    session.commit()
+    session.refresh(template)
+    
+    logger.info(
+        f"Report template '{template.name}' updated",
+        extra={
+            "event": "report_template.updated",
+            "template_id": str(template.id),
+            "user_id": str(user.id),
+        },
+    )
+    
+    return ReportTemplateResponse(
+        id=str(template.id),
+        tenant_id=str(template.tenant_id),
+        name=template.name,
+        description=template.description,
+        is_active=template.is_active,
+        created_at=template.created_at,
+    )
+
+
+@router.delete("/templates/{template_id}")
+def delete_template(
+    template_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+    hard_delete: bool = False,
+):
+    """Delete a report template (soft delete by default, hard delete optional)"""
+    template = session.get(ReportTemplate, template_id)
+    if not template:
+        raise HTTPException(404, "Template not found")
+    
+    if str(template.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Template does not belong to your tenant")
+    
+    if hard_delete:
+        # Permanently delete the template
+        session.delete(template)
+        session.commit()
+        
+        logger.info(
+            f"Report template '{template.name}' permanently deleted",
+            extra={
+                "event": "report_template.hard_deleted",
+                "template_id": template_id,
+                "user_id": str(user.id),
+            },
+        )
+        
+        return {"message": "Template permanently deleted", "id": template_id}
+    else:
+        # Soft delete - just mark as inactive
+        template.is_active = False
+        session.add(template)
+        session.commit()
+        
+        logger.info(
+            f"Report template '{template.name}' soft deleted (deactivated)",
+            extra={
+                "event": "report_template.soft_deleted",
+                "template_id": str(template.id),
+                "user_id": str(user.id),
+            },
+        )
+        
+        return {"message": "Template deactivated", "id": str(template.id)}
 
 
 @router.get("/{report_id}", response_model=ReportDetailResponse)
