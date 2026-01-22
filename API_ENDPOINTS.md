@@ -577,6 +577,71 @@ Headers: `Authorization: Bearer <token>`
 ]
 ```
 
+### PATCH /api/v1/tenants/{tenant_id}
+**Update tenant details (Admin only)**
+
+**Request Body:**
+```json
+{
+  "name": "Updated Laboratory Name",
+  "legal_name": "Updated Legal Name Inc.",
+  "tax_id": "NEW123456789"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "tenant-uuid",
+  "name": "Updated Laboratory Name",
+  "legal_name": "Updated Legal Name Inc.",
+  "tax_id": "NEW123456789"
+}
+```
+
+**Notes:**
+- All fields are optional; only provided fields are updated
+- Admin role required
+- Can only update own tenant
+
+### POST /api/v1/tenants/{tenant_id}/logo
+**Upload tenant logo (Admin only)**
+
+**Request:**
+- Content-Type: `multipart/form-data`
+- Body: field `file` with image file (JPEG, PNG, or WEBP)
+
+**Response:**
+```json
+{
+  "message": "Logo uploaded successfully",
+  "logo_url": "https://cdn.example.com/tenants/tenant-uuid/logo.png"
+}
+```
+
+**Notes:**
+- Admin role required
+- Only image files (JPEG, PNG, WEBP) are accepted
+- Logo is stored in S3 at `tenants/{tenant_id}/logo.{ext}`
+- Updates the tenant's `logo_url` field
+
+### POST /api/v1/tenants/{tenant_id}/toggle
+**Toggle tenant active status (Admin only)**
+
+**Response:**
+```json
+{
+  "message": "Tenant deactivated",
+  "is_active": false
+}
+```
+
+**Notes:**
+- Admin role required
+- Cannot deactivate own tenant (returns 400)
+- Toggles the `is_active` boolean field
+- Deactivated tenants may have restricted access
+
 ## 🏥 Branch Management
 
 Headers: `Authorization: Bearer <token>`
@@ -817,9 +882,173 @@ Returns `orders` array with enriched `branch` and `patient` objects and summary 
   "branch_id": "branch-uuid-here",
   "requested_by": "Dr. Smith",
   "notes": "Complete blood count requested",
-  "billed_lock": false
+  "billed_lock": false,
+  "assignees": [
+    { "id": "user-uuid", "name": "Lab Tech 1", "email": "tech1@lab.com", "avatar_url": null }
+  ],
+  "reviewers": [
+    { "id": "user-uuid-2", "name": "Dr. Pathologist", "email": "path@lab.com", "avatar_url": null }
+  ],
+  "labels": [
+    { "id": "label-uuid", "name": "Urgent", "color": "#FF0000", "tenant_id": "tenant-uuid", "created_at": "2025-01-01T00:00:00Z" }
+  ]
 }
 ```
+
+### PATCH /api/v1/laboratory/orders/{order_id}/notes
+**Update order notes**
+
+**Request Body:**
+```json
+{
+  "notes": "Updated notes with additional instructions"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "order-uuid",
+  "order_code": "ORD001",
+  "status": "RECEIVED",
+  "patient_id": "patient-uuid",
+  "tenant_id": "tenant-uuid",
+  "branch_id": "branch-uuid",
+  "requested_by": "Dr. Smith",
+  "notes": "Updated notes with additional instructions",
+  "billed_lock": false,
+  "assignees": [],
+  "reviewers": [],
+  "labels": []
+}
+```
+
+**Notes:**
+- Creates an ORDER_NOTES_UPDATED timeline event
+- Notes can be set to null to clear
+
+### GET /api/v1/laboratory/orders/{order_id}/comments
+**Get paginated comments for an order (cursor-based pagination)**
+
+**Query Parameters:**
+- `limit` (optional, default: 20, max: 100): Number of comments to return
+- `before` (optional): Cursor for fetching older comments
+- `after` (optional): Cursor for fetching newer comments
+
+**Response:**
+```json
+{
+  "items": [
+    {
+      "id": "comment-uuid",
+      "text": "Sample received in good condition",
+      "metadata": {},
+      "created_at": "2025-01-15T10:30:00Z",
+      "edited_at": null,
+      "created_by": {
+        "id": "user-uuid",
+        "name": "Lab Tech 1",
+        "avatar": null
+      },
+      "mentions": [
+        {
+          "user_id": "user-uuid-2",
+          "username": "drsmith",
+          "name": "Dr. Smith",
+          "avatar": null
+        }
+      ]
+    }
+  ],
+  "page_info": {
+    "has_next_page": true,
+    "has_previous_page": false,
+    "start_cursor": "base64-cursor-string",
+    "end_cursor": "base64-cursor-string"
+  }
+}
+```
+
+**Notes:**
+- Comments are ordered by created_at ascending (oldest first, like a chat)
+- Soft-deleted comments (deleted_at not null) are excluded
+- Use `before` cursor to fetch older comments, `after` for newer
+
+### POST /api/v1/laboratory/orders/{order_id}/comments
+**Create a new comment on an order**
+
+**Request Body:**
+```json
+{
+  "text": "Please review the sample preparation @drsmith",
+  "mentions": ["user-uuid-of-drsmith"],
+  "metadata": {
+    "custom_field": "optional metadata"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "id": "comment-uuid",
+  "text": "Please review the sample preparation @drsmith",
+  "metadata": { "custom_field": "optional metadata" },
+  "created_at": "2025-01-15T10:30:00Z",
+  "edited_at": null,
+  "created_by": {
+    "id": "user-uuid",
+    "name": "Lab Tech 1",
+    "avatar": null
+  },
+  "mentions": [
+    {
+      "user_id": "user-uuid-of-drsmith",
+      "username": "drsmith",
+      "name": "Dr. Smith",
+      "avatar": null
+    }
+  ]
+}
+```
+
+**Notes:**
+- `text` is required (max 5000 characters)
+- `mentions` is optional array of user UUIDs to mention
+- Mentioned users must exist in the same tenant
+- Creates a COMMENT_ADDED timeline event
+- User must have branch access to comment
+
+### GET /api/v1/laboratory/users/search
+**Search users for mentions**
+
+**Query Parameters:**
+- `q` (required): Search term (min 1 character)
+
+**Response:**
+```json
+{
+  "users": [
+    {
+      "id": "user-uuid",
+      "username": "drsmith",
+      "name": "Dr. Smith",
+      "avatar": "https://cdn.example.com/avatars/user.jpg"
+    },
+    {
+      "id": "user-uuid-2",
+      "username": "labtech1",
+      "name": "Lab Technician 1",
+      "avatar": null
+    }
+  ]
+}
+```
+
+**Notes:**
+- Searches by username and full_name (case-insensitive)
+- Only returns active users in the same tenant
+- Limited to 10 results for performance
 
 ### POST /api/v1/laboratory/samples/
 **Create a new sample**
@@ -1171,6 +1400,130 @@ If the file exceeds the limit, the server returns `413` with a message: `{"detai
   ]
 }
 ```
+
+### DELETE /api/v1/laboratory/samples/{sample_id}/images/{image_id}
+**Delete a sample image and its renditions**
+
+**Response:**
+```json
+{
+  "message": "Image deleted successfully"
+}
+```
+
+**Notes:**
+- Deletes the image record and all associated renditions
+- Removes files from S3 storage
+- Creates an IMAGE_DELETED timeline event
+- Returns 404 if image not found or doesn't belong to the sample
+
+### PATCH /api/v1/laboratory/samples/{sample_id}/state
+**Update sample state**
+
+**Request Body:**
+```json
+{
+  "state": "PROCESSING"
+}
+```
+
+**Valid States:**
+- `RECEIVED`: Sample received (default)
+- `PROCESSING`: Sample is being processed
+- `READY`: Sample is ready for diagnosis
+- `DAMAGED`: Sample is physically damaged
+- `CANCELLED`: Sample is cancelled
+
+**Response:**
+```json
+{
+  "id": "sample-uuid",
+  "sample_code": "SAMP001",
+  "type": "SANGRE",
+  "state": "PROCESSING",
+  "order_id": "order-uuid",
+  "tenant_id": "tenant-uuid",
+  "branch_id": "branch-uuid"
+}
+```
+
+**Notes:**
+- Creates a SAMPLE_STATE_CHANGED timeline event
+- May automatically update the parent order status based on sample states
+- Cannot change state of samples in orders that are CLOSED or CANCELLED
+
+### PATCH /api/v1/laboratory/samples/{sample_id}/notes
+**Update sample notes**
+
+**Request Body:**
+```json
+{
+  "notes": "Updated sample notes with additional observations"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "sample-uuid",
+  "sample_code": "SAMP001",
+  "type": "SANGRE",
+  "state": "RECEIVED",
+  "notes": "Updated sample notes with additional observations",
+  "order_id": "order-uuid",
+  "tenant_id": "tenant-uuid",
+  "branch_id": "branch-uuid"
+}
+```
+
+**Notes:**
+- Creates a SAMPLE_NOTES_UPDATED timeline event
+- Notes field can be set to null to clear
+
+### GET /api/v1/laboratory/samples/{sample_id}/events
+**Get event timeline for a sample**
+
+**Response:**
+```json
+{
+  "events": [
+    {
+      "id": "event-uuid",
+      "tenant_id": "tenant-uuid",
+      "branch_id": "branch-uuid",
+      "order_id": "order-uuid",
+      "sample_id": "sample-uuid",
+      "event_type": "SAMPLE_CREATED",
+      "description": "Sample created",
+      "metadata": {
+        "sample_code": "SAMP001",
+        "sample_type": "SANGRE"
+      },
+      "created_by": "user-uuid",
+      "created_at": "2025-01-01T10:00:00Z"
+    },
+    {
+      "id": "event-uuid-2",
+      "tenant_id": "tenant-uuid",
+      "branch_id": "branch-uuid",
+      "order_id": "order-uuid",
+      "sample_id": "sample-uuid",
+      "event_type": "IMAGE_UPLOADED",
+      "description": "Image uploaded",
+      "metadata": {
+        "filename": "slide_001.jpg",
+        "is_raw": false
+      },
+      "created_by": "user-uuid",
+      "created_at": "2025-01-01T11:00:00Z"
+    }
+  ]
+}
+```
+
+**Notes:**
+- Returns events filtered by sample_id in metadata
+- Events are ordered by created_at ascending
 
 ## 📋 Report Management
 
@@ -1624,6 +1977,170 @@ Path param:
 - Optional branch filter for multi-branch organizations
 - Returns enriched data with branch, order, and patient information
 
+## 📋 Report Templates Management
+
+Headers: `Authorization: Bearer <token>`
+
+### GET /api/v1/reports/templates/
+**List all report templates for the tenant**
+
+**Query Parameters:**
+- `active_only` (optional, default: `true`): If true, only returns active templates
+
+**Response:**
+```json
+{
+  "templates": [
+    {
+      "id": "template-uuid",
+      "tenant_id": "tenant-uuid",
+      "name": "Citología Mamaria",
+      "description": "Template para reportes de citología mamaria",
+      "is_active": true,
+      "created_at": "2025-01-22T01:30:13.676747"
+    }
+  ]
+}
+```
+
+**Notes:**
+- Returns templates filtered by tenant automatically
+- By default, only active templates are returned
+- Set `active_only=false` to include inactive templates
+
+### GET /api/v1/reports/templates/{template_id}
+**Get a specific report template by ID**
+
+**Response:**
+```json
+{
+  "id": "template-uuid",
+  "tenant_id": "tenant-uuid",
+  "name": "Citología Mamaria",
+  "description": "Template para reportes de citología mamaria",
+  "template_json": {
+    "sections": [
+      {
+        "title": "Resultados",
+        "fields": ["campo1", "campo2"]
+      }
+    ],
+    "metadata": {
+      "version": "1.0"
+    }
+  },
+  "created_by": "user-uuid",
+  "is_active": true,
+  "created_at": "2025-01-22T01:30:13.676747"
+}
+```
+
+**Notes:**
+- Returns complete template including the JSON structure
+- Returns 404 if template not found or doesn't belong to tenant
+- Includes `created_by` user ID if available
+
+### POST /api/v1/reports/templates/
+**Create a new report template**
+
+**Request Body:**
+```json
+{
+  "name": "Citología Mamaria",
+  "description": "Template para reportes de citología mamaria",
+  "template_json": {
+    "sections": [
+      {
+        "title": "Resultados",
+        "fields": ["campo1", "campo2"]
+      }
+    ],
+    "metadata": {
+      "version": "1.0"
+    }
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "id": "template-uuid",
+  "tenant_id": "tenant-uuid",
+  "name": "Citología Mamaria",
+  "description": "Template para reportes de citología mamaria",
+  "is_active": true,
+  "created_at": "2025-01-22T01:30:13.676747"
+}
+```
+
+**Notes:**
+- `name` and `template_json` are required
+- `description` is optional
+- Template is automatically assigned to the authenticated user's tenant
+- `created_by` is automatically set to the current user
+- Template is created as active by default
+
+### PUT /api/v1/reports/templates/{template_id}
+**Update an existing report template**
+
+**Request Body:**
+```json
+{
+  "name": "Citología Mamaria Actualizada",
+  "description": "Descripción actualizada",
+  "template_json": {
+    "sections": [
+      {
+        "title": "Resultados Actualizados",
+        "fields": ["campo1", "campo2", "campo3"]
+      }
+    ]
+  },
+  "is_active": true
+}
+```
+
+**Response:**
+```json
+{
+  "id": "template-uuid",
+  "tenant_id": "tenant-uuid",
+  "name": "Citología Mamaria Actualizada",
+  "description": "Descripción actualizada",
+  "is_active": true,
+  "created_at": "2025-01-22T01:30:13.676747"
+}
+```
+
+**Notes:**
+- All fields are optional; only provided fields will be updated
+- Returns 404 if template not found
+- Returns 403 if template doesn't belong to tenant
+- Use `is_active: false` to deactivate a template (soft delete)
+- Use `is_active: true` to reactivate a previously deactivated template
+
+### DELETE /api/v1/reports/templates/{template_id}
+**Permanently delete a report template**
+
+**Query Parameters:**
+- `hard_delete` (optional, default: `false`): If true, permanently deletes the template
+
+**Response:**
+```json
+{
+  "message": "Template permanently deleted",
+  "id": "template-uuid"
+}
+```
+
+**Notes:**
+- By default (`hard_delete=false`), performs soft delete by setting `is_active=false`
+- With `hard_delete=true`, permanently removes the template from database
+- Returns 404 if template not found
+- Returns 403 if template doesn't belong to tenant
+- **Recommendation**: Use PUT with `is_active: false` for soft delete instead of DELETE
+
 ## 💰 Billing Management
 
 Headers: `Authorization: Bearer <token>`
@@ -2013,6 +2530,80 @@ Headers: `Authorization: Bearer <token>`
 
 ## 👥 Portal Endpoints
 
+### GET /api/v1/portal/physician/orders
+**List orders for the authenticated physician**
+
+Returns orders where the `requested_by` field matches the authenticated user's email.
+
+**Response:**
+```json
+[
+  {
+    "id": "order-uuid",
+    "order_code": "ORD001",
+    "patient_name": "John Doe",
+    "patient_code": "P001",
+    "status": "CLOSED",
+    "has_report": true,
+    "report_status": "PUBLISHED",
+    "requested_by": "doctor@example.com"
+  }
+]
+```
+
+**Notes:**
+- Only returns orders where the user's email matches `requested_by`
+- Useful for physicians to track their requested tests
+
+### GET /api/v1/portal/physician/orders/{order_id}/report
+**Get published report for a specific order (physician only)**
+
+**Response:**
+```json
+{
+  "report_id": "report-uuid",
+  "order_code": "ORD001",
+  "status": "PUBLISHED",
+  "title": "Blood Test Report",
+  "published_at": "2025-01-15T12:00:00Z",
+  "pdf_url": "https://presigned-url-valid-10-minutes..."
+}
+```
+
+**Notes:**
+- Validates that the authenticated physician is the one who requested the order
+- Returns 403 if the physician is not the requestor
+- Returns 403 if the order is locked due to pending payment (`billed_lock`)
+- Returns 404 if no report exists or report is not PUBLISHED
+- PDF URL is a presigned URL valid for 10 minutes
+
+### GET /api/v1/portal/patient/report
+**Get report by patient access code (public endpoint)**
+
+**Query Parameters:**
+- `code` (required): Patient access code
+
+**Response:**
+```json
+{
+  "report_id": "report-uuid",
+  "order_code": "ORD001",
+  "patient_name": "John Doe",
+  "status": "PUBLISHED",
+  "title": "Blood Test Report",
+  "published_at": "2025-01-15T12:00:00Z",
+  "pdf_url": "https://presigned-url-valid-10-minutes..."
+}
+```
+
+**Notes:**
+- This is a **public endpoint** - no authentication required
+- Access code is generated as: `SHA256(order_code:patient_code)[:16].upper()`
+- Returns 404 if no matching order is found
+- Returns 403 if the order is locked due to pending payment
+- Returns 404 if no report exists or report is not PUBLISHED
+- PDF URL is a presigned URL valid for 10 minutes
+
 ### POST /api/v1/portal/invite
 **Send a user invitation**
 
@@ -2149,6 +2740,261 @@ Headers: `Authorization: Bearer <token>`
 ```
 
 **Response:** Returns the created event.
+
+## 🏷️ Labels Management
+
+Headers: `Authorization: Bearer <token>`
+
+### GET /api/v1/laboratory/labels/
+**List all labels for the tenant**
+
+**Response:**
+```json
+{
+  "labels": [
+    {
+      "id": "label-uuid",
+      "name": "Urgent",
+      "color": "#FF0000",
+      "tenant_id": "tenant-uuid",
+      "created_at": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "label-uuid-2",
+      "name": "VIP",
+      "color": "#FFD700",
+      "tenant_id": "tenant-uuid",
+      "created_at": "2025-01-02T00:00:00Z"
+    }
+  ]
+}
+```
+
+### POST /api/v1/laboratory/labels/
+**Create a new label**
+
+**Request Body:**
+```json
+{
+  "name": "Priority",
+  "color": "#FF5733"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "label-uuid",
+  "name": "Priority",
+  "color": "#FF5733",
+  "tenant_id": "tenant-uuid",
+  "created_at": "2025-01-15T10:00:00Z"
+}
+```
+
+**Notes:**
+- `name` must be unique within the tenant
+- `color` must be a valid hex color code (e.g., #FF5733)
+- Returns 400 if label name already exists
+
+### DELETE /api/v1/laboratory/labels/{label_id}
+**Delete a label**
+
+**Response:**
+```json
+{
+  "message": "Label deleted successfully"
+}
+```
+
+**Notes:**
+- Deletes the label and removes it from all orders and samples (cascade)
+- Generates LABELS_REMOVED events on affected orders/samples
+- Returns 404 if label not found or doesn't belong to tenant
+
+## 👥 Collaboration Management
+
+Headers: `Authorization: Bearer <token>`
+
+### PUT /api/v1/laboratory/orders/{order_id}/assignees
+**Update assignees for an order**
+
+**Request Body:**
+```json
+{
+  "assignee_ids": ["user-uuid-1", "user-uuid-2"]
+}
+```
+
+**Response:**
+```json
+{
+  "id": "order-uuid",
+  "order_code": "ORD001",
+  "status": "RECEIVED",
+  "patient_id": "patient-uuid",
+  "tenant_id": "tenant-uuid",
+  "branch_id": "branch-uuid",
+  "requested_by": "Dr. Smith",
+  "notes": "...",
+  "billed_lock": false,
+  "assignees": [
+    { "id": "user-uuid-1", "name": "Lab Tech 1", "email": "tech1@lab.com", "avatar_url": null },
+    { "id": "user-uuid-2", "name": "Lab Tech 2", "email": "tech2@lab.com", "avatar_url": null }
+  ],
+  "reviewers": [],
+  "labels": []
+}
+```
+
+**Notes:**
+- Replaces the entire list of assignees
+- Generates ASSIGNEES_ADDED/ASSIGNEES_REMOVED events based on diff
+- Users must belong to the same tenant
+- Send empty array to remove all assignees
+
+### PUT /api/v1/laboratory/orders/{order_id}/reviewers
+**Update reviewers for an order**
+
+**Request Body:**
+```json
+{
+  "reviewer_ids": ["pathologist-uuid"]
+}
+```
+
+**Response:**
+```json
+{
+  "id": "order-uuid",
+  "order_code": "ORD001",
+  "status": "RECEIVED",
+  "patient_id": "patient-uuid",
+  "tenant_id": "tenant-uuid",
+  "branch_id": "branch-uuid",
+  "requested_by": "Dr. Smith",
+  "notes": "...",
+  "billed_lock": false,
+  "assignees": [],
+  "reviewers": [
+    { "id": "pathologist-uuid", "name": "Dr. Pathologist", "email": "path@lab.com", "avatar_url": null }
+  ],
+  "labels": []
+}
+```
+
+**Notes:**
+- Replaces the entire list of reviewers
+- Generates REVIEWERS_ADDED/REVIEWERS_REMOVED events based on diff
+- Reviewers are required before an order can move to REVIEW status
+- Users must belong to the same tenant
+
+### PUT /api/v1/laboratory/orders/{order_id}/labels
+**Update labels for an order**
+
+**Request Body:**
+```json
+{
+  "label_ids": ["label-uuid-1", "label-uuid-2"]
+}
+```
+
+**Response:**
+```json
+{
+  "id": "order-uuid",
+  "order_code": "ORD001",
+  "status": "RECEIVED",
+  "patient_id": "patient-uuid",
+  "tenant_id": "tenant-uuid",
+  "branch_id": "branch-uuid",
+  "requested_by": "Dr. Smith",
+  "notes": "...",
+  "billed_lock": false,
+  "assignees": [],
+  "reviewers": [],
+  "labels": [
+    { "id": "label-uuid-1", "name": "Urgent", "color": "#FF0000", "tenant_id": "tenant-uuid", "created_at": "2025-01-01T00:00:00Z" },
+    { "id": "label-uuid-2", "name": "VIP", "color": "#FFD700", "tenant_id": "tenant-uuid", "created_at": "2025-01-02T00:00:00Z" }
+  ]
+}
+```
+
+**Notes:**
+- Replaces the entire list of labels
+- Generates LABELS_ADDED/LABELS_REMOVED events based on diff
+- Labels must belong to the same tenant
+- Order labels are inherited by samples
+
+### PUT /api/v1/laboratory/samples/{sample_id}/assignees
+**Update assignees for a sample**
+
+**Request Body:**
+```json
+{
+  "assignee_ids": ["user-uuid-1"]
+}
+```
+
+**Response:**
+```json
+{
+  "id": "sample-uuid",
+  "sample_code": "SAMP001",
+  "type": "SANGRE",
+  "state": "RECEIVED",
+  "collected_at": "2025-08-18T10:00:00Z",
+  "received_at": "2025-08-18T11:00:00Z",
+  "notes": "...",
+  "tenant_id": "tenant-uuid",
+  "branch": { "id": "branch-uuid", "name": "Main Branch", "code": "MAIN" },
+  "order": { "id": "order-uuid", "order_code": "ORD001", "status": "RECEIVED" },
+  "patient": { "id": "patient-uuid", "full_name": "John Doe", "patient_code": "P001" },
+  "assignees": [
+    { "id": "user-uuid-1", "name": "Lab Tech 1", "email": "tech1@lab.com", "avatar_url": null }
+  ],
+  "labels": []
+}
+```
+
+**Notes:**
+- Replaces the entire list of sample assignees
+- Generates ASSIGNEES_ADDED/ASSIGNEES_REMOVED events
+- Users must belong to the same tenant
+
+### PUT /api/v1/laboratory/samples/{sample_id}/labels
+**Update additional labels for a sample**
+
+**Request Body:**
+```json
+{
+  "label_ids": ["label-uuid-3"]
+}
+```
+
+**Response:**
+```json
+{
+  "id": "sample-uuid",
+  "sample_code": "SAMP001",
+  "type": "SANGRE",
+  "state": "RECEIVED",
+  "tenant_id": "tenant-uuid",
+  "branch": { "id": "branch-uuid", "name": "Main Branch", "code": "MAIN" },
+  "order": { "id": "order-uuid", "order_code": "ORD001", "status": "RECEIVED" },
+  "patient": { "id": "patient-uuid", "full_name": "John Doe", "patient_code": "P001" },
+  "assignees": [],
+  "labels": [
+    { "id": "label-uuid-1", "name": "Urgent", "color": "#FF0000", "inherited": true },
+    { "id": "label-uuid-3", "name": "Reprocess", "color": "#0000FF", "inherited": false }
+  ]
+}
+```
+
+**Notes:**
+- These are ADDITIONAL labels specific to the sample
+- Labels from the parent order are inherited automatically and marked with `inherited: true`
+- Generates LABELS_ADDED/LABELS_REMOVED events
 
 ## 📚 Data Models
 
