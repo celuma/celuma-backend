@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from sqlmodel import select, Session
+from sqlmodel import select, Session, and_
+from sqlalchemy import cast, String
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.models.report import Report, ReportVersion, ReportTemplate
@@ -9,7 +10,9 @@ from app.models.patient import Patient
 from app.models.storage import StorageObject
 from app.models.user import AppUser
 from app.models.audit import AuditLog
-from app.models.enums import ReportStatus, UserRole
+from app.models.enums import ReportStatus, UserRole, AssignmentItemType, ReviewStatus
+from app.models.assignment import Assignment
+from app.models.report_review import ReportReview
 from app.services.s3 import S3Service
 from app.schemas.report import (
     ReportCreate, 
@@ -46,6 +49,58 @@ def update_order_status_for_report(order_id: str, session: Session) -> None:
     """Wrapper to update order status after report changes"""
     from app.api.v1.laboratory import update_order_status
     update_order_status(order_id, session)
+
+
+def _sync_order_reviewers_to_report(session: Session, order: LabOrder, report: Report) -> None:
+    """
+    Sync reviewers from order's Assignment table to ReportReview table.
+    Called when a report is created - migrates any pending reviewers.
+    """
+    # Find all reviewer assignments for this order
+    reviewer_assignments = session.exec(
+        select(Assignment).where(
+            and_(
+                Assignment.tenant_id == order.tenant_id,
+                cast(Assignment.item_type, String) == AssignmentItemType.LAB_ORDER.value,
+                Assignment.item_id == order.id,
+                Assignment.is_reviewer == True,
+                Assignment.unassigned_at.is_(None),
+            )
+        )
+    ).all()
+    
+    # Create report_review for each reviewer
+    for assignment in reviewer_assignments:
+        # Check if review already exists (shouldn't, but safety check)
+        existing = session.exec(
+            select(ReportReview).where(
+                and_(
+                    ReportReview.tenant_id == report.tenant_id,
+                    ReportReview.report_id == report.id,
+                    ReportReview.reviewer_user_id == assignment.assignee_user_id,
+                )
+            )
+        ).first()
+        
+        if not existing:
+            review = ReportReview(
+                tenant_id=report.tenant_id,
+                report_id=report.id,
+                reviewer_user_id=assignment.assignee_user_id,
+                assigned_by_user_id=assignment.assigned_by_user_id,
+                status=ReviewStatus.PENDING,
+            )
+            session.add(review)
+            
+            logger.info(
+                f"Created report_review for report {report.id}, reviewer {assignment.assignee_user_id}",
+                extra={
+                    "event": "report_review.created",
+                    "report_id": str(report.id),
+                    "reviewer_id": str(assignment.assignee_user_id),
+                }
+            )
+
 
 @router.get("/", response_model=ReportsListResponse)
 def list_reports(
@@ -184,6 +239,9 @@ def create_report(
     # Update order status based on report creation (PROCESSING -> DIAGNOSIS)
     update_order_status_for_report(str(report.order_id), session)
     
+    # Sync reviewers from order's assignment table to report_review
+    _sync_order_reviewers_to_report(session, order, report)
+    
     session.commit()
     session.refresh(report)
     
@@ -299,6 +357,19 @@ def create_report_new_version(
     )
     session.add(new_version)
     
+    # Reset all review statuses to pending when new version is created
+    reviews = session.exec(
+        select(ReportReview).where(ReportReview.report_id == report.id)
+    ).all()
+    
+    reviewer_count = 0
+    for review in reviews:
+        review.status = ReviewStatus.PENDING
+        review.decision_at = None
+        review.comment = None
+        session.add(review)
+        reviewer_count += 1
+    
     # Create timeline event for new version
     from app.models.events import CaseEvent
     from app.models.enums import EventType
@@ -313,6 +384,7 @@ def create_report_new_version(
             "report_id": str(report.id),
             "report_title": report.title,
             "version_no": next_version_no,
+            "reviews_reset": reviewer_count,
         },
         created_by=report_data.created_by,
     )
@@ -1007,10 +1079,19 @@ def submit_report(
     if report.status != ReportStatus.DRAFT:
         raise HTTPException(400, f"Cannot submit report in {report.status} status")
     
-    # Validate that order has reviewers assigned
-    order = session.get(LabOrder, report.order_id)
-    if not order or not order.reviewers or len(order.reviewers) == 0:
-        raise HTTPException(400, "Cannot submit report for review without reviewers assigned to the order")
+    # Validate that report has reviewers assigned (in report_review table)
+    reviewers = session.exec(
+        select(ReportReview).where(
+            and_(
+                ReportReview.tenant_id == report.tenant_id,
+                ReportReview.report_id == report.id,
+                ReportReview.status == ReviewStatus.PENDING,
+            )
+        )
+    ).all()
+    
+    if not reviewers or len(reviewers) == 0:
+        raise HTTPException(400, "Cannot submit report for review without reviewers assigned")
     
     # Update status
     old_status = report.status
@@ -1079,11 +1160,15 @@ def approve_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Approve a report (IN_REVIEW → APPROVED) - Pathologist only"""
-    # Check user role
-    if user.role != UserRole.PATHOLOGIST:
-        raise HTTPException(403, "Only pathologists can approve reports")
+    """
+    Approve a report (IN_REVIEW → APPROVED).
     
+    The user must be either:
+    - A pathologist (can approve any report)
+    - An assigned reviewer for this report
+    
+    Updates the user's review record and applies MVP rule: ≥1 approved = report approved.
+    """
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
@@ -1094,7 +1179,28 @@ def approve_report(
     if report.status != ReportStatus.IN_REVIEW:
         raise HTTPException(400, f"Cannot approve report in {report.status} status")
     
-    # Update status
+    # Check if user has a pending review for this report
+    user_review = session.exec(
+        select(ReportReview).where(
+            and_(
+                ReportReview.tenant_id == report.tenant_id,
+                ReportReview.report_id == report.id,
+                ReportReview.reviewer_user_id == user.id,
+                ReportReview.status == ReviewStatus.PENDING,
+            )
+        )
+    ).first()
+    
+    # If user has a review, update it; otherwise check if they're a pathologist
+    if user_review:
+        user_review.status = ReviewStatus.APPROVED
+        user_review.decision_at = datetime.utcnow()
+        user_review.comment = data.changelog if data.changelog else None
+        session.add(user_review)
+    elif user.role != UserRole.PATHOLOGIST:
+        raise HTTPException(403, "Only assigned reviewers or pathologists can approve reports")
+    
+    # Update report status (MVP rule: ≥1 approved = report approved)
     old_status = report.status
     report.status = ReportStatus.APPROVED
     session.add(report)
@@ -1112,15 +1218,35 @@ def approve_report(
         new_values={"status": report.status, "changelog": data.changelog},
     )
     
+    # Create timeline event for report approval
+    from app.models.events import CaseEvent
+    from app.models.enums import EventType
+    
+    approve_event = CaseEvent(
+        tenant_id=report.tenant_id,
+        branch_id=report.branch_id,
+        order_id=report.order_id,
+        event_type=EventType.REPORT_APPROVED,
+        description="",  # Not used - message built in UI
+        event_metadata={
+            "report_id": str(report.id),
+            "report_title": report.title,
+            "approved_by": str(user.id),
+        },
+        created_by=user.id,
+    )
+    session.add(approve_event)
+    
     session.commit()
     session.refresh(report)
     
     logger.info(
-        f"Report {report_id} approved by pathologist {ctx.user_id}",
+        f"Report {report_id} approved by user {ctx.user_id}",
         extra={
             "event": "report.approve",
             "report_id": report_id,
             "user_id": ctx.user_id,
+            "had_review": user_review is not None,
         },
     )
     
@@ -1139,11 +1265,15 @@ def request_changes(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Request changes on a report (IN_REVIEW → DRAFT) - Pathologist only"""
-    # Check user role
-    if user.role != UserRole.PATHOLOGIST:
-        raise HTTPException(403, "Only pathologists can request changes")
+    """
+    Request changes on a report (IN_REVIEW → DRAFT).
     
+    The user must be either:
+    - A pathologist (can request changes on any report)
+    - An assigned reviewer for this report
+    
+    Updates the user's review record to REJECTED with comment.
+    """
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
@@ -1153,6 +1283,27 @@ def request_changes(
     
     if report.status != ReportStatus.IN_REVIEW:
         raise HTTPException(400, f"Cannot request changes for report in {report.status} status")
+    
+    # Check if user has a pending review for this report
+    user_review = session.exec(
+        select(ReportReview).where(
+            and_(
+                ReportReview.tenant_id == report.tenant_id,
+                ReportReview.report_id == report.id,
+                ReportReview.reviewer_user_id == user.id,
+                ReportReview.status == ReviewStatus.PENDING,
+            )
+        )
+    ).first()
+    
+    # If user has a review, update it; otherwise check if they're a pathologist
+    if user_review:
+        user_review.status = ReviewStatus.REJECTED
+        user_review.decision_at = datetime.utcnow()
+        user_review.comment = data.comment
+        session.add(user_review)
+    elif user.role != UserRole.PATHOLOGIST:
+        raise HTTPException(403, "Only assigned reviewers or pathologists can request changes")
     
     # Update status back to DRAFT
     old_status = report.status

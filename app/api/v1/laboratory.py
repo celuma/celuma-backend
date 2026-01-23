@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Set
 from uuid import UUID
-from sqlmodel import select, Session
+from sqlmodel import select, Session, and_
+from sqlalchemy import cast, String
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.models.laboratory import LabOrder, Sample, SampleImage, Label, LabOrderLabel, SampleLabel
@@ -11,7 +12,10 @@ from app.models.patient import Patient
 from app.models.report import Report, ReportVersion
 from app.models.user import AppUser
 from app.models.events import CaseEvent
-from app.models.enums import EventType, SampleState
+from app.models.enums import EventType, SampleState, AssignmentItemType, ReviewStatus
+from app.models.assignment import Assignment
+from app.models.report_review import ReportReview
+from datetime import datetime
 from app.schemas.laboratory import (
     LabOrderCreate,
     LabOrderResponse,
@@ -54,6 +58,7 @@ from app.schemas.laboratory import (
     ReviewersUpdate,
     LabelsUpdate,
     UserRef,
+    ReviewerWithStatus,
 )
 from app.schemas.report import ReportMetaResponse
 from app.schemas.patient import PatientFullResponse
@@ -132,7 +137,16 @@ def update_order_status(order_id: str, session: Session) -> None:
             
             if latest_report.status in [ReportStatus.IN_REVIEW, ReportStatus.RETRACTED]:
                 # Validate reviewers are assigned before moving to REVIEW
-                if not order.reviewers or len(order.reviewers) == 0:
+                # Check in ReportReview table for the report
+                reviewer_count = session.exec(
+                    select(ReportReview).where(
+                        and_(
+                            ReportReview.report_id == latest_report.id,
+                            ReportReview.status == ReviewStatus.PENDING,
+                        )
+                    )
+                ).all()
+                if not reviewer_count or len(reviewer_count) == 0:
                     raise HTTPException(400, "Cannot move to REVIEW status without reviewers assigned")
                 new_status = OrderStatus.REVIEW
             elif latest_report.status == ReportStatus.PUBLISHED:
@@ -248,15 +262,11 @@ def get_order(
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Order not found")
     
-    # Get assignees
-    assignee_users = []
-    if order.assignees:
-        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(order.assignees))).all()
+    # Get assignees from Assignment table
+    assignee_users = _get_order_assignees(session, order.id, ctx.tenant_id, is_reviewer=False)
     
-    # Get reviewers
-    reviewer_users = []
-    if order.reviewers:
-        reviewer_users = session.exec(select(AppUser).where(AppUser.id.in_(order.reviewers))).all()
+    # Get reviewers with status from Assignment + ReportReview tables
+    reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
     
     # Get labels
     label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
@@ -275,7 +285,7 @@ def get_order(
         notes=order.notes,
         billed_lock=order.billed_lock,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
-        reviewers=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in reviewer_users],
+        reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
     )
 
@@ -656,10 +666,8 @@ def get_sample_detail(
     order = session.get(LabOrder, s.order_id)
     patient = session.get(Patient, order.patient_id) if order else None
 
-    # Get assignees
-    assignee_users = []
-    if s.assignees:
-        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(s.assignees))).all()
+    # Get assignees from Assignment table
+    assignee_users = _get_sample_assignees(session, s.id, ctx.tenant_id)
     
     # Get labels (inherited from order + own labels)
     order_label_ids = set(
@@ -1404,15 +1412,11 @@ def get_order_full_detail(
     # Fetch samples for this order
     samples = session.exec(select(Sample).where(Sample.order_id == order.id)).all()
 
-    # Get assignees
-    assignee_users = []
-    if order.assignees:
-        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(order.assignees))).all()
+    # Get assignees from Assignment table
+    assignee_users = _get_order_assignees(session, order.id, ctx.tenant_id, is_reviewer=False)
     
-    # Get reviewers
-    reviewer_users = []
-    if order.reviewers:
-        reviewer_users = session.exec(select(AppUser).where(AppUser.id.in_(order.reviewers))).all()
+    # Get reviewers with status from Assignment + ReportReview tables
+    reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
     
     # Get labels
     label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
@@ -1432,7 +1436,7 @@ def get_order_full_detail(
         notes=order.notes,
         billed_lock=order.billed_lock,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
-        reviewers=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in reviewer_users],
+        reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
     )
 
@@ -1885,6 +1889,162 @@ def delete_label(
     return {"message": "Label deleted successfully"}
 
 
+# === Helper functions for assignments ===
+
+def _get_order_assignees(session: Session, order_id: UUID, tenant_id: str, is_reviewer: bool = False) -> List[AppUser]:
+    """Get assignees or reviewers for an order from Assignment table"""
+    assignments = session.exec(
+        select(Assignment).where(
+            and_(
+                Assignment.tenant_id == UUID(tenant_id),
+                cast(Assignment.item_type, String) == AssignmentItemType.LAB_ORDER.value,
+                Assignment.item_id == order_id,
+                Assignment.is_reviewer == is_reviewer,
+                Assignment.unassigned_at.is_(None),
+            )
+        )
+    ).all()
+    
+    if not assignments:
+        return []
+    
+    user_ids = [a.assignee_user_id for a in assignments]
+    return list(session.exec(select(AppUser).where(AppUser.id.in_(user_ids))).all())
+
+
+def _get_order_reviewers_with_status(session: Session, order_id: UUID, tenant_id: str) -> List[ReviewerWithStatus]:
+    """Get reviewers for an order with their review status from ReportReview table"""
+    # Get reviewer assignments
+    assignments = session.exec(
+        select(Assignment).where(
+            and_(
+                Assignment.tenant_id == UUID(tenant_id),
+                cast(Assignment.item_type, String) == AssignmentItemType.LAB_ORDER.value,
+                Assignment.item_id == order_id,
+                Assignment.is_reviewer == True,
+                Assignment.unassigned_at.is_(None),
+            )
+        )
+    ).all()
+    
+    if not assignments:
+        return []
+    
+    user_ids = [a.assignee_user_id for a in assignments]
+    users = session.exec(select(AppUser).where(AppUser.id.in_(user_ids))).all()
+    
+    # Get the report for this order (if exists)
+    report = session.exec(select(Report).where(Report.order_id == order_id)).first()
+    
+    reviewers_with_status = []
+    for user in users:
+        status = "pending"
+        review_id = None
+        
+        # If report exists, get the review status
+        if report:
+            review = session.exec(
+                select(ReportReview).where(
+                    and_(
+                        ReportReview.report_id == report.id,
+                        ReportReview.reviewer_user_id == user.id,
+                    )
+                )
+            ).first()
+            
+            if review:
+                status = review.status.value if hasattr(review.status, 'value') else str(review.status)
+                review_id = str(review.id)
+        
+        reviewers_with_status.append(
+            ReviewerWithStatus(
+                id=str(user.id),
+                name=user.full_name or user.username,
+                email=user.email,
+                avatar_url=user.avatar_url,
+                status=status,
+                review_id=review_id,
+            )
+        )
+    
+    return reviewers_with_status
+
+
+def _get_sample_assignees(session: Session, sample_id: UUID, tenant_id: str) -> List[AppUser]:
+    """Get assignees for a sample from Assignment table"""
+    assignments = session.exec(
+        select(Assignment).where(
+            and_(
+                Assignment.tenant_id == UUID(tenant_id),
+                cast(Assignment.item_type, String) == AssignmentItemType.SAMPLE.value,
+                Assignment.item_id == sample_id,
+                Assignment.is_reviewer == False,
+                Assignment.unassigned_at.is_(None),
+            )
+        )
+    ).all()
+    
+    if not assignments:
+        return []
+    
+    user_ids = [a.assignee_user_id for a in assignments]
+    return list(session.exec(select(AppUser).where(AppUser.id.in_(user_ids))).all())
+
+
+def _sync_assignments(
+    session: Session,
+    tenant_id: UUID,
+    item_type: AssignmentItemType,
+    item_id: UUID,
+    new_user_ids: Set[UUID],
+    assigned_by_user_id: UUID,
+    is_reviewer: bool = False,
+) -> tuple[Set[UUID], Set[UUID]]:
+    """
+    Synchronize assignments for an item. Returns (added_ids, removed_ids).
+    """
+    # Get current active assignments
+    # Use cast to compare enum as string
+    item_type_value = item_type.value if hasattr(item_type, 'value') else str(item_type)
+    current_assignments = session.exec(
+        select(Assignment).where(
+            and_(
+                Assignment.tenant_id == tenant_id,
+                cast(Assignment.item_type, String) == item_type_value,
+                Assignment.item_id == item_id,
+                Assignment.is_reviewer == is_reviewer,
+                Assignment.unassigned_at.is_(None),
+            )
+        )
+    ).all()
+    
+    current_user_ids = {a.assignee_user_id for a in current_assignments}
+    
+    # Calculate diff
+    added = new_user_ids - current_user_ids
+    removed = current_user_ids - new_user_ids
+    
+    # Remove old assignments (soft delete)
+    for assignment in current_assignments:
+        if assignment.assignee_user_id in removed:
+            assignment.unassigned_at = datetime.utcnow()
+            session.add(assignment)
+    
+    # Add new assignments
+    for user_id in added:
+        assignment = Assignment(
+            tenant_id=tenant_id,
+            item_type=item_type,
+            item_id=item_id,
+            assignee_user_id=user_id,
+            assigned_by_user_id=assigned_by_user_id,
+            is_reviewer=is_reviewer,
+        )
+        session.add(assignment)
+    
+    return added, removed
+
+
 # --- Order Assignees Endpoint ---
 
 @router.put("/orders/{order_id}/assignees", response_model=LabOrderDetailResponse)
@@ -1895,7 +2055,7 @@ def update_order_assignees(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update assignees for an order"""
+    """Update assignees for an order (uses Assignment table)"""
     # Verify order exists and belongs to tenant
     order = session.get(LabOrder, order_id)
     if not order:
@@ -1905,21 +2065,23 @@ def update_order_assignees(
         raise HTTPException(403, "Order does not belong to your tenant")
     
     # Validate all assignee IDs belong to tenant
-    new_assignees = [UUID(aid) for aid in data.assignee_ids]
-    for assignee_id in new_assignees:
-        assignee_user = session.get(AppUser, assignee_id)
+    new_assignees = set()
+    for aid in data.assignee_ids:
+        assignee_user = session.get(AppUser, UUID(aid))
         if not assignee_user or str(assignee_user.tenant_id) != ctx.tenant_id:
-            raise HTTPException(400, f"User {assignee_id} not found or not in tenant")
+            raise HTTPException(400, f"User {aid} not found or not in tenant")
+        new_assignees.add(UUID(aid))
     
-    # Calculate diff
-    old_assignees = set(order.assignees or [])
-    new_assignees_set = set(new_assignees)
-    added = new_assignees_set - old_assignees
-    removed = old_assignees - new_assignees_set
-    
-    # Update order
-    order.assignees = new_assignees if new_assignees else None
-    session.add(order)
+    # Sync assignments
+    added, removed = _sync_assignments(
+        session=session,
+        tenant_id=UUID(ctx.tenant_id),
+        item_type=AssignmentItemType.LAB_ORDER,
+        item_id=order.id,
+        new_user_ids=new_assignees,
+        assigned_by_user_id=user.id,
+        is_reviewer=False,
+    )
     
     # Generate events if there were changes
     if added:
@@ -1955,12 +2117,9 @@ def update_order_assignees(
         session.add(event)
     
     session.commit()
-    session.refresh(order)
     
     # Build response with user details
-    assignee_users = []
-    if order.assignees:
-        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(order.assignees))).all()
+    assignee_users = _get_order_assignees(session, order.id, ctx.tenant_id, is_reviewer=False)
     
     return LabOrderDetailResponse(
         id=str(order.id),
@@ -1988,7 +2147,12 @@ def update_order_reviewers(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update reviewers for an order"""
+    """
+    Update reviewers for an order.
+    
+    Uses Assignment table with is_reviewer=True.
+    If a report exists for this order, also syncs to report_review table.
+    """
     # Verify order exists and belongs to tenant
     order = session.get(LabOrder, order_id)
     if not order:
@@ -1998,21 +2162,38 @@ def update_order_reviewers(
         raise HTTPException(403, "Order does not belong to your tenant")
     
     # Validate all reviewer IDs belong to tenant
-    new_reviewers = [UUID(rid) for rid in data.reviewer_ids]
-    for reviewer_id in new_reviewers:
-        reviewer_user = session.get(AppUser, reviewer_id)
+    new_reviewers = set()
+    for rid in data.reviewer_ids:
+        reviewer_user = session.get(AppUser, UUID(rid))
         if not reviewer_user or str(reviewer_user.tenant_id) != ctx.tenant_id:
-            raise HTTPException(400, f"User {reviewer_id} not found or not in tenant")
+            raise HTTPException(400, f"User {rid} not found or not in tenant")
+        new_reviewers.add(UUID(rid))
     
-    # Calculate diff
-    old_reviewers = set(order.reviewers or [])
-    new_reviewers_set = set(new_reviewers)
-    added = new_reviewers_set - old_reviewers
-    removed = old_reviewers - new_reviewers_set
+    # Sync assignments (reviewers for order)
+    added, removed = _sync_assignments(
+        session=session,
+        tenant_id=UUID(ctx.tenant_id),
+        item_type=AssignmentItemType.LAB_ORDER,
+        item_id=order.id,
+        new_user_ids=new_reviewers,
+        assigned_by_user_id=user.id,
+        is_reviewer=True,
+    )
     
-    # Update order
-    order.reviewers = new_reviewers if new_reviewers else None
-    session.add(order)
+    # Check if report exists for this order - if so, sync to report_review
+    report = session.exec(
+        select(Report).where(Report.order_id == order.id)
+    ).first()
+    
+    if report:
+        # Sync reviewers to report_review table
+        _sync_report_reviewers(
+            session=session,
+            tenant_id=UUID(ctx.tenant_id),
+            report_id=report.id,
+            new_reviewer_ids=new_reviewers,
+            assigned_by_user_id=user.id,
+        )
     
     # Generate events if there were changes
     if added:
@@ -2048,12 +2229,9 @@ def update_order_reviewers(
         session.add(event)
     
     session.commit()
-    session.refresh(order)
     
-    # Build response with user details
-    reviewer_users = []
-    if order.reviewers:
-        reviewer_users = session.exec(select(AppUser).where(AppUser.id.in_(order.reviewers))).all()
+    # Build response with reviewers with status from Assignment + ReportReview tables
+    reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
     
     return LabOrderDetailResponse(
         id=str(order.id),
@@ -2066,9 +2244,47 @@ def update_order_reviewers(
         notes=order.notes,
         billed_lock=order.billed_lock,
         assignees=None,
-        reviewers=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in reviewer_users],
+        reviewers=reviewers_with_status,
         labels=None,
     )
+
+
+def _sync_report_reviewers(
+    session: Session,
+    tenant_id: UUID,
+    report_id: UUID,
+    new_reviewer_ids: Set[UUID],
+    assigned_by_user_id: UUID,
+) -> None:
+    """
+    Sync reviewers to report_review table.
+    Only creates new pending reviews for added reviewers.
+    Does NOT remove existing reviews (they have decision history).
+    """
+    # Get current pending reviews
+    current_reviews = session.exec(
+        select(ReportReview).where(
+            and_(
+                ReportReview.tenant_id == tenant_id,
+                ReportReview.report_id == report_id,
+                ReportReview.status == ReviewStatus.PENDING,
+            )
+        )
+    ).all()
+    
+    current_reviewer_ids = {r.reviewer_user_id for r in current_reviews}
+    
+    # Add new reviewers
+    added = new_reviewer_ids - current_reviewer_ids
+    for reviewer_id in added:
+        review = ReportReview(
+            tenant_id=tenant_id,
+            report_id=report_id,
+            reviewer_user_id=reviewer_id,
+            assigned_by_user_id=assigned_by_user_id,
+            status=ReviewStatus.PENDING,
+        )
+        session.add(review)
 
 
 # --- Order Labels Endpoint ---
@@ -2186,7 +2402,7 @@ def update_sample_assignees(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update assignees for a sample"""
+    """Update assignees for a sample (uses Assignment table)"""
     # Verify sample exists and belongs to tenant
     sample = session.get(Sample, sample_id)
     if not sample:
@@ -2196,21 +2412,23 @@ def update_sample_assignees(
         raise HTTPException(403, "Sample does not belong to your tenant")
     
     # Validate all assignee IDs belong to tenant
-    new_assignees = [UUID(aid) for aid in data.assignee_ids]
-    for assignee_id in new_assignees:
-        assignee_user = session.get(AppUser, assignee_id)
+    new_assignees = set()
+    for aid in data.assignee_ids:
+        assignee_user = session.get(AppUser, UUID(aid))
         if not assignee_user or str(assignee_user.tenant_id) != ctx.tenant_id:
-            raise HTTPException(400, f"User {assignee_id} not found or not in tenant")
+            raise HTTPException(400, f"User {aid} not found or not in tenant")
+        new_assignees.add(UUID(aid))
     
-    # Calculate diff
-    old_assignees = set(sample.assignees or [])
-    new_assignees_set = set(new_assignees)
-    added = new_assignees_set - old_assignees
-    removed = old_assignees - new_assignees_set
-    
-    # Update sample
-    sample.assignees = new_assignees if new_assignees else None
-    session.add(sample)
+    # Sync assignments
+    added, removed = _sync_assignments(
+        session=session,
+        tenant_id=UUID(ctx.tenant_id),
+        item_type=AssignmentItemType.SAMPLE,
+        item_id=sample.id,
+        new_user_ids=new_assignees,
+        assigned_by_user_id=user.id,
+        is_reviewer=False,
+    )
     
     # Generate events if there were changes
     if added:
@@ -2250,17 +2468,14 @@ def update_sample_assignees(
         session.add(event)
     
     session.commit()
-    session.refresh(sample)
     
     # Build full response
     order = session.get(LabOrder, sample.order_id)
     branch = session.get(Branch, sample.branch_id)
     patient = session.get(Patient, order.patient_id if order else None)
     
-    # Get assignees
-    assignee_users = []
-    if sample.assignees:
-        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(sample.assignees))).all()
+    # Get assignees from Assignment table
+    assignee_users = _get_sample_assignees(session, sample.id, ctx.tenant_id)
     
     # Get labels (inherited + own) - will implement full logic later
     labels = []

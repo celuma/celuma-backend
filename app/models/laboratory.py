@@ -2,13 +2,16 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field, Relationship, Column
-from sqlalchemy import JSON, ARRAY
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy import JSON
 from .base import BaseModel, TimestampMixin, TenantMixin, BranchMixin
 from .enums import OrderStatus, SampleType, SampleState
 
 class LabOrder(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
-    """Laboratory order model"""
+    """Laboratory order model
+    
+    Note: Assignees and reviewers are now stored in the 'assignment' table.
+    Use the Assignment model to query/manage assignees and reviewers.
+    """
     __tablename__ = "lab_order"
     
     id: UUID = Field(default_factory=uuid4, primary_key=True)
@@ -21,14 +24,17 @@ class LabOrder(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     notes: Optional[str] = Field(default=None)
     billed_lock: bool = Field(default=False)  # Lock release if no payment
     created_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
-    assignees: Optional[List[UUID]] = Field(default=None, sa_column=Column(ARRAY(PG_UUID(as_uuid=True))))
-    reviewers: Optional[List[UUID]] = Field(default=None, sa_column=Column(ARRAY(PG_UUID(as_uuid=True))))
+    # NOTE: assignees and reviewers columns removed - now in 'assignment' table
     
     # Basic relationships only
     samples: List["Sample"] = Relationship(back_populates="order")
 
 class Sample(BaseModel, TenantMixin, BranchMixin, table=True):
-    """Sample model for laboratory samples"""
+    """Sample model for laboratory samples
+    
+    Note: Assignees are now stored in the 'assignment' table.
+    Use the Assignment model to query/manage assignees.
+    """
     __tablename__ = "sample"
     
     id: UUID = Field(default_factory=uuid4, primary_key=True)
@@ -41,7 +47,7 @@ class Sample(BaseModel, TenantMixin, BranchMixin, table=True):
     collected_at: Optional[datetime] = Field(default=None)
     received_at: Optional[datetime] = Field(default=None)
     notes: Optional[str] = Field(default=None)
-    assignees: Optional[List[UUID]] = Field(default=None, sa_column=Column(ARRAY(PG_UUID(as_uuid=True))))
+    # NOTE: assignees column removed - now in 'assignment' table
     
     # Basic relationships only
     order: LabOrder = Relationship(back_populates="samples")

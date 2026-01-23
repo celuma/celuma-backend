@@ -15,6 +15,12 @@ class UserRef(BaseModel):
     avatar_url: Optional[str] = None
 
 
+class ReviewerWithStatus(UserRef):
+    """User reference with review status for reviewers"""
+    status: str  # "pending", "approved", "rejected"
+    review_id: Optional[str] = None
+
+
 # --- Label Schemas (defined early) ---
 
 class LabelResponse(BaseModel):
@@ -64,7 +70,7 @@ class LabOrderDetailResponse(BaseModel):
     notes: Optional[str] = None
     billed_lock: Optional[bool] = None
     assignees: Optional[List[UserRef]] = None
-    reviewers: Optional[List[UserRef]] = None
+    reviewers: Optional[List[ReviewerWithStatus]] = None
     labels: Optional[List[LabelResponse]] = None
 
 
