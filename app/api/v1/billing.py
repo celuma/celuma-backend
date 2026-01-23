@@ -4,7 +4,7 @@ from typing import List
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.models.billing import Invoice, Payment, ServiceCatalog, InvoiceItem
-from app.models.laboratory import LabOrder
+from app.models.laboratory import Order
 from app.models.tenant import Tenant, Branch
 from app.models.user import AppUser
 from app.models.enums import PaymentStatus, UserRole
@@ -69,7 +69,7 @@ def update_order_payment_lock(session: Session, order_id: str) -> None:
     total_balance = sum(calculate_invoice_balance(session, str(inv.id)) for inv in invoices)
     
     # Update order lock
-    order = session.get(LabOrder, order_id)
+    order = session.get(Order, order_id)
     if order:
         order.billed_lock = total_balance > 0
         session.add(order)
@@ -114,7 +114,7 @@ def create_invoice(invoice_data: InvoiceCreate, session: Session = Depends(get_s
     if not branch:
         raise HTTPException(404, "Branch not found")
     
-    order = session.get(LabOrder, invoice_data.order_id)
+    order = session.get(Order, invoice_data.order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     
@@ -385,7 +385,7 @@ def get_order_balance(
     ctx: AuthContext = Depends(get_auth_ctx),
 ):
     """Get payment balance for an order"""
-    order = session.get(LabOrder, order_id)
+    order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     

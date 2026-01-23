@@ -21,11 +21,11 @@ from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.models.user import AppUser
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
-from app.models.laboratory import LabOrder, Sample, OrderComment
+from app.models.laboratory import Order, Sample, OrderComment
 from app.models.report import Report
 from app.models.patient import Patient
 from app.models.enums import AssignmentItemType, ReviewStatus, ReportStatus, EventType
-from app.models.events import CaseEvent
+from app.models.events import OrderEvent
 from app.schemas.worklist import (
     AssignmentCreate,
     AssignmentResponse,
@@ -95,7 +95,6 @@ def get_my_worklist(
                 Assignment.tenant_id == UUID(ctx.tenant_id),
                 Assignment.assignee_user_id == user.id,
                 Assignment.unassigned_at.is_(None),
-                Assignment.is_reviewer == False  # Only regular assignments, not order reviewers
             )
         )
         
@@ -155,7 +154,7 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
     item_type = assignment.item_type.value if hasattr(assignment.item_type, 'value') else str(assignment.item_type)
     
     if item_type == "lab_order":
-        order = session.get(LabOrder, assignment.item_id)
+        order = session.get(Order, assignment.item_id)
         if not order:
             return None
         patient = session.get(Patient, order.patient_id)
@@ -177,7 +176,7 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
         sample = session.get(Sample, assignment.item_id)
         if not sample:
             return None
-        order = session.get(LabOrder, sample.order_id)
+        order = session.get(Order, sample.order_id)
         patient = session.get(Patient, order.patient_id) if order else None
         return WorklistItemResponse(
             id=str(assignment.id),
@@ -197,7 +196,7 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
         report = session.get(Report, assignment.item_id)
         if not report:
             return None
-        order = session.get(LabOrder, report.order_id)
+        order = session.get(Order, report.order_id)
         patient = session.get(Patient, order.patient_id) if order else None
         return WorklistItemResponse(
             id=str(assignment.id),
@@ -218,25 +217,29 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
 
 def _build_review_worklist_item(session: Session, review: ReportReview) -> Optional[WorklistItemResponse]:
     """Build a WorklistItemResponse from a ReportReview"""
-    report = session.get(Report, review.report_id)
-    if not report:
+    order = session.get(Order, review.order_id)
+    if not order:
         return None
     
-    order = session.get(LabOrder, report.order_id)
+    # Get report for this order (if exists)
+    report = session.exec(
+        select(Report).where(Report.order_id == review.order_id)
+    ).first()
+    
     patient = session.get(Patient, order.patient_id) if order else None
     
     return WorklistItemResponse(
         id=str(review.id),
         kind="review",
-        item_type="report",
-        item_id=str(review.report_id),
-        display_id=report.title or order.order_code if order else str(review.report_id),
+        item_type="lab_order",
+        item_id=str(review.order_id),
+        display_id=order.order_code,
         item_status=review.status.value if hasattr(review.status, 'value') else str(review.status),
         assigned_at=review.assigned_at,
         patient_name=patient.first_name + " " + patient.last_name if patient else None,
         patient_code=patient.patient_code if patient else None,
         order_code=order.order_code if order else None,
-        link=f"/reports/{review.report_id}"
+        link=f"/orders/{review.order_id}" if report else f"/orders/{review.order_id}"
     )
 
 
@@ -249,7 +252,6 @@ def list_assignments(
     item_type: Optional[str] = Query(None),
     item_id: Optional[str] = Query(None),
     assignee_user_id: Optional[str] = Query(None),
-    is_reviewer: Optional[bool] = Query(None),
     include_unassigned: bool = Query(False),
 ):
     """List assignments with filters"""
@@ -263,9 +265,6 @@ def list_assignments(
     
     if assignee_user_id:
         query = query.where(Assignment.assignee_user_id == UUID(assignee_user_id))
-    
-    if is_reviewer is not None:
-        query = query.where(Assignment.is_reviewer == is_reviewer)
     
     if not include_unassigned:
         query = query.where(Assignment.unassigned_at.is_(None))
@@ -285,7 +284,6 @@ def list_assignments(
             assigned_by_user_id=str(a.assigned_by_user_id) if a.assigned_by_user_id else None,
             assigned_at=a.assigned_at,
             unassigned_at=a.unassigned_at,
-            is_reviewer=a.is_reviewer,
             assignee=_get_user_ref(session, a.assignee_user_id),
             assigned_by=_get_user_ref(session, a.assigned_by_user_id),
         ))
@@ -311,7 +309,7 @@ def create_assignment(
     item_id = UUID(data.item_id)
     
     if item_type == "lab_order":
-        item = session.get(LabOrder, item_id)
+        item = session.get(Order, item_id)
         if not item or str(item.tenant_id) != ctx.tenant_id:
             raise HTTPException(404, "Order not found or not in tenant")
     elif item_type == "sample":
@@ -333,7 +331,6 @@ def create_assignment(
                 cast(Assignment.item_type, String) == item_type,
                 Assignment.item_id == item_id,
                 Assignment.assignee_user_id == UUID(data.assignee_user_id),
-                Assignment.is_reviewer == data.is_reviewer,
                 Assignment.unassigned_at.is_(None),
             )
         )
@@ -348,7 +345,6 @@ def create_assignment(
         item_id=item_id,
         assignee_user_id=UUID(data.assignee_user_id),
         assigned_by_user_id=user.id,
-        is_reviewer=data.is_reviewer,
     )
     
     session.add(assignment)
@@ -367,7 +363,6 @@ def create_assignment(
         assigned_by_user_id=str(assignment.assigned_by_user_id) if assignment.assigned_by_user_id else None,
         assigned_at=assignment.assigned_at,
         unassigned_at=assignment.unassigned_at,
-        is_reviewer=assignment.is_reviewer,
         assignee=_user_to_ref(assignee),
         assigned_by=_user_to_ref(user),
     )
@@ -404,15 +399,15 @@ def delete_assignment(
 def list_report_reviews(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
-    report_id: Optional[str] = Query(None),
+    order_id: Optional[str] = Query(None),
     reviewer_user_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
 ):
     """List report reviews with filters"""
     query = select(ReportReview).where(ReportReview.tenant_id == UUID(ctx.tenant_id))
     
-    if report_id:
-        query = query.where(ReportReview.report_id == UUID(report_id))
+    if order_id:
+        query = query.where(ReportReview.order_id == UUID(order_id))
     
     if reviewer_user_id:
         query = query.where(ReportReview.reviewer_user_id == UUID(reviewer_user_id))
@@ -429,13 +424,12 @@ def list_report_reviews(
         results.append(ReportReviewResponse(
             id=str(r.id),
             tenant_id=str(r.tenant_id),
-            report_id=str(r.report_id),
+            order_id=str(r.order_id),
             reviewer_user_id=str(r.reviewer_user_id),
             assigned_by_user_id=str(r.assigned_by_user_id) if r.assigned_by_user_id else None,
             assigned_at=r.assigned_at,
             decision_at=r.decision_at,
             status=r.status.value if hasattr(r.status, 'value') else str(r.status),
-            comment=r.comment,
             reviewer=_get_user_ref(session, r.reviewer_user_id),
             assigned_by=_get_user_ref(session, r.assigned_by_user_id),
         ))
@@ -469,10 +463,12 @@ def make_review_decision(
     if review.reviewer_user_id != user.id:
         raise HTTPException(403, "Only the assigned reviewer can make this decision")
     
-    # Get report to create events and check status
-    report = session.get(Report, review.report_id)
+    # Get report to create events and check status (query by order_id)
+    report = session.exec(
+        select(Report).where(Report.order_id == review.order_id)
+    ).first()
     if not report:
-        raise HTTPException(404, "Report not found")
+        raise HTTPException(404, "Report not found for this order")
     
     # Track previous status for change detection
     previous_status = review.status
@@ -481,8 +477,21 @@ def make_review_decision(
     # Update review
     review.status = new_status
     review.decision_at = datetime.utcnow()
-    review.comment = data.comment
     session.add(review)
+    
+    # Create audit log for review decision
+    from app.api.v1.reports import _create_audit_log
+    _create_audit_log(
+        session=session,
+        tenant_id=str(review.tenant_id),
+        branch_id=str(report.branch_id),
+        actor_user_id=user.id,
+        action=f"REVIEW.{new_status.value}",
+        entity_type="report_review",
+        entity_id=str(review.id),
+        old_values={"status": previous_status.value if hasattr(previous_status, 'value') else str(previous_status)},
+        new_values={"status": new_status.value, "comment": data.comment},
+    )
     
     # Update report status based on review decisions
     if new_status == ReviewStatus.APPROVED:
@@ -492,7 +501,7 @@ def make_review_decision(
             session.add(report)
             
             # Create timeline event for approval
-            event = CaseEvent(
+            event = OrderEvent(
                 tenant_id=report.tenant_id,
                 branch_id=report.branch_id,
                 order_id=report.order_id,
@@ -514,7 +523,7 @@ def make_review_decision(
             other_approved = session.exec(
                 select(ReportReview).where(
                     and_(
-                        ReportReview.report_id == review.report_id,
+                        ReportReview.order_id == review.order_id,
                         ReportReview.status == ReviewStatus.APPROVED,
                         ReportReview.id != review.id,
                     )
@@ -527,7 +536,7 @@ def make_review_decision(
                 session.add(report)
         
         # Create timeline event for rejection/changes requested
-        event = CaseEvent(
+        event = OrderEvent(
             tenant_id=report.tenant_id,
             branch_id=report.branch_id,
             order_id=report.order_id,
@@ -567,7 +576,7 @@ def make_review_decision(
         f"Review decision made: {new_status.value} by {user.id} (previous: {previous_status.value if hasattr(previous_status, 'value') else previous_status})",
         extra={
             "event": "report.review.decision",
-            "report_id": str(review.report_id),
+            "order_id": str(review.order_id),
             "reviewer_id": str(user.id),
             "decision": new_status.value,
         }
@@ -576,13 +585,12 @@ def make_review_decision(
     return ReportReviewResponse(
         id=str(review.id),
         tenant_id=str(review.tenant_id),
-        report_id=str(review.report_id),
+        order_id=str(review.order_id),
         reviewer_user_id=str(review.reviewer_user_id),
         assigned_by_user_id=str(review.assigned_by_user_id) if review.assigned_by_user_id else None,
         assigned_at=review.assigned_at,
         decision_at=review.decision_at,
         status=review.status.value,
-        comment=review.comment,
         reviewer=_get_user_ref(session, review.reviewer_user_id),
         assigned_by=_get_user_ref(session, review.assigned_by_user_id),
     )
