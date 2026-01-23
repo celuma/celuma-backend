@@ -14,6 +14,8 @@ class Patient(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     patient_code: str = Field(max_length=100)  # Visible in UI, unique per tenant
     first_name: str = Field(max_length=255)
     last_name: str = Field(max_length=255)
+    full_name: Optional[str] = Field(max_length=255, default=None)
+    address: Optional[str] = Field(max_length=500, default=None)
     dob: Optional[date] = Field(default=None)
     sex: Optional[str] = Field(max_length=10, default=None)
     phone: Optional[str] = Field(max_length=20, default=None)

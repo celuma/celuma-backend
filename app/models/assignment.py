@@ -12,9 +12,8 @@ class Assignment(BaseModel, TenantMixin, table=True):
     """
     Assignment model for tracking user assignments to various items.
     
-    Supports both assignees (is_reviewer=False) and reviewers (is_reviewer=True).
-    When is_reviewer=True and item_type='lab_order', these represent reviewers
-    that will be synced to report_review when the report is created.
+    Tracks assignees for orders, samples, and reports.
+    Reviewers are now completely decoupled and managed in the report_review table.
     """
     __tablename__ = "assignment"
     
@@ -43,8 +42,3 @@ class Assignment(BaseModel, TenantMixin, table=True):
     # Timestamps
     assigned_at: datetime = Field(default_factory=datetime.utcnow)
     unassigned_at: Optional[datetime] = Field(default=None)
-    
-    # Distinguishes between assignees and reviewers
-    # When True and item_type='lab_order', these are order reviewers
-    # that will be synced to report_review when report is created
-    is_reviewer: bool = Field(default=False, index=True)

@@ -21,7 +21,6 @@ class AssignmentCreate(BaseModel):
     item_type: Literal["lab_order", "sample", "report"]
     item_id: str
     assignee_user_id: str
-    is_reviewer: bool = False
 
 
 class AssignmentResponse(BaseModel):
@@ -34,7 +33,6 @@ class AssignmentResponse(BaseModel):
     assigned_by_user_id: Optional[str] = None
     assigned_at: datetime
     unassigned_at: Optional[datetime] = None
-    is_reviewer: bool
     # Enriched user info
     assignee: Optional[UserRef] = None
     assigned_by: Optional[UserRef] = None
@@ -72,13 +70,12 @@ class ReportReviewResponse(BaseModel):
     """Response for a single report review"""
     id: str
     tenant_id: str
-    report_id: str
+    order_id: str
     reviewer_user_id: str
     assigned_by_user_id: Optional[str] = None
     assigned_at: datetime
     decision_at: Optional[datetime] = None
     status: str  # PENDING, APPROVED, REJECTED
-    comment: Optional[str] = None
     # Enriched user info
     reviewer: Optional[UserRef] = None
     assigned_by: Optional[UserRef] = None
