@@ -115,13 +115,12 @@ def upgrade() -> None:
         'report_review',
         sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column('tenant_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('tenant.id'), nullable=False),
-        sa.Column('report_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('report.id'), nullable=False),
+        sa.Column('order_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('lab_order.id'), nullable=False),
         sa.Column('reviewer_user_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('app_user.id'), nullable=False),
         sa.Column('assigned_by_user_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('app_user.id'), nullable=True),
         sa.Column('assigned_at', sa.DateTime(), nullable=False, server_default=sa.func.now()),
         sa.Column('decision_at', sa.DateTime(), nullable=True),
         sa.Column('status', postgresql.ENUM('PENDING', 'APPROVED', 'REJECTED', name='reviewstatus', create_type=False), nullable=False, server_default='PENDING'),
-        sa.Column('comment', sa.String(2000), nullable=True),
     )
     
     # Create indexes for report_review table
@@ -137,14 +136,14 @@ def upgrade() -> None:
         postgresql_ops={'assigned_at': 'DESC'}
     )
     op.create_index(
-        'ix_report_review_tenant_report',
+        'ix_report_review_tenant_order',
         'report_review',
-        ['tenant_id', 'report_id']
+        ['tenant_id', 'order_id']
     )
     op.create_index(
-        'ix_report_review_report',
+        'ix_report_review_order',
         'report_review',
-        ['report_id']
+        ['order_id']
     )
     op.create_index(
         'ix_report_review_reviewer',
@@ -203,8 +202,8 @@ def downgrade() -> None:
     op.drop_index('ix_report_review_unique_pending', 'report_review')
     op.drop_index('ix_report_review_status', 'report_review')
     op.drop_index('ix_report_review_reviewer', 'report_review')
-    op.drop_index('ix_report_review_report', 'report_review')
-    op.drop_index('ix_report_review_tenant_report', 'report_review')
+    op.drop_index('ix_report_review_order', 'report_review')
+    op.drop_index('ix_report_review_tenant_order', 'report_review')
     op.drop_index('ix_report_review_tenant_reviewer', 'report_review')
     op.drop_index('ix_report_review_tenant_id', 'report_review')
     op.drop_table('report_review')
