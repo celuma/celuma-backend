@@ -184,6 +184,21 @@ def list_orders(
             labels_objs = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
             labels = [LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels_objs]
         
+        # Get assignees
+        assignee_ids = session.exec(
+            select(Assignment.assignee_user_id).where(
+                and_(
+                    Assignment.item_type == "lab_order",
+                    Assignment.item_id == o.id,
+                    Assignment.unassigned_at.is_(None)
+                )
+            )
+        ).all()
+        assignees = []
+        if assignee_ids:
+            users = session.exec(select(AppUser).where(AppUser.id.in_(assignee_ids))).all()
+            assignees = [UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in users]
+        
         results.append(
             OrderListItem(
                 id=str(o.id),
@@ -202,6 +217,7 @@ def list_orders(
                 sample_count=sample_count,
                 has_report=has_report,
                 labels=labels if labels else None,
+                assignees=assignees if assignees else None,
             )
         )
 
@@ -642,6 +658,21 @@ def list_samples(
             labels_objs = session.exec(select(Label).where(Label.id.in_(sample_label_ids))).all()
             labels = [LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels_objs]
         
+        # Get assignees
+        assignee_ids = session.exec(
+            select(Assignment.assignee_user_id).where(
+                and_(
+                    Assignment.item_type == "sample",
+                    Assignment.item_id == s.id,
+                    Assignment.unassigned_at.is_(None)
+                )
+            )
+        ).all()
+        assignees = []
+        if assignee_ids:
+            users = session.exec(select(AppUser).where(AppUser.id.in_(assignee_ids))).all()
+            assignees = [UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in users]
+        
         items.append(
             SampleListItem(
                 id=str(s.id),
@@ -662,6 +693,7 @@ def list_samples(
                     ) if patient else None,
                 ),
                 labels=labels if labels else None,
+                assignees=assignees if assignees else None,
             )
         )
     return SamplesListResponse(samples=items)
@@ -1470,104 +1502,38 @@ def get_order_full_detail(
         email=getattr(patient, "email", None),
     )
 
-    sample_resps = [
-        SampleResponse(
-            id=str(s.id),
-            sample_code=s.sample_code,
-            type=s.type,
-            state=s.state,
-            order_id=str(s.order_id),
-            tenant_id=str(s.tenant_id),
-            branch_id=str(s.branch_id),
+    # Get order label IDs for inheritance check
+    order_label_ids = set(label_ids)
+
+    # Build sample responses with assignees and labels
+    sample_resps = []
+    for s in samples:
+        # Get sample assignees
+        sample_assignee_users = _get_sample_assignees(session, s.id, ctx.tenant_id)
+        
+        # Get sample labels (own + inherited from order)
+        sample_label_ids = set(
+            session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == s.id)).all()
         )
-        for s in samples
-    ]
-
-    return OrderFullDetailResponse(order=order_resp, patient=patient_resp, samples=sample_resps)
-
-
-@router.get("/patients/{patient_id}/orders", response_model=PatientOrdersListResponse)
-def list_patient_orders(
-    patient_id: str,
-    session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx),
-):
-    """List all orders for a given patient (enriched summary)."""
-    patient = session.get(Patient, patient_id)
-    if not patient:
-        raise HTTPException(404, "Patient not found")
-
-    if str(patient.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Patient not found")
-    orders = session.exec(select(Order).where(Order.patient_id == patient.id, Order.tenant_id == ctx.tenant_id)).all()
-    summaries = []
-    for o in orders:
-        sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
-        has_report = session.exec(select(Report).where(Report.order_id == o.id)).first() is not None
-        summaries.append(
-            PatientOrderSummary(
-                id=str(o.id),
-                order_code=o.order_code,
-                status=o.status,
-                tenant_id=str(o.tenant_id),
-                branch_id=str(o.branch_id),
-                patient_id=str(o.patient_id),
-                requested_by=o.requested_by,
-                notes=o.notes,
-                created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
-                sample_count=sample_count,
-                has_report=has_report,
-            )
-        )
-
-    full_patient = PatientFullResponse(
-        id=str(patient.id),
-        tenant_id=str(patient.tenant_id),
-        branch_id=str(patient.branch_id),
-        patient_code=patient.patient_code,
-        first_name=patient.first_name,
-        last_name=patient.last_name,
-        dob=getattr(patient, "dob", None),
-        sex=getattr(patient, "sex", None),
-        phone=getattr(patient, "phone", None),
-        email=getattr(patient, "email", None),
-    )
-
-    return PatientOrdersListResponse(patient=full_patient, orders=summaries)
-
-
-@router.get("/patients/{patient_id}/cases", response_model=PatientCasesListResponse)
-def list_patient_cases(
-    patient_id: str,
-    session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx),
-):
-    """List all cases for a patient with full details: order, samples, and report metadata (if any)."""
-    patient = session.get(Patient, patient_id)
-    if not patient:
-        raise HTTPException(404, "Patient not found")
-
-    if str(patient.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Patient not found")
-    orders = session.exec(select(Order).where(Order.patient_id == patient.id, Order.tenant_id == ctx.tenant_id)).all()
-    cases = []
-    for order in orders:
-        # Order detail
-        order_resp = OrderDetailResponse(
-            id=str(order.id),
-            order_code=order.order_code,
-            status=order.status,
-            patient_id=str(order.patient_id),
-            tenant_id=str(order.tenant_id),
-            branch_id=str(order.branch_id),
-            requested_by=order.requested_by,
-            notes=order.notes,
-            billed_lock=order.billed_lock,
-        )
-
-        # Samples list
-        samples = session.exec(select(Sample).where(Sample.order_id == order.id)).all()
-        sample_resps = [
+        
+        # Combine all label IDs
+        all_sample_label_ids = order_label_ids | sample_label_ids
+        
+        # Get label objects with inheritance flag
+        sample_labels_with_inheritance = []
+        if all_sample_label_ids:
+            all_sample_labels = session.exec(select(Label).where(Label.id.in_(all_sample_label_ids))).all()
+            for label in all_sample_labels:
+                sample_labels_with_inheritance.append(
+                    LabelWithInheritance(
+                        id=str(label.id),
+                        name=label.name,
+                        color=label.color,
+                        inherited=(label.id in order_label_ids),
+                    )
+                )
+        
+        sample_resps.append(
             SampleResponse(
                 id=str(s.id),
                 sample_code=s.sample_code,
@@ -1576,51 +1542,104 @@ def list_patient_cases(
                 order_id=str(s.order_id),
                 tenant_id=str(s.tenant_id),
                 branch_id=str(s.branch_id),
+                assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in sample_assignee_users] if sample_assignee_users else None,
+                labels=sample_labels_with_inheritance if sample_labels_with_inheritance else None,
             )
-            for s in samples
-        ]
+        )
 
-        # Report meta (if any) using latest/current version
-        report_meta = None
-        report = session.exec(select(Report).where(Report.order_id == order.id)).first()
-        if report:
-            current_version = session.exec(
-                select(ReportVersion)
-                .where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
-                .order_by(ReportVersion.version_no.desc())
-            ).first()
-            has_pdf = bool(current_version and current_version.pdf_storage_id)
-            report_meta = ReportMetaResponse(
-                id=str(report.id),
-                status=report.status,
-                title=report.title,
-                published_at=report.published_at,
-                version_no=current_version.version_no if current_version else None,
-                has_pdf=has_pdf,
+    # Get report meta (if any) using latest/current version
+    report_meta = None
+    report = session.exec(select(Report).where(Report.order_id == order.id)).first()
+    if report:
+        current_version = session.exec(
+            select(ReportVersion)
+            .where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
+            .order_by(ReportVersion.version_no.desc())
+        ).first()
+        has_pdf = bool(current_version and current_version.pdf_storage_id)
+        report_meta = ReportMetaResponse(
+            id=str(report.id),
+            status=report.status,
+            title=report.title,
+            published_at=report.published_at,
+            version_no=current_version.version_no if current_version else None,
+            has_pdf=has_pdf,
+        )
+
+    return OrderFullDetailResponse(order=order_resp, patient=patient_resp, samples=sample_resps, report=report_meta)
+
+
+@router.get("/patients/{patient_id}/orders", response_model=OrdersListResponse)
+def list_patient_orders(
+    patient_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
+    """List all orders for a given patient with full enrichment (labels, assignees, etc)."""
+    patient = session.get(Patient, patient_id)
+    if not patient:
+        raise HTTPException(404, "Patient not found")
+
+    if str(patient.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Patient not found")
+    
+    orders = session.exec(select(Order).where(Order.patient_id == patient.id, Order.tenant_id == ctx.tenant_id)).all()
+    results: list[OrderListItem] = []
+    
+    for o in orders:
+        # Resolve related entities
+        branch = session.get(Branch, o.branch_id)
+        sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
+        has_report = session.exec(select(Report).where(Report.order_id == o.id)).first() is not None
+
+        # Get labels
+        label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == o.id)).all()
+        labels = []
+        if label_ids:
+            labels_objs = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
+            labels = [LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels_objs]
+        
+        # Get assignees
+        assignee_ids = session.exec(
+            select(Assignment.assignee_user_id).where(
+                and_(
+                    Assignment.item_type == "lab_order",
+                    Assignment.item_id == o.id,
+                    Assignment.unassigned_at.is_(None)
+                )
             )
+        ).all()
+        assignees = []
+        if assignee_ids:
+            users = session.exec(select(AppUser).where(AppUser.id.in_(assignee_ids))).all()
+            assignees = [UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in users]
+        
+        results.append(
+            OrderListItem(
+                id=str(o.id),
+                order_code=o.order_code,
+                status=o.status,
+                tenant_id=str(o.tenant_id),
+                branch=BranchRef(id=str(o.branch_id), name=branch.name if branch else "", code=branch.code if branch else None),
+                patient=PatientRef(
+                    id=str(o.patient_id),
+                    full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
+                    patient_code=patient.patient_code if patient else "",
+                ),
+                requested_by=o.requested_by,
+                notes=o.notes,
+                created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
+                sample_count=sample_count,
+                has_report=has_report,
+                labels=labels if labels else None,
+                assignees=assignees if assignees else None,
+            )
+        )
 
-        cases.append({
-            "order": order_resp,
-            "samples": sample_resps,
-            "report": report_meta,
-        })
+    return OrdersListResponse(orders=results)
 
-    # Build patient full profile to attach at top-level of cases list
-    full_patient = PatientFullResponse(
-        id=str(patient.id),
-        tenant_id=str(patient.tenant_id),
-        branch_id=str(patient.branch_id),
-        patient_code=patient.patient_code,
-        first_name=patient.first_name,
-        last_name=patient.last_name,
-        dob=getattr(patient, "dob", None),
-        sex=getattr(patient, "sex", None),
-        phone=getattr(patient, "phone", None),
-        email=getattr(patient, "email", None),
-    )
 
-    # Reuse PatientCaseDetail schema structure via dicts already matching response_model
-    return PatientCasesListResponse(patient=full_patient, patient_id=str(patient.id), cases=cases)
+# Endpoint /patients/{patient_id}/cases has been removed - use /patients/{patient_id}/orders instead
 
 
 # Case Events (Timeline) Endpoints

@@ -225,6 +225,8 @@ class SampleResponse(BaseModel):
     order_id: str
     tenant_id: str
     branch_id: str
+    assignees: Optional[List[UserRef]] = None
+    labels: Optional[List[LabelWithInheritance]] = None
 
 
 class SampleStateUpdate(BaseModel):
@@ -381,6 +383,7 @@ class OrderListItem(BaseModel):
     sample_count: int
     has_report: bool
     labels: Optional[List[LabelResponse]] = None
+    assignees: Optional[List[UserRef]] = None
 
 
 class OrdersListResponse(BaseModel):
@@ -398,6 +401,7 @@ class SampleListItem(BaseModel):
     branch: BranchRef
     order: OrderSlim
     labels: Optional[List[LabelResponse]] = None
+    assignees: Optional[List[UserRef]] = None
 
 
 class SamplesListResponse(BaseModel):

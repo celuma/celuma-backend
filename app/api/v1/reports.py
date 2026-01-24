@@ -79,6 +79,25 @@ def list_reports(
         signed_by = str(current_version.signed_by) if current_version and current_version.signed_by else None
         signed_at = current_version.signed_at if current_version else None
         
+        # Get reviewers
+        reviews = session.exec(
+            select(ReportReview).where(ReportReview.order_id == order.id if order else None)
+        ).all()
+        reviewers = []
+        if reviews:
+            from app.schemas.report import ReviewerWithStatus
+            for review in reviews:
+                reviewer = session.get(AppUser, review.reviewer_user_id)
+                if reviewer:
+                    reviewers.append(ReviewerWithStatus(
+                        id=str(reviewer.id),
+                        name=reviewer.full_name,
+                        email=reviewer.email,
+                        avatar_url=reviewer.avatar_url,
+                        status=review.status.lower(),
+                        review_id=str(review.id)
+                    ))
+        
         results.append(
             ReportListItem(
                 id=str(r.id),
@@ -108,7 +127,8 @@ def list_reports(
                 signed_by=signed_by,
                 signed_at=signed_at,
                 version_no=version_no,
-                has_pdf=has_pdf
+                has_pdf=has_pdf,
+                reviewers=reviewers if reviewers else None,
             )
         )
     

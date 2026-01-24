@@ -2,6 +2,16 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
+# Import ReviewerWithStatus from worklist schema
+class ReviewerWithStatus(BaseModel):
+    """User with review status"""
+    id: str
+    name: str
+    email: str
+    avatar_url: Optional[str] = None
+    status: str  # pending, approved, rejected
+    review_id: Optional[str] = None
+
 class ReportCreate(BaseModel):
     """Schema for creating a report"""
     tenant_id: str
@@ -101,6 +111,7 @@ class ReportListItem(BaseModel):
     signed_at: Optional[datetime] = None
     version_no: Optional[int] = None
     has_pdf: bool = False
+    reviewers: Optional[List[ReviewerWithStatus]] = None
 
 class ReportsListResponse(BaseModel):
     """Response schema for reports list"""
