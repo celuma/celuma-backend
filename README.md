@@ -56,6 +56,8 @@ curl http://localhost:8000/api/v1/health
 - **Report Retraction**: Ability to withdraw published reports when necessary
 - **Worklist Management**: Dedicated worklist for pathologists to track reports in review
 - **Audit Trail**: Complete logging of all workflow transitions
+- **Report Templates**: JSON-based templates for report structure management
+- **Template Management**: CRUD operations for report templates with active/inactive status
 
 ### 💰 Billing & Invoicing
 - **Service Catalog**: Manage pricing and service offerings with validity periods
@@ -246,18 +248,48 @@ make clean                # Clean up containers and data
   - `GET /api/v1/users/invitations/{token}` - Get invitation details
   - `POST /api/v1/users/invitations/{token}/accept` - Accept invitation
   - `POST /api/v1/users/{id}/avatar` - Upload user avatar
-- **Tenants**: `GET/POST /api/v1/tenants/`
+- **Tenants**: 
+  - `GET/POST /api/v1/tenants/` - Tenants management
+  - `GET /api/v1/tenants/{id}` - Get tenant details
+  - `GET /api/v1/tenants/{id}/branches` - List tenant branches
+  - `GET /api/v1/tenants/{id}/users` - List tenant users
+  - `PATCH /api/v1/tenants/{id}` - Update tenant (Admin)
+  - `POST /api/v1/tenants/{id}/logo` - Upload tenant logo (Admin)
+  - `POST /api/v1/tenants/{id}/toggle` - Toggle tenant active status (Admin)
 - **Branches**: `GET/POST /api/v1/branches/`
 - **Patients**: `GET/POST /api/v1/patients/`
 - **Laboratory**: 
   - `GET/POST /api/v1/laboratory/orders/` - Laboratory orders
   - `POST /api/v1/laboratory/orders/unified` - Create order with samples
+  - `GET /api/v1/laboratory/orders/{id}` - Get order details
   - `GET /api/v1/laboratory/orders/{id}/full` - Get full order details
+  - `PATCH /api/v1/laboratory/orders/{id}/notes` - Update order notes
   - `GET /api/v1/laboratory/patients/{id}/orders` - Patient orders
   - `GET /api/v1/laboratory/patients/{id}/cases` - Patient cases
   - `GET/POST /api/v1/laboratory/samples/` - Samples management
+  - `GET /api/v1/laboratory/samples/{id}` - Get sample details
+  - `PATCH /api/v1/laboratory/samples/{id}/state` - Update sample state
+  - `PATCH /api/v1/laboratory/samples/{id}/notes` - Update sample notes
+  - `POST /api/v1/laboratory/samples/{id}/images` - Upload sample image
+  - `GET /api/v1/laboratory/samples/{id}/images` - List sample images
+  - `DELETE /api/v1/laboratory/samples/{id}/images/{image_id}` - Delete image
   - `GET /api/v1/laboratory/orders/{id}/events` - Order timeline events
   - `POST /api/v1/laboratory/orders/{id}/events` - Add timeline event
+  - `GET /api/v1/laboratory/samples/{id}/events` - Sample timeline events
+  - **Comments/Conversation**:
+    - `GET /api/v1/laboratory/orders/{id}/comments` - Get order comments
+    - `POST /api/v1/laboratory/orders/{id}/comments` - Add comment
+    - `GET /api/v1/laboratory/users/search` - Search users for mentions
+  - **Labels**:
+    - `GET /api/v1/laboratory/labels/` - List labels
+    - `POST /api/v1/laboratory/labels/` - Create label
+    - `DELETE /api/v1/laboratory/labels/{id}` - Delete label
+  - **Collaboration**:
+    - `PUT /api/v1/laboratory/orders/{id}/assignees` - Update order assignees
+    - `PUT /api/v1/laboratory/orders/{id}/reviewers` - Update order reviewers
+    - `PUT /api/v1/laboratory/orders/{id}/labels` - Update order labels
+    - `PUT /api/v1/laboratory/samples/{id}/assignees` - Update sample assignees
+    - `PUT /api/v1/laboratory/samples/{id}/labels` - Update sample labels
 - **Reports**: 
   - `GET/POST /api/v1/reports/` - Reports management
   - `POST /api/v1/reports/{id}/new_version` - Create new report version
@@ -271,6 +303,12 @@ make clean                # Clean up containers and data
     - `POST /api/v1/reports/{id}/sign` - Sign and publish
     - `POST /api/v1/reports/{id}/retract` - Retract published report
     - `GET /api/v1/reports/worklist` - Get pathologist worklist
+  - **Templates**:
+    - `GET /api/v1/reports/templates/` - List report templates
+    - `GET /api/v1/reports/templates/{id}` - Get template details
+    - `POST /api/v1/reports/templates/` - Create template
+    - `PUT /api/v1/reports/templates/{id}` - Update template
+    - `DELETE /api/v1/reports/templates/{id}` - Delete template
 - **Billing**: 
   - `GET/POST /api/v1/billing/invoices/` - Invoices management
   - `GET /api/v1/billing/invoices/{id}` - Get invoice details
@@ -286,6 +324,11 @@ make clean                # Clean up containers and data
   - `POST /api/v1/portal/accept-invitation` - Accept invitation and create user
   - `POST /api/v1/portal/request-password-reset` - Request password reset
   - `POST /api/v1/portal/reset-password` - Reset password with token
+  - **Physician Portal**:
+    - `GET /api/v1/portal/physician/orders` - List physician's requested orders
+    - `GET /api/v1/portal/physician/orders/{id}/report` - Get published report
+  - **Patient Portal** (public):
+    - `GET /api/v1/portal/patient/report` - Get report by access code
 
 ### 🔐 Authentication Features
 - **Flexible Login**: Users can authenticate using either username or email

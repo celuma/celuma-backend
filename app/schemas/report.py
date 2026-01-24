@@ -125,3 +125,46 @@ class ReportActionResponse(BaseModel):
     id: str
     status: str
     message: str
+
+
+# Report Template Schemas
+class ReportTemplateCreate(BaseModel):
+    """Schema for creating a report template"""
+    name: str
+    description: Optional[str] = None
+    template_json: Dict[str, Any]
+
+
+class ReportTemplateUpdate(BaseModel):
+    """Schema for updating a report template"""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    template_json: Optional[Dict[str, Any]] = None
+    is_active: Optional[bool] = None
+
+
+class ReportTemplateResponse(BaseModel):
+    """Schema for basic report template response"""
+    id: str
+    tenant_id: str
+    name: str
+    description: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+
+
+class ReportTemplateDetailResponse(BaseModel):
+    """Schema for detailed report template response with full JSON"""
+    id: str
+    tenant_id: str
+    name: str
+    description: Optional[str] = None
+    template_json: Dict[str, Any]
+    created_by: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+
+
+class ReportTemplatesListResponse(BaseModel):
+    """Response schema for report templates list"""
+    templates: List[ReportTemplateResponse]

@@ -1645,6 +1645,756 @@ with open("avatar.jpg", "rb") as f:
     print(f"✅ Avatar uploaded: {avatar_data['avatar_url']}")
 ```
 
+## 💬 Order Comments & Conversation
+
+### Get Order Comments
+```bash
+# Get comments with default pagination (20 items)
+curl "http://localhost:8000/api/v1/laboratory/orders/{order_id}/comments" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+
+# Get older comments using cursor
+curl "http://localhost:8000/api/v1/laboratory/orders/{order_id}/comments?before=CURSOR_STRING&limit=50" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+# Get comments for an order
+order_id = "ORDER_UUID"
+resp = requests.get(
+    f"{BASE_URL}/api/v1/laboratory/orders/{order_id}/comments",
+    headers={"Authorization": f"Bearer {token}"},
+    params={"limit": 50}
+)
+resp.raise_for_status()
+data = resp.json()
+
+print(f"Comments: {len(data['items'])}")
+for comment in data['items']:
+    author = comment['created_by']['name']
+    mentions = [m['name'] for m in comment.get('mentions', [])]
+    print(f"- {author}: {comment['text'][:50]}...")
+    if mentions:
+        print(f"  Mentions: {', '.join(mentions)}")
+
+# Handle pagination
+if data['page_info']['has_next_page']:
+    next_cursor = data['page_info']['end_cursor']
+    # Fetch more with: params={"after": next_cursor}
+```
+
+### Create Order Comment
+```bash
+curl -X POST "http://localhost:8000/api/v1/laboratory/orders/{order_id}/comments" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "text": "Sample received in good condition. @drsmith please review when ready.",
+    "mentions": ["user-uuid-of-drsmith"]
+  }'
+```
+
+**Python Example:**
+```python
+# Create a comment with mentions
+comment_data = {
+    "text": "Sample received in good condition. @drsmith please review when ready.",
+    "mentions": ["user-uuid-of-drsmith"],
+    "metadata": {"priority": "high"}
+}
+
+resp = requests.post(
+    f"{BASE_URL}/api/v1/laboratory/orders/{order_id}/comments",
+    headers={"Authorization": f"Bearer {token}"},
+    json=comment_data
+)
+resp.raise_for_status()
+comment = resp.json()
+print(f"✅ Comment created: {comment['id']}")
+print(f"   Mentions: {len(comment.get('mentions', []))}")
+```
+
+### Search Users for Mentions
+```bash
+curl "http://localhost:8000/api/v1/laboratory/users/search?q=smith" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+# Search users for mention autocomplete
+search_resp = requests.get(
+    f"{BASE_URL}/api/v1/laboratory/users/search",
+    headers={"Authorization": f"Bearer {token}"},
+    params={"q": "smith"}
+)
+search_resp.raise_for_status()
+users = search_resp.json()["users"]
+for user in users:
+    print(f"- @{user['username'] or user['id']}: {user['name']}")
+```
+
+## 🔄 Sample State & Notes Management
+
+### Update Sample State
+```bash
+curl -X PATCH "http://localhost:8000/api/v1/laboratory/samples/{sample_id}/state" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{"state": "PROCESSING"}'
+```
+
+**Python Example:**
+```python
+# Update sample state
+sample_id = "SAMPLE_UUID"
+state_resp = requests.patch(
+    f"{BASE_URL}/api/v1/laboratory/samples/{sample_id}/state",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"state": "PROCESSING"}
+)
+state_resp.raise_for_status()
+sample = state_resp.json()
+print(f"✅ Sample state updated to: {sample['state']}")
+
+# Valid states: RECEIVED, PROCESSING, READY, DAMAGED, CANCELLED
+```
+
+### Update Sample Notes
+```bash
+curl -X PATCH "http://localhost:8000/api/v1/laboratory/samples/{sample_id}/notes" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{"notes": "Additional observations: tissue appears well-preserved"}'
+```
+
+**Python Example:**
+```python
+# Update sample notes
+notes_resp = requests.patch(
+    f"{BASE_URL}/api/v1/laboratory/samples/{sample_id}/notes",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"notes": "Additional observations: tissue appears well-preserved"}
+)
+notes_resp.raise_for_status()
+sample = notes_resp.json()
+print(f"✅ Sample notes updated")
+```
+
+### Update Order Notes
+```bash
+curl -X PATCH "http://localhost:8000/api/v1/laboratory/orders/{order_id}/notes" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{"notes": "Patient requested expedited processing"}'
+```
+
+**Python Example:**
+```python
+# Update order notes
+order_id = "ORDER_UUID"
+notes_resp = requests.patch(
+    f"{BASE_URL}/api/v1/laboratory/orders/{order_id}/notes",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"notes": "Patient requested expedited processing"}
+)
+notes_resp.raise_for_status()
+order = notes_resp.json()
+print(f"✅ Order notes updated")
+```
+
+### Delete Sample Image
+```bash
+curl -X DELETE "http://localhost:8000/api/v1/laboratory/samples/{sample_id}/images/{image_id}" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+# Delete a sample image
+sample_id = "SAMPLE_UUID"
+image_id = "IMAGE_UUID"
+del_resp = requests.delete(
+    f"{BASE_URL}/api/v1/laboratory/samples/{sample_id}/images/{image_id}",
+    headers={"Authorization": f"Bearer {token}"}
+)
+del_resp.raise_for_status()
+print(f"✅ Image deleted successfully")
+```
+
+### Get Sample Events
+```bash
+curl "http://localhost:8000/api/v1/laboratory/samples/{sample_id}/events" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+# Get timeline events for a sample
+sample_id = "SAMPLE_UUID"
+events_resp = requests.get(
+    f"{BASE_URL}/api/v1/laboratory/samples/{sample_id}/events",
+    headers={"Authorization": f"Bearer {token}"}
+)
+events_resp.raise_for_status()
+events = events_resp.json()["events"]
+print(f"📋 Sample timeline ({len(events)} events):")
+for event in events:
+    print(f"  - {event['event_type']}: {event.get('description', '')}")
+```
+
+## 🏷️ Labels Management
+
+### List Labels
+```bash
+curl "http://localhost:8000/api/v1/laboratory/labels/" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+# List all labels for the tenant
+labels_resp = requests.get(
+    f"{BASE_URL}/api/v1/laboratory/labels/",
+    headers={"Authorization": f"Bearer {token}"}
+)
+labels_resp.raise_for_status()
+labels = labels_resp.json()["labels"]
+print(f"Labels ({len(labels)}):")
+for label in labels:
+    print(f"  - {label['name']} ({label['color']})")
+```
+
+### Create Label
+```bash
+curl -X POST "http://localhost:8000/api/v1/laboratory/labels/" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "name": "Urgent",
+    "color": "#FF0000"
+  }'
+```
+
+**Python Example:**
+```python
+# Create a new label
+label_data = {
+    "name": "Urgent",
+    "color": "#FF0000"
+}
+label_resp = requests.post(
+    f"{BASE_URL}/api/v1/laboratory/labels/",
+    headers={"Authorization": f"Bearer {token}"},
+    json=label_data
+)
+label_resp.raise_for_status()
+label = label_resp.json()
+print(f"✅ Label created: {label['name']} ({label['id']})")
+```
+
+### Delete Label
+```bash
+curl -X DELETE "http://localhost:8000/api/v1/laboratory/labels/{label_id}" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+# Delete a label
+label_id = "LABEL_UUID"
+del_resp = requests.delete(
+    f"{BASE_URL}/api/v1/laboratory/labels/{label_id}",
+    headers={"Authorization": f"Bearer {token}"}
+)
+del_resp.raise_for_status()
+print(f"✅ Label deleted")
+```
+
+## 👥 Collaboration (Assignees/Reviewers/Labels)
+
+### Update Order Assignees
+```bash
+curl -X PUT "http://localhost:8000/api/v1/laboratory/orders/{order_id}/assignees" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "assignee_ids": ["user-uuid-1", "user-uuid-2"]
+  }'
+```
+
+**Python Example:**
+```python
+# Assign users to an order
+order_id = "ORDER_UUID"
+assignees_resp = requests.put(
+    f"{BASE_URL}/api/v1/laboratory/orders/{order_id}/assignees",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"assignee_ids": ["user-uuid-1", "user-uuid-2"]}
+)
+assignees_resp.raise_for_status()
+order = assignees_resp.json()
+print(f"✅ Assignees updated: {len(order['assignees'])} users")
+for assignee in order['assignees']:
+    print(f"  - {assignee['name']}")
+```
+
+### Update Order Reviewers
+```bash
+curl -X PUT "http://localhost:8000/api/v1/laboratory/orders/{order_id}/reviewers" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "reviewer_ids": ["pathologist-uuid"]
+  }'
+```
+
+**Python Example:**
+```python
+# Assign reviewers to an order (required before REVIEW status)
+reviewers_resp = requests.put(
+    f"{BASE_URL}/api/v1/laboratory/orders/{order_id}/reviewers",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"reviewer_ids": ["pathologist-uuid"]}
+)
+reviewers_resp.raise_for_status()
+order = reviewers_resp.json()
+print(f"✅ Reviewers updated: {len(order['reviewers'])} users")
+```
+
+### Update Order Labels
+```bash
+curl -X PUT "http://localhost:8000/api/v1/laboratory/orders/{order_id}/labels" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "label_ids": ["label-uuid-1", "label-uuid-2"]
+  }'
+```
+
+**Python Example:**
+```python
+# Add labels to an order
+labels_resp = requests.put(
+    f"{BASE_URL}/api/v1/laboratory/orders/{order_id}/labels",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"label_ids": ["label-uuid-1", "label-uuid-2"]}
+)
+labels_resp.raise_for_status()
+order = labels_resp.json()
+print(f"✅ Labels updated: {len(order['labels'])} labels")
+for label in order['labels']:
+    print(f"  - {label['name']} ({label['color']})")
+```
+
+### Update Sample Assignees
+```bash
+curl -X PUT "http://localhost:8000/api/v1/laboratory/samples/{sample_id}/assignees" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "assignee_ids": ["user-uuid-1"]
+  }'
+```
+
+**Python Example:**
+```python
+# Assign users to a sample
+sample_id = "SAMPLE_UUID"
+assignees_resp = requests.put(
+    f"{BASE_URL}/api/v1/laboratory/samples/{sample_id}/assignees",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"assignee_ids": ["user-uuid-1"]}
+)
+assignees_resp.raise_for_status()
+sample = assignees_resp.json()
+print(f"✅ Sample assignees updated: {len(sample['assignees'])} users")
+```
+
+### Update Sample Labels
+```bash
+curl -X PUT "http://localhost:8000/api/v1/laboratory/samples/{sample_id}/labels" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "label_ids": ["label-uuid-3"]
+  }'
+```
+
+**Python Example:**
+```python
+# Add additional labels to a sample (order labels are inherited)
+labels_resp = requests.put(
+    f"{BASE_URL}/api/v1/laboratory/samples/{sample_id}/labels",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"label_ids": ["label-uuid-3"]}
+)
+labels_resp.raise_for_status()
+sample = labels_resp.json()
+print(f"✅ Sample labels updated")
+for label in sample['labels']:
+    inherited = "(inherited)" if label.get('inherited') else "(own)"
+    print(f"  - {label['name']} {inherited}")
+```
+
+## 🩺 Physician Portal
+
+### List Physician Orders
+```bash
+curl "http://localhost:8000/api/v1/portal/physician/orders" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+# List orders where current user is the requesting physician
+orders_resp = requests.get(
+    f"{BASE_URL}/api/v1/portal/physician/orders",
+    headers={"Authorization": f"Bearer {token}"}
+)
+orders_resp.raise_for_status()
+orders = orders_resp.json()
+print(f"My requested orders ({len(orders)}):")
+for order in orders:
+    status_icon = "✅" if order['has_report'] else "⏳"
+    print(f"  {status_icon} {order['order_code']}: {order['patient_name']} - {order['status']}")
+```
+
+### Get Physician Report
+```bash
+curl "http://localhost:8000/api/v1/portal/physician/orders/{order_id}/report" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+# Get published report for an order (physician must be the requestor)
+order_id = "ORDER_UUID"
+report_resp = requests.get(
+    f"{BASE_URL}/api/v1/portal/physician/orders/{order_id}/report",
+    headers={"Authorization": f"Bearer {token}"}
+)
+if report_resp.status_code == 200:
+    report = report_resp.json()
+    print(f"✅ Report: {report['title']}")
+    print(f"   Published: {report['published_at']}")
+    print(f"   PDF URL (valid 10 min): {report['pdf_url']}")
+elif report_resp.status_code == 403:
+    print("⚠️ Report not available (not published or payment pending)")
+else:
+    print(f"❌ Error: {report_resp.status_code}")
+```
+
+## 👤 Patient Portal
+
+### Get Patient Report (Public)
+```bash
+# No authentication required - uses access code
+curl "http://localhost:8000/api/v1/portal/patient/report?code=A1B2C3D4E5F67890"
+```
+
+**Python Example:**
+```python
+import hashlib
+
+# Generate patient access code
+def generate_access_code(order_code: str, patient_code: str) -> str:
+    combined = f"{order_code}:{patient_code}"
+    return hashlib.sha256(combined.encode()).hexdigest()[:16].upper()
+
+# Example
+order_code = "ORD001"
+patient_code = "P001"
+access_code = generate_access_code(order_code, patient_code)
+print(f"Access code: {access_code}")
+
+# Get report (no auth needed)
+report_resp = requests.get(
+    f"{BASE_URL}/api/v1/portal/patient/report",
+    params={"code": access_code}
+)
+if report_resp.status_code == 200:
+    report = report_resp.json()
+    print(f"✅ Report for: {report['patient_name']}")
+    print(f"   Order: {report['order_code']}")
+    print(f"   Title: {report['title']}")
+    print(f"   PDF URL (valid 10 min): {report['pdf_url']}")
+elif report_resp.status_code == 403:
+    print("⚠️ Report access blocked (payment pending)")
+elif report_resp.status_code == 404:
+    print("❌ Report not found or not yet published")
+```
+
+## 🏢 Tenant Management
+
+### Update Tenant
+```bash
+curl -X PATCH "http://localhost:8000/api/v1/tenants/{tenant_id}" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "name": "Updated Laboratory Name",
+    "legal_name": "Updated Legal Name Inc."
+  }'
+```
+
+**Python Example:**
+```python
+# Update tenant details (admin only)
+tenant_id = "TENANT_UUID"
+update_resp = requests.patch(
+    f"{BASE_URL}/api/v1/tenants/{tenant_id}",
+    headers={"Authorization": f"Bearer {token}"},
+    json={
+        "name": "Updated Laboratory Name",
+        "legal_name": "Updated Legal Name Inc.",
+        "tax_id": "NEW123456789"
+    }
+)
+update_resp.raise_for_status()
+tenant = update_resp.json()
+print(f"✅ Tenant updated: {tenant['name']}")
+```
+
+### Upload Tenant Logo
+```bash
+curl -X POST "http://localhost:8000/api/v1/tenants/{tenant_id}/logo" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -F "file=@logo.png"
+```
+
+**Python Example:**
+```python
+# Upload tenant logo (admin only)
+tenant_id = "TENANT_UUID"
+with open("logo.png", "rb") as f:
+    logo_resp = requests.post(
+        f"{BASE_URL}/api/v1/tenants/{tenant_id}/logo",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("logo.png", f, "image/png")}
+    )
+logo_resp.raise_for_status()
+result = logo_resp.json()
+print(f"✅ Logo uploaded: {result['logo_url']}")
+```
+
+### Toggle Tenant Active Status
+```bash
+curl -X POST "http://localhost:8000/api/v1/tenants/{tenant_id}/toggle" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+# Toggle tenant active status (admin only, cannot toggle own tenant)
+other_tenant_id = "OTHER_TENANT_UUID"
+toggle_resp = requests.post(
+    f"{BASE_URL}/api/v1/tenants/{other_tenant_id}/toggle",
+    headers={"Authorization": f"Bearer {token}"}
+)
+if toggle_resp.status_code == 200:
+    result = toggle_resp.json()
+    print(f"✅ Tenant {result['message']}")
+    print(f"   is_active: {result['is_active']}")
+elif toggle_resp.status_code == 400:
+    print("❌ Cannot deactivate your own tenant")
+```
+
+## 📋 Report Templates Management
+
+### List Report Templates
+```bash
+curl "http://localhost:8000/api/v1/reports/templates/" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+# List only active templates (default)
+templates_response = requests.get(
+    f"{BASE_URL}/api/v1/reports/templates/",
+    headers={"Authorization": f"Bearer {token}"},
+    params={"active_only": True}
+)
+templates = templates_response.json()
+print(f"Active templates: {len(templates['templates'])}")
+
+for template in templates['templates']:
+    print(f"- {template['name']}: {template['description']}")
+
+# List all templates including inactive
+all_templates_response = requests.get(
+    f"{BASE_URL}/api/v1/reports/templates/",
+    headers={"Authorization": f"Bearer {token}"},
+    params={"active_only": False}
+)
+all_templates = all_templates_response.json()
+print(f"\nAll templates: {len(all_templates['templates'])}")
+```
+
+### Get Template Details
+```bash
+curl "http://localhost:8000/api/v1/reports/templates/{template_id}" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+template_response = requests.get(
+    f"{BASE_URL}/api/v1/reports/templates/{template_id}",
+    headers={"Authorization": f"Bearer {token}"}
+)
+template = template_response.json()
+
+print(f"Template: {template['name']}")
+print(f"Description: {template['description']}")
+print(f"JSON Structure: {json.dumps(template['template_json'], indent=2)}")
+print(f"Created by: {template['created_by']}")
+print(f"Active: {template['is_active']}")
+```
+
+### Create Report Template
+```bash
+curl -X POST "http://localhost:8000/api/v1/reports/templates/" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "name": "Citología Mamaria",
+    "description": "Template para reportes de citología mamaria",
+    "template_json": {
+      "sections": [
+        {
+          "title": "Datos del Paciente",
+          "fields": ["nombre", "edad", "fecha_muestra"]
+        },
+        {
+          "title": "Resultados",
+          "fields": ["diagnostico", "hallazgos", "recomendaciones"]
+        }
+      ],
+      "metadata": {
+        "version": "1.0",
+        "type": "citologia_mamaria"
+      }
+    }
+  }'
+```
+
+**Python Example:**
+```python
+template_data = {
+    "name": "Citología Mamaria",
+    "description": "Template para reportes de citología mamaria",
+    "template_json": {
+        "sections": [
+            {
+                "title": "Datos del Paciente",
+                "fields": ["nombre", "edad", "fecha_muestra"]
+            },
+            {
+                "title": "Resultados",
+                "fields": ["diagnostico", "hallazgos", "recomendaciones"]
+            }
+        ],
+        "metadata": {
+            "version": "1.0",
+            "type": "citologia_mamaria"
+        }
+    }
+}
+
+template_response = requests.post(
+    f"{BASE_URL}/api/v1/reports/templates/",
+    headers={"Authorization": f"Bearer {token}"},
+    json=template_data
+)
+template = template_response.json()
+print(f"✅ Template created: {template['name']}")
+print(f"   ID: {template['id']}")
+```
+
+### Update Report Template
+```bash
+curl -X PUT "http://localhost:8000/api/v1/reports/templates/{template_id}" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "name": "Citología Mamaria Actualizada",
+    "description": "Versión actualizada del template",
+    "is_active": true
+  }'
+```
+
+**Python Example:**
+```python
+# Update template name and description
+update_data = {
+    "name": "Citología Mamaria Actualizada",
+    "description": "Versión actualizada del template"
+}
+
+update_response = requests.put(
+    f"{BASE_URL}/api/v1/reports/templates/{template_id}",
+    headers={"Authorization": f"Bearer {token}"},
+    json=update_data
+)
+updated_template = update_response.json()
+print(f"✅ Template updated: {updated_template['name']}")
+
+# Deactivate template (soft delete)
+deactivate_response = requests.put(
+    f"{BASE_URL}/api/v1/reports/templates/{template_id}",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"is_active": False}
+)
+print(f"✅ Template deactivated")
+
+# Reactivate template
+reactivate_response = requests.put(
+    f"{BASE_URL}/api/v1/reports/templates/{template_id}",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"is_active": True}
+)
+print(f"✅ Template reactivated")
+```
+
+### Delete Report Template
+```bash
+# Soft delete (default - sets is_active to false)
+curl -X DELETE "http://localhost:8000/api/v1/reports/templates/{template_id}" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+
+# Hard delete (permanently remove)
+curl -X DELETE "http://localhost:8000/api/v1/reports/templates/{template_id}?hard_delete=true" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+# Soft delete (recommended - preserves data)
+delete_response = requests.delete(
+    f"{BASE_URL}/api/v1/reports/templates/{template_id}",
+    headers={"Authorization": f"Bearer {token}"}
+)
+result = delete_response.json()
+print(f"✅ {result['message']}")
+
+# Hard delete (permanent removal)
+hard_delete_response = requests.delete(
+    f"{BASE_URL}/api/v1/reports/templates/{template_id}",
+    headers={"Authorization": f"Bearer {token}"},
+    params={"hard_delete": True}
+)
+result = hard_delete_response.json()
+print(f"⚠️ {result['message']}")
+```
+
+**Notes:**
+- **Soft Delete (default)**: Sets `is_active=false`, template is preserved but hidden from active lists
+- **Hard Delete**: Permanently removes template from database (use with caution)
+- **Recommendation**: Use PUT with `is_active: false` for soft delete instead of DELETE endpoint
+
 ## 📋 Report Workflow Management
 
 ### Submit Report for Review

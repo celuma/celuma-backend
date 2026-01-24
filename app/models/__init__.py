@@ -6,7 +6,7 @@ from .user import AppUser, UserBranch
 from .patient import Patient
 from .storage import StorageObject, SampleImageRendition
 from .laboratory import LabOrder, Sample, SampleImage
-from .report import Report, ReportVersion
+from .report import Report, ReportVersion, ReportTemplate
 from .billing import Invoice, Payment, ServiceCatalog, InvoiceItem
 from .audit import AuditLog
 from .events import CaseEvent
@@ -37,6 +37,7 @@ __all__ = [
     "SampleImage",
     "Report",
     "ReportVersion",
+    "ReportTemplate",
     "Invoice",
     "Payment",
     "ServiceCatalog",
