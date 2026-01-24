@@ -119,9 +119,7 @@ def get_my_worklist(
         
         if status:
             review_query = review_query.where(ReportReview.status == status.upper())
-        else:
-            # Default to pending reviews only
-            review_query = review_query.where(ReportReview.status == ReviewStatus.PENDING)
+        # Include all reviews (pending, approved, rejected) - no default filter
         
         reviews = session.exec(review_query).all()
         
@@ -166,6 +164,7 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
             display_id=order.order_code,
             item_status=order.status.value if hasattr(order.status, 'value') else str(order.status),
             assigned_at=assignment.assigned_at,
+            patient_id=str(patient.id) if patient else None,
             patient_name=patient.first_name + " " + patient.last_name if patient else None,
             patient_code=patient.patient_code if patient else None,
             order_code=order.order_code,
@@ -186,6 +185,7 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
             display_id=sample.sample_code,
             item_status=sample.state.value if hasattr(sample.state, 'value') else str(sample.state),
             assigned_at=assignment.assigned_at,
+            patient_id=str(patient.id) if patient else None,
             patient_name=patient.first_name + " " + patient.last_name if patient else None,
             patient_code=patient.patient_code if patient else None,
             order_code=order.order_code if order else None,
@@ -206,6 +206,7 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
             display_id=report.title or order.order_code if order else str(assignment.item_id),
             item_status=report.status.value if hasattr(report.status, 'value') else str(report.status),
             assigned_at=assignment.assigned_at,
+            patient_id=str(patient.id) if patient else None,
             patient_name=patient.first_name + " " + patient.last_name if patient else None,
             patient_code=patient.patient_code if patient else None,
             order_code=order.order_code if order else None,
@@ -236,6 +237,7 @@ def _build_review_worklist_item(session: Session, review: ReportReview) -> Optio
         display_id=order.order_code,
         item_status=review.status.value if hasattr(review.status, 'value') else str(review.status),
         assigned_at=review.assigned_at,
+        patient_id=str(patient.id) if patient else None,
         patient_name=patient.first_name + " " + patient.last_name if patient else None,
         patient_code=patient.patient_code if patient else None,
         order_code=order.order_code if order else None,

@@ -177,6 +177,13 @@ def list_orders(
         sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
         has_report = session.exec(select(Report).where(Report.order_id == o.id)).first() is not None
 
+        # Get labels
+        label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == o.id)).all()
+        labels = []
+        if label_ids:
+            labels_objs = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
+            labels = [LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels_objs]
+        
         results.append(
             OrderListItem(
                 id=str(o.id),
@@ -194,6 +201,7 @@ def list_orders(
                 created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
                 sample_count=sample_count,
                 has_report=has_report,
+                labels=labels if labels else None,
             )
         )
 
@@ -626,6 +634,14 @@ def list_samples(
         branch = session.get(Branch, s.branch_id)
         order = session.get(Order, s.order_id)
         patient = session.get(Patient, order.patient_id) if order else None
+        
+        # Get only own labels (not inherited from order)
+        sample_label_ids = session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == s.id)).all()
+        labels = []
+        if sample_label_ids:
+            labels_objs = session.exec(select(Label).where(Label.id.in_(sample_label_ids))).all()
+            labels = [LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels_objs]
+        
         items.append(
             SampleListItem(
                 id=str(s.id),
@@ -645,6 +661,7 @@ def list_samples(
                         patient_code=patient.patient_code if patient else "",
                     ) if patient else None,
                 ),
+                labels=labels if labels else None,
             )
         )
     return SamplesListResponse(samples=items)

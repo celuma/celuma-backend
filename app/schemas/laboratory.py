@@ -380,6 +380,7 @@ class OrderListItem(BaseModel):
     created_at: Optional[str] = None
     sample_count: int
     has_report: bool
+    labels: Optional[List[LabelResponse]] = None
 
 
 class OrdersListResponse(BaseModel):
@@ -396,6 +397,7 @@ class SampleListItem(BaseModel):
     tenant_id: str
     branch: BranchRef
     order: OrderSlim
+    labels: Optional[List[LabelResponse]] = None
 
 
 class SamplesListResponse(BaseModel):

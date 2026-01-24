@@ -113,6 +113,7 @@ class WorklistItemResponse(BaseModel):
     assigned_at: datetime
     
     # Context information
+    patient_id: Optional[str] = None
     patient_name: Optional[str] = None
     patient_code: Optional[str] = None
     order_code: Optional[str] = None  # For samples/reports, the parent order
