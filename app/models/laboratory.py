@@ -2,14 +2,17 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field, Relationship, Column
-from sqlalchemy import JSON, ARRAY
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy import JSON
 from .base import BaseModel, TimestampMixin, TenantMixin, BranchMixin
 from .enums import OrderStatus, SampleType, SampleState
 
-class LabOrder(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
-    """Laboratory order model"""
-    __tablename__ = "lab_order"
+class Order(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
+    """Laboratory order model
+    
+    Note: Assignees and reviewers are now stored in the 'assignment' table.
+    Use the Assignment model to query/manage assignees and reviewers.
+    """
+    __tablename__ = "order"
     
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     tenant_id: UUID = Field(foreign_key="tenant.id")
@@ -21,30 +24,33 @@ class LabOrder(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     notes: Optional[str] = Field(default=None)
     billed_lock: bool = Field(default=False)  # Lock release if no payment
     created_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
-    assignees: Optional[List[UUID]] = Field(default=None, sa_column=Column(ARRAY(PG_UUID(as_uuid=True))))
-    reviewers: Optional[List[UUID]] = Field(default=None, sa_column=Column(ARRAY(PG_UUID(as_uuid=True))))
+    # NOTE: assignees and reviewers columns removed - now in 'assignment' table
     
     # Basic relationships only
     samples: List["Sample"] = Relationship(back_populates="order")
 
 class Sample(BaseModel, TenantMixin, BranchMixin, table=True):
-    """Sample model for laboratory samples"""
+    """Sample model for laboratory samples
+    
+    Note: Assignees are now stored in the 'assignment' table.
+    Use the Assignment model to query/manage assignees.
+    """
     __tablename__ = "sample"
     
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     tenant_id: UUID = Field(foreign_key="tenant.id")
     branch_id: UUID = Field(foreign_key="branch.id")
-    order_id: UUID = Field(foreign_key="lab_order.id")
+    order_id: UUID = Field(foreign_key="order.id")
     sample_code: str = Field(max_length=100)  # Unique per order or branch
     type: SampleType
     state: SampleState = Field(default=SampleState.RECEIVED)
     collected_at: Optional[datetime] = Field(default=None)
     received_at: Optional[datetime] = Field(default=None)
     notes: Optional[str] = Field(default=None)
-    assignees: Optional[List[UUID]] = Field(default=None, sa_column=Column(ARRAY(PG_UUID(as_uuid=True))))
+    # NOTE: assignees column removed - now in 'assignment' table
     
     # Basic relationships only
-    order: LabOrder = Relationship(back_populates="samples")
+    order: "Order" = Relationship(back_populates="samples")
     images: List["SampleImage"] = Relationship(back_populates="sample")
 
 class SampleImage(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
@@ -71,7 +77,7 @@ class OrderComment(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=Tr
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     tenant_id: UUID = Field(foreign_key="tenant.id")
     branch_id: UUID = Field(foreign_key="branch.id")
-    order_id: UUID = Field(foreign_key="lab_order.id")
+    order_id: UUID = Field(foreign_key="order.id")
     # created_at inherited from TimestampMixin
     created_by: UUID = Field(foreign_key="app_user.id")
     text: str = Field(max_length=5000)
@@ -98,12 +104,15 @@ class Label(BaseModel, TimestampMixin, TenantMixin, table=True):
     # Override updated_at to ensure it has a default value
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-class LabOrderLabel(BaseModel, table=True):
+class OrderLabel(BaseModel, table=True):
     """Junction table for order-label many-to-many relationship"""
-    __tablename__ = "lab_order_labels"
+    __tablename__ = "order_labels"
     
-    order_id: UUID = Field(foreign_key="lab_order.id", primary_key=True, ondelete="CASCADE")
+    order_id: UUID = Field(foreign_key="order.id", primary_key=True, ondelete="CASCADE")
     label_id: UUID = Field(foreign_key="label.id", primary_key=True, ondelete="CASCADE")
+
+# Alias for backwards compatibility
+LabOrderLabel = OrderLabel
 
 class SampleLabel(BaseModel, table=True):
     """Junction table for sample-label many-to-many relationship

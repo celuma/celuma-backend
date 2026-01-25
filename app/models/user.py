@@ -14,6 +14,8 @@ class AppUser(BaseModel, TimestampMixin, TenantMixin, table=True):
     username: Optional[str] = Field(max_length=50, index=True, nullable=True)
     email: str = Field(max_length=255, index=True)
     full_name: str = Field(max_length=255)
+    first_name: str = Field(max_length=255)
+    last_name: str = Field(max_length=255)
     role: UserRole
     hashed_password: str = Field(max_length=255)
     is_active: bool = Field(default=True)

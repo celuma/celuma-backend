@@ -13,7 +13,7 @@ class Report(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     tenant_id: UUID = Field(foreign_key="tenant.id")
     branch_id: UUID = Field(foreign_key="branch.id")
-    order_id: UUID = Field(foreign_key="lab_order.id")
+    order_id: UUID = Field(foreign_key="order.id")
     status: ReportStatus = Field(default=ReportStatus.DRAFT)
     title: Optional[str] = Field(max_length=500, default=None)
     diagnosis_text: Optional[str] = Field(default=None)  # Quick extract; PDF is canonical

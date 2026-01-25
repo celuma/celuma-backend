@@ -6,20 +6,20 @@ from sqlalchemy import JSON
 from .base import BaseModel, TimestampMixin, TenantMixin, BranchMixin
 from .enums import EventType
 
-class CaseEvent(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
-    """Case event model for timeline tracking.
+class OrderEvent(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
+    """Order event model for timeline tracking.
     
     Used for:
     - Order timeline: all events with this order_id
     - Sample timeline: filter by sample_id
     - Report timeline: filter by event_type REPORT_*
     """
-    __tablename__ = "case_event"
+    __tablename__ = "order_event"
     
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     tenant_id: UUID = Field(foreign_key="tenant.id")
     branch_id: UUID = Field(foreign_key="branch.id")
-    order_id: UUID = Field(foreign_key="lab_order.id")
+    order_id: UUID = Field(foreign_key="order.id")
     sample_id: Optional[UUID] = Field(foreign_key="sample.id", default=None)  # Optional: for sample-specific events
     event_type: EventType
     description: str = Field(max_length=500)

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlmodel import select, Session, func
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext
-from app.models.laboratory import LabOrder, Sample
+from app.models.laboratory import Order, Sample
 from app.models.patient import Patient
 from app.models.report import Report
 from pydantic import BaseModel
@@ -45,7 +45,7 @@ def get_dashboard_data(
     ).one()
     
     total_orders = session.exec(
-        select(func.count(LabOrder.id)).where(LabOrder.tenant_id == ctx.tenant_id)
+        select(func.count(Order.id)).where(Order.tenant_id == ctx.tenant_id)
     ).one()
     
     total_samples = session.exec(
@@ -58,9 +58,9 @@ def get_dashboard_data(
     
     # Get status-specific counts
     pending_orders = session.exec(
-        select(func.count(LabOrder.id)).where(
-            LabOrder.tenant_id == ctx.tenant_id,
-            LabOrder.status.in_(["RECEIVED", "PROCESSING"])
+        select(func.count(Order.id)).where(
+            Order.tenant_id == ctx.tenant_id,
+            Order.status.in_(["RECEIVED", "PROCESSING"])
         )
     ).one()
     
@@ -94,8 +94,8 @@ def get_dashboard_data(
     
     # Recent orders (last 3)
     recent_orders = session.exec(
-        select(LabOrder).where(LabOrder.tenant_id == ctx.tenant_id)
-        .order_by(LabOrder.created_at.desc())
+        select(Order).where(Order.tenant_id == ctx.tenant_id)
+        .order_by(Order.created_at.desc())
         .limit(3)
     ).all()
     
@@ -120,7 +120,7 @@ def get_dashboard_data(
     ).all()
     
     for report in recent_reports:
-        order = session.get(LabOrder, report.order_id)
+        order = session.get(Order, report.order_id)
         if order:
             patient = session.get(Patient, order.patient_id)
             patient_name = f"{patient.first_name} {patient.last_name}" if patient else "Paciente desconocido"
@@ -142,7 +142,7 @@ def get_dashboard_data(
     ).all()
     
     for sample in recent_samples:
-        order = session.get(LabOrder, sample.order_id)
+        order = session.get(Order, sample.order_id)
         if order:
             patient = session.get(Patient, order.patient_id)
             patient_name = f"{patient.first_name} {patient.last_name}" if patient else "Paciente desconocido"

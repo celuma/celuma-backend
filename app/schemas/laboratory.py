@@ -15,6 +15,12 @@ class UserRef(BaseModel):
     avatar_url: Optional[str] = None
 
 
+class ReviewerWithStatus(UserRef):
+    """User reference with review status for reviewers"""
+    status: str  # "pending", "approved", "rejected"
+    review_id: Optional[str] = None
+
+
 # --- Label Schemas (defined early) ---
 
 class LabelResponse(BaseModel):
@@ -33,8 +39,8 @@ class LabelWithInheritance(BaseModel):
     inherited: bool  # True if inherited from order, False if own label
 
 
-class LabOrderCreate(BaseModel):
-    """Schema for creating a laboratory order"""
+class OrderCreate(BaseModel):
+    """Schema for creating an order"""
     tenant_id: str
     branch_id: str
     patient_id: str
@@ -43,8 +49,11 @@ class LabOrderCreate(BaseModel):
     notes: Optional[str] = None
     created_by: Optional[str] = None
 
-class LabOrderResponse(BaseModel):
-    """Schema for laboratory order response"""
+# Alias for backwards compatibility
+LabOrderCreate = OrderCreate
+
+class OrderResponse(BaseModel):
+    """Schema for order response"""
     id: str
     order_code: str
     status: str
@@ -52,8 +61,11 @@ class LabOrderResponse(BaseModel):
     tenant_id: str
     branch_id: str
 
-class LabOrderDetailResponse(BaseModel):
-    """Schema for detailed laboratory order response"""
+# Alias for backwards compatibility
+LabOrderResponse = OrderResponse
+
+class OrderDetailResponse(BaseModel):
+    """Schema for detailed order response"""
     id: str
     order_code: str
     status: str
@@ -64,8 +76,11 @@ class LabOrderDetailResponse(BaseModel):
     notes: Optional[str] = None
     billed_lock: Optional[bool] = None
     assignees: Optional[List[UserRef]] = None
-    reviewers: Optional[List[UserRef]] = None
+    reviewers: Optional[List[ReviewerWithStatus]] = None
     labels: Optional[List[LabelResponse]] = None
+
+# Alias for backwards compatibility
+LabOrderDetailResponse = OrderDetailResponse
 
 
 class OrderNotesUpdate(BaseModel):
@@ -210,6 +225,8 @@ class SampleResponse(BaseModel):
     order_id: str
     tenant_id: str
     branch_id: str
+    assignees: Optional[List[UserRef]] = None
+    labels: Optional[List[LabelWithInheritance]] = None
 
 
 class SampleStateUpdate(BaseModel):
@@ -256,7 +273,7 @@ class UnifiedSampleCreate(BaseModel):
     received_at: Optional[datetime] = None
 
 
-class LabOrderUnifiedCreate(BaseModel):
+class OrderUnifiedCreate(BaseModel):
     """Unified create: create lab order and one or more samples in one operation."""
     tenant_id: str
     branch_id: str
@@ -268,13 +285,13 @@ class LabOrderUnifiedCreate(BaseModel):
     samples: List[UnifiedSampleCreate]
 
 
-class LabOrderUnifiedResponse(BaseModel):
+class OrderUnifiedResponse(BaseModel):
     """Response for unified create, returning order and samples created."""
     order: LabOrderResponse
     samples: List[SampleResponse]
 
 
-class LabOrderFullDetailResponse(BaseModel):
+class OrderFullDetailResponse(BaseModel):
     """Complete detail for a lab order: order, patient, and samples."""
     order: LabOrderDetailResponse
     patient: PatientFullResponse
@@ -365,6 +382,8 @@ class OrderListItem(BaseModel):
     created_at: Optional[str] = None
     sample_count: int
     has_report: bool
+    labels: Optional[List[LabelResponse]] = None
+    assignees: Optional[List[UserRef]] = None
 
 
 class OrdersListResponse(BaseModel):
@@ -381,6 +400,8 @@ class SampleListItem(BaseModel):
     tenant_id: str
     branch: BranchRef
     order: OrderSlim
+    labels: Optional[List[LabelResponse]] = None
+    assignees: Optional[List[UserRef]] = None
 
 
 class SamplesListResponse(BaseModel):

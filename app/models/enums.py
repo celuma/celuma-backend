@@ -39,6 +39,18 @@ class ReportStatus(str, Enum):
     PUBLISHED = "PUBLISHED"
     RETRACTED = "RETRACTED"
 
+class ReviewStatus(str, Enum):
+    """Status for individual report reviews"""
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+class AssignmentItemType(str, Enum):
+    """Item types that can have assignments"""
+    LAB_ORDER = "lab_order"
+    SAMPLE = "sample"
+    REPORT = "report"
+
 class PaymentStatus(str, Enum):
     PENDING = "PENDING"
     PAID = "PAID"

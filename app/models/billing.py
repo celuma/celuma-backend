@@ -44,7 +44,7 @@ class Invoice(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     tenant_id: UUID = Field(foreign_key="tenant.id")
     branch_id: UUID = Field(foreign_key="branch.id")
-    order_id: UUID = Field(foreign_key="lab_order.id")
+    order_id: UUID = Field(foreign_key="order.id")
     invoice_number: str = Field(max_length=100)  # Unique per branch
     amount_total: float = Field(sa_type=Numeric(12, 2))
     currency: str = Field(default="MXN", max_length=3)

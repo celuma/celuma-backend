@@ -1,15 +1,18 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from sqlmodel import select, Session
+from sqlmodel import select, Session, and_
+from sqlalchemy import cast, String
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.models.report import Report, ReportVersion, ReportTemplate
-from app.models.laboratory import LabOrder
+from app.models.laboratory import Order
 from app.models.tenant import Tenant, Branch
 from app.models.patient import Patient
 from app.models.storage import StorageObject
 from app.models.user import AppUser
 from app.models.audit import AuditLog
-from app.models.enums import ReportStatus, UserRole
+from app.models.enums import ReportStatus, UserRole, AssignmentItemType, ReviewStatus
+from app.models.assignment import Assignment
+from app.models.report_review import ReportReview
 from app.services.s3 import S3Service
 from app.schemas.report import (
     ReportCreate, 
@@ -47,6 +50,7 @@ def update_order_status_for_report(order_id: str, session: Session) -> None:
     from app.api.v1.laboratory import update_order_status
     update_order_status(order_id, session)
 
+
 @router.get("/", response_model=ReportsListResponse)
 def list_reports(
     session: Session = Depends(get_session),
@@ -59,7 +63,7 @@ def list_reports(
     for r in reports:
         # Resolve related entities
         branch = session.get(Branch, r.branch_id)
-        order = session.get(LabOrder, r.order_id)
+        order = session.get(Order, r.order_id)
         patient = session.get(Patient, order.patient_id) if order else None
         
         # Get current version info
@@ -74,6 +78,25 @@ def list_reports(
         has_pdf = bool(current_version and current_version.pdf_storage_id)
         signed_by = str(current_version.signed_by) if current_version and current_version.signed_by else None
         signed_at = current_version.signed_at if current_version else None
+        
+        # Get reviewers
+        reviews = session.exec(
+            select(ReportReview).where(ReportReview.order_id == order.id if order else None)
+        ).all()
+        reviewers = []
+        if reviews:
+            from app.schemas.report import ReviewerWithStatus
+            for review in reviews:
+                reviewer = session.get(AppUser, review.reviewer_user_id)
+                if reviewer:
+                    reviewers.append(ReviewerWithStatus(
+                        id=str(reviewer.id),
+                        name=reviewer.full_name,
+                        email=reviewer.email,
+                        avatar_url=reviewer.avatar_url,
+                        status=review.status.lower(),
+                        review_id=str(review.id)
+                    ))
         
         results.append(
             ReportListItem(
@@ -104,7 +127,8 @@ def list_reports(
                 signed_by=signed_by,
                 signed_at=signed_at,
                 version_no=version_no,
-                has_pdf=has_pdf
+                has_pdf=has_pdf,
+                reviewers=reviewers if reviewers else None,
             )
         )
     
@@ -134,7 +158,7 @@ def create_report(
     if str(branch.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Branch does not belong to your tenant")
     
-    order = session.get(LabOrder, report_data.order_id)
+    order = session.get(Order, report_data.order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     
@@ -163,11 +187,29 @@ def create_report(
     session.add(report)
     session.flush()
     
+    # Initialize report_id in existing report_review records for this order
+    from app.models.report_review import ReportReview
+    existing_reviews = session.exec(
+        select(ReportReview).where(
+            and_(
+                ReportReview.order_id == report.order_id,
+                ReportReview.report_id.is_(None),
+            )
+        )
+    ).all()
+    
+    for review in existing_reviews:
+        review.report_id = report.id
+        session.add(review)
+    
     # Create timeline event for report creation
-    from app.models.events import CaseEvent
+    from app.models.events import OrderEvent
     from app.models.enums import EventType
     
-    creation_event = CaseEvent(
+    # Get creator info for event
+    creator = session.get(AppUser, report.created_by)
+    
+    creation_event = OrderEvent(
         tenant_id=report.tenant_id,
         branch_id=report.branch_id,
         order_id=report.order_id,
@@ -176,6 +218,7 @@ def create_report(
         event_metadata={
             "report_id": str(report.id),
             "report_title": report.title,
+            "created_by_name": creator.full_name or creator.username if creator else None,
         },
         created_by=report.created_by,
     )
@@ -299,11 +342,23 @@ def create_report_new_version(
     )
     session.add(new_version)
     
+    # Reset all review statuses to pending when new version is created
+    reviews = session.exec(
+        select(ReportReview).where(ReportReview.order_id == report.order_id)
+    ).all()
+    
+    reviewer_count = 0
+    for review in reviews:
+        review.status = ReviewStatus.PENDING
+        review.decision_at = None
+        session.add(review)
+        reviewer_count += 1
+    
     # Create timeline event for new version
-    from app.models.events import CaseEvent
+    from app.models.events import OrderEvent
     from app.models.enums import EventType
     
-    version_event = CaseEvent(
+    version_event = OrderEvent(
         tenant_id=report.tenant_id,
         branch_id=report.branch_id,
         order_id=report.order_id,
@@ -313,6 +368,7 @@ def create_report_new_version(
             "report_id": str(report.id),
             "report_title": report.title,
             "version_no": next_version_no,
+            "reviews_reset": reviewer_count,
         },
         created_by=report_data.created_by,
     )
@@ -355,7 +411,7 @@ def get_pathologist_worklist(
     for r in reports:
         # Resolve related entities
         branch = session.get(Branch, r.branch_id)
-        order = session.get(LabOrder, r.order_id)
+        order = session.get(Order, r.order_id)
         patient = session.get(Patient, order.patient_id) if order else None
         
         # Get current version info
@@ -683,7 +739,7 @@ def get_pdf_of_latest_version(
         raise HTTPException(404, "Report not found")
 
     # Check if order is locked due to pending payment
-    order = session.get(LabOrder, report.order_id)
+    order = session.get(Order, report.order_id)
     if order and order.billed_lock:
         raise HTTPException(403, "Report access blocked due to pending payment")
 
@@ -930,7 +986,7 @@ def get_pdf_of_specific_version(
         raise HTTPException(403, "Report does not belong to your tenant")
 
     # Check if order is locked due to pending payment
-    order = session.get(LabOrder, report.order_id)
+    order = session.get(Order, report.order_id)
     if order and order.billed_lock:
         raise HTTPException(403, "Report access blocked due to pending payment")
 
@@ -1007,10 +1063,24 @@ def submit_report(
     if report.status != ReportStatus.DRAFT:
         raise HTTPException(400, f"Cannot submit report in {report.status} status")
     
-    # Validate that order has reviewers assigned
-    order = session.get(LabOrder, report.order_id)
-    if not order or not order.reviewers or len(order.reviewers) == 0:
-        raise HTTPException(400, "Cannot submit report for review without reviewers assigned to the order")
+    # Get all reviewers for this order (regardless of current status)
+    reviewers = session.exec(
+        select(ReportReview).where(
+            and_(
+                ReportReview.tenant_id == report.tenant_id,
+                ReportReview.order_id == report.order_id,
+            )
+        )
+    ).all()
+    
+    if not reviewers or len(reviewers) == 0:
+        raise HTTPException(400, "Cannot submit report for review without reviewers assigned")
+    
+    # Reset all reviews to PENDING when re-submitting (allows re-review after changes)
+    for reviewer in reviewers:
+        reviewer.status = ReviewStatus.PENDING
+        reviewer.decision_at = None
+        session.add(reviewer)
     
     # Update status
     old_status = report.status
@@ -1031,10 +1101,10 @@ def submit_report(
     )
     
     # Create timeline event for report submission
-    from app.models.events import CaseEvent
+    from app.models.events import OrderEvent
     from app.models.enums import EventType
     
-    submit_event = CaseEvent(
+    submit_event = OrderEvent(
         tenant_id=report.tenant_id,
         branch_id=report.branch_id,
         order_id=report.order_id,
@@ -1043,6 +1113,8 @@ def submit_report(
         event_metadata={
             "report_id": str(report.id),
             "report_title": report.title,
+            "submitted_by": str(user.id),
+            "submitted_by_name": user.full_name or user.username,
         },
         created_by=user.id,
     )
@@ -1079,11 +1151,15 @@ def approve_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Approve a report (IN_REVIEW → APPROVED) - Pathologist only"""
-    # Check user role
-    if user.role != UserRole.PATHOLOGIST:
-        raise HTTPException(403, "Only pathologists can approve reports")
+    """
+    Approve a report (IN_REVIEW → APPROVED).
     
+    The user must be either:
+    - A pathologist (can approve any report)
+    - An assigned reviewer for this report
+    
+    Updates the user's review record and applies MVP rule: ≥1 approved = report approved.
+    """
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
@@ -1094,10 +1170,47 @@ def approve_report(
     if report.status != ReportStatus.IN_REVIEW:
         raise HTTPException(400, f"Cannot approve report in {report.status} status")
     
-    # Update status
+    # Check if user has a pending review for this report
+    user_review = session.exec(
+        select(ReportReview).where(
+            and_(
+                ReportReview.tenant_id == report.tenant_id,
+                ReportReview.order_id == report.order_id,
+                ReportReview.reviewer_user_id == user.id,
+                ReportReview.status == ReviewStatus.PENDING,
+            )
+        )
+    ).first()
+    
+    # If user has a review, update it; otherwise check if they're a pathologist or admin
+    if user_review:
+        user_review.status = ReviewStatus.APPROVED
+        user_review.decision_at = datetime.utcnow()
+        session.add(user_review)
+    elif user.role not in [UserRole.PATHOLOGIST, UserRole.ADMIN]:
+        raise HTTPException(403, "Only assigned reviewers, pathologists, or admins can approve reports")
+    
+    # Update report status (MVP rule: ≥1 approved = report approved)
     old_status = report.status
     report.status = ReportStatus.APPROVED
     session.add(report)
+    
+    # Create comment in conversation if there's a changelog
+    if data.changelog and data.changelog.strip():
+        from app.models.laboratory import OrderComment
+        order_comment = OrderComment(
+            tenant_id=report.tenant_id,
+            branch_id=report.branch_id,
+            order_id=report.order_id,
+            created_by=user.id,
+            text=data.changelog,
+            comment_metadata={
+                "source": "review_approval",
+                "report_id": str(report.id),
+                "review_id": str(user_review.id) if user_review else None,
+            },
+        )
+        session.add(order_comment)
     
     # Create audit log
     _create_audit_log(
@@ -1112,15 +1225,37 @@ def approve_report(
         new_values={"status": report.status, "changelog": data.changelog},
     )
     
+    # Create timeline event for report approval
+    from app.models.events import OrderEvent
+    from app.models.enums import EventType
+    
+    approve_event = OrderEvent(
+        tenant_id=report.tenant_id,
+        branch_id=report.branch_id,
+        order_id=report.order_id,
+        event_type=EventType.REPORT_APPROVED,
+        description="",  # Not used - message built in UI
+        event_metadata={
+            "report_id": str(report.id),
+            "report_title": report.title,
+            "reviewer_id": str(user.id),
+            "reviewer_name": user.full_name or user.username,
+            "comment": data.changelog if data.changelog else None,
+        },
+        created_by=user.id,
+    )
+    session.add(approve_event)
+    
     session.commit()
     session.refresh(report)
     
     logger.info(
-        f"Report {report_id} approved by pathologist {ctx.user_id}",
+        f"Report {report_id} approved by user {ctx.user_id}",
         extra={
             "event": "report.approve",
             "report_id": report_id,
             "user_id": ctx.user_id,
+            "had_review": user_review is not None,
         },
     )
     
@@ -1139,11 +1274,15 @@ def request_changes(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Request changes on a report (IN_REVIEW → DRAFT) - Pathologist only"""
-    # Check user role
-    if user.role != UserRole.PATHOLOGIST:
-        raise HTTPException(403, "Only pathologists can request changes")
+    """
+    Request changes on a report (IN_REVIEW → DRAFT).
     
+    The user must be either:
+    - A pathologist (can request changes on any report)
+    - An assigned reviewer for this report
+    
+    Updates the user's review record to REJECTED with comment.
+    """
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
@@ -1154,10 +1293,47 @@ def request_changes(
     if report.status != ReportStatus.IN_REVIEW:
         raise HTTPException(400, f"Cannot request changes for report in {report.status} status")
     
+    # Check if user has a pending review for this report
+    user_review = session.exec(
+        select(ReportReview).where(
+            and_(
+                ReportReview.tenant_id == report.tenant_id,
+                ReportReview.order_id == report.order_id,
+                ReportReview.reviewer_user_id == user.id,
+                ReportReview.status == ReviewStatus.PENDING,
+            )
+        )
+    ).first()
+    
+    # If user has a review, update it; otherwise check if they're a pathologist or admin
+    if user_review:
+        user_review.status = ReviewStatus.REJECTED
+        user_review.decision_at = datetime.utcnow()
+        session.add(user_review)
+    elif user.role not in [UserRole.PATHOLOGIST, UserRole.ADMIN]:
+        raise HTTPException(403, "Only assigned reviewers, pathologists, or admins can request changes")
+    
     # Update status back to DRAFT
     old_status = report.status
     report.status = ReportStatus.DRAFT
     session.add(report)
+    
+    # Create comment in conversation
+    if data.comment and data.comment.strip():
+        from app.models.laboratory import OrderComment
+        order_comment = OrderComment(
+            tenant_id=report.tenant_id,
+            branch_id=report.branch_id,
+            order_id=report.order_id,
+            created_by=user.id,
+            text=data.comment,
+            comment_metadata={
+                "source": "review_rejection",
+                "report_id": str(report.id),
+                "review_id": str(user_review.id) if user_review else None,
+            },
+        )
+        session.add(order_comment)
     
     # Create audit log
     _create_audit_log(
@@ -1171,6 +1347,27 @@ def request_changes(
         old_values={"status": old_status},
         new_values={"status": report.status, "comment": data.comment},
     )
+    
+    # Create timeline event for changes requested
+    from app.models.events import OrderEvent
+    from app.models.enums import EventType
+    
+    changes_event = OrderEvent(
+        tenant_id=report.tenant_id,
+        branch_id=report.branch_id,
+        order_id=report.order_id,
+        event_type=EventType.REPORT_CHANGES_REQUESTED,
+        description="",  # Not used - message built in UI
+        event_metadata={
+            "report_id": str(report.id),
+            "report_title": report.title,
+            "reviewer_id": str(user.id),
+            "reviewer_name": user.full_name or user.username,
+            "comment": data.comment if data.comment else None,
+        },
+        created_by=user.id,
+    )
+    session.add(changes_event)
     
     session.commit()
     session.refresh(report)
@@ -1199,10 +1396,10 @@ def sign_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Sign and publish a report (APPROVED → PUBLISHED) - Pathologist only"""
+    """Sign and publish a report (APPROVED → PUBLISHED) - Pathologist or Admin only"""
     # Check user role
-    if user.role != UserRole.PATHOLOGIST:
-        raise HTTPException(403, "Only pathologists can sign reports")
+    if user.role not in [UserRole.PATHOLOGIST, UserRole.ADMIN]:
+        raise HTTPException(403, "Only pathologists or admins can sign reports")
     
     report = session.get(Report, report_id)
     if not report:
@@ -1256,9 +1453,30 @@ def sign_report(
         },
     )
     
+    # Create timeline event for report signature/publication
+    from app.models.events import OrderEvent
+    from app.models.enums import EventType
+    
+    sign_event = OrderEvent(
+        tenant_id=report.tenant_id,
+        branch_id=report.branch_id,
+        order_id=report.order_id,
+        event_type=EventType.REPORT_APPROVED,  # Using REPORT_APPROVED for signing
+        description="",
+        event_metadata={
+            "report_id": str(report.id),
+            "signer_id": str(user.id),
+            "signer_name": user.full_name or user.username,
+            "published": True,
+            "changelog": data.changelog if data.changelog else None,
+        },
+        created_by=user.id,
+    )
+    session.add(sign_event)
+    
     # Update order status based on report being published
-    if current_version.order_id:
-        update_order_status_for_report(str(current_version.order_id), session)
+    if report.order_id:
+        update_order_status_for_report(str(report.order_id), session)
     
     session.commit()
     session.refresh(report)
@@ -1287,10 +1505,10 @@ def retract_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Retract a published report (PUBLISHED → RETRACTED) - Pathologist only"""
+    """Retract a published report (PUBLISHED → RETRACTED) - Pathologist or Admin only"""
     # Check user role
-    if user.role != UserRole.PATHOLOGIST:
-        raise HTTPException(403, "Only pathologists can retract reports")
+    if user.role not in [UserRole.PATHOLOGIST, UserRole.ADMIN]:
+        raise HTTPException(403, "Only pathologists or admins can retract reports")
     
     report = session.get(Report, report_id)
     if not report:
@@ -1321,10 +1539,10 @@ def retract_report(
     )
     
     # Create timeline event for report retraction
-    from app.models.events import CaseEvent
+    from app.models.events import OrderEvent
     from app.models.enums import EventType
     
-    retract_event = CaseEvent(
+    retract_event = OrderEvent(
         tenant_id=report.tenant_id,
         branch_id=report.branch_id,
         order_id=report.order_id,
@@ -1334,6 +1552,8 @@ def retract_report(
             "report_id": str(report.id),
             "report_title": report.title,
             "reason": data.changelog if data.changelog else "Sin razón especificada",
+            "retracted_by": str(user.id),
+            "retracted_by_name": user.full_name or user.username,
         },
         created_by=user.id,
     )

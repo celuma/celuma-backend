@@ -1,21 +1,25 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Set
 from uuid import UUID
-from sqlmodel import select, Session
+from sqlmodel import select, Session, and_
+from sqlalchemy import cast, String
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
-from app.models.laboratory import LabOrder, Sample, SampleImage, Label, LabOrderLabel, SampleLabel
+from app.models.laboratory import Order, Sample, SampleImage, Label, LabOrderLabel, SampleLabel
 from app.models.storage import StorageObject, SampleImageRendition
 from app.models.tenant import Tenant, Branch
 from app.models.patient import Patient
 from app.models.report import Report, ReportVersion
 from app.models.user import AppUser
-from app.models.events import CaseEvent
-from app.models.enums import EventType, SampleState
+from app.models.events import OrderEvent
+from app.models.enums import EventType, SampleState, AssignmentItemType, ReviewStatus
+from app.models.assignment import Assignment
+from app.models.report_review import ReportReview
+from datetime import datetime
 from app.schemas.laboratory import (
-    LabOrderCreate,
-    LabOrderResponse,
-    LabOrderDetailResponse,
+    OrderCreate,
+    OrderResponse,
+    OrderDetailResponse,
     OrderNotesUpdate,
     CommentCreate,
     CommentResponse,
@@ -31,9 +35,9 @@ from app.schemas.laboratory import (
     SampleImagesListResponse,
     SampleImageInfo,
     SampleImageUploadResponse,
-    LabOrderUnifiedCreate,
-    LabOrderUnifiedResponse,
-    LabOrderFullDetailResponse,
+    OrderUnifiedCreate,
+    OrderUnifiedResponse,
+    OrderFullDetailResponse,
     PatientCasesListResponse,
     PatientCaseSummary,
     PatientOrdersListResponse,
@@ -54,6 +58,7 @@ from app.schemas.laboratory import (
     ReviewersUpdate,
     LabelsUpdate,
     UserRef,
+    ReviewerWithStatus,
 )
 from app.schemas.report import ReportMetaResponse
 from app.schemas.patient import PatientFullResponse
@@ -87,7 +92,7 @@ def update_order_status(order_id: str, session: Session) -> None:
     from app.models.enums import OrderStatus, SampleState, ReportStatus
     
     # Get order with samples
-    order = session.get(LabOrder, order_id)
+    order = session.get(Order, order_id)
     if not order:
         return
     
@@ -132,7 +137,16 @@ def update_order_status(order_id: str, session: Session) -> None:
             
             if latest_report.status in [ReportStatus.IN_REVIEW, ReportStatus.RETRACTED]:
                 # Validate reviewers are assigned before moving to REVIEW
-                if not order.reviewers or len(order.reviewers) == 0:
+                # Check in ReportReview table for the report
+                reviewer_count = session.exec(
+                    select(ReportReview).where(
+                        and_(
+                            ReportReview.report_id == latest_report.id,
+                            ReportReview.status == ReviewStatus.PENDING,
+                        )
+                    )
+                ).all()
+                if not reviewer_count or len(reviewer_count) == 0:
                     raise HTTPException(400, "Cannot move to REVIEW status without reviewers assigned")
                 new_status = OrderStatus.REVIEW
             elif latest_report.status == ReportStatus.PUBLISHED:
@@ -154,7 +168,7 @@ def list_orders(
     ctx: AuthContext = Depends(get_auth_ctx),
 ):
     """List all laboratory orders with enriched patient and branch info, plus summary fields."""
-    orders = session.exec(select(LabOrder).where(LabOrder.tenant_id == ctx.tenant_id)).all()
+    orders = session.exec(select(Order).where(Order.tenant_id == ctx.tenant_id)).all()
     results: list[OrderListItem] = []
     for o in orders:
         # Resolve related names
@@ -163,6 +177,28 @@ def list_orders(
         sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
         has_report = session.exec(select(Report).where(Report.order_id == o.id)).first() is not None
 
+        # Get labels
+        label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == o.id)).all()
+        labels = []
+        if label_ids:
+            labels_objs = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
+            labels = [LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels_objs]
+        
+        # Get assignees
+        assignee_ids = session.exec(
+            select(Assignment.assignee_user_id).where(
+                and_(
+                    Assignment.item_type == "lab_order",
+                    Assignment.item_id == o.id,
+                    Assignment.unassigned_at.is_(None)
+                )
+            )
+        ).all()
+        assignees = []
+        if assignee_ids:
+            users = session.exec(select(AppUser).where(AppUser.id.in_(assignee_ids))).all()
+            assignees = [UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in users]
+        
         results.append(
             OrderListItem(
                 id=str(o.id),
@@ -180,13 +216,15 @@ def list_orders(
                 created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
                 sample_count=sample_count,
                 has_report=has_report,
+                labels=labels if labels else None,
+                assignees=assignees if assignees else None,
             )
         )
 
     return OrdersListResponse(orders=results)
 
-@router.post("/orders/", response_model=LabOrderResponse)
-def create_order(order_data: LabOrderCreate, session: Session = Depends(get_session)):
+@router.post("/orders/", response_model=OrderResponse)
+def create_order(order_data: OrderCreate, session: Session = Depends(get_session)):
     """Create a new laboratory order"""
     # Verify tenant, branch, and patient exist
     tenant = session.get(Tenant, order_data.tenant_id)
@@ -203,16 +241,16 @@ def create_order(order_data: LabOrderCreate, session: Session = Depends(get_sess
     
     # Check if order_code is unique for this branch
     existing_order = session.exec(
-        select(LabOrder).where(
-            LabOrder.order_code == order_data.order_code,
-            LabOrder.branch_id == order_data.branch_id
+        select(Order).where(
+            Order.order_code == order_data.order_code,
+            Order.branch_id == order_data.branch_id
         )
     ).first()
     
     if existing_order:
         raise HTTPException(400, "Order code already exists for this branch")
     
-    order = LabOrder(
+    order = Order(
         tenant_id=order_data.tenant_id,
         branch_id=order_data.branch_id,
         patient_id=order_data.patient_id,
@@ -226,7 +264,7 @@ def create_order(order_data: LabOrderCreate, session: Session = Depends(get_sess
     session.commit()
     session.refresh(order)
     
-    return LabOrderResponse(
+    return OrderResponse(
         id=str(order.id),
         order_code=order.order_code,
         status=order.status,
@@ -235,28 +273,24 @@ def create_order(order_data: LabOrderCreate, session: Session = Depends(get_sess
         branch_id=str(order.branch_id)
     )
 
-@router.get("/orders/{order_id}", response_model=LabOrderDetailResponse)
+@router.get("/orders/{order_id}", response_model=OrderDetailResponse)
 def get_order(
     order_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
 ):
     """Get order details"""
-    order = session.get(LabOrder, order_id)
+    order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Order not found")
     
-    # Get assignees
-    assignee_users = []
-    if order.assignees:
-        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(order.assignees))).all()
+    # Get assignees from Assignment table
+    assignee_users = _get_order_assignees(session, order.id, ctx.tenant_id)
     
-    # Get reviewers
-    reviewer_users = []
-    if order.reviewers:
-        reviewer_users = session.exec(select(AppUser).where(AppUser.id.in_(order.reviewers))).all()
+    # Get reviewers with status from Assignment + ReportReview tables
+    reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
     
     # Get labels
     label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
@@ -264,7 +298,7 @@ def get_order(
     if label_ids:
         labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
     
-    return LabOrderDetailResponse(
+    return OrderDetailResponse(
         id=str(order.id),
         order_code=order.order_code,
         status=order.status,
@@ -275,12 +309,12 @@ def get_order(
         notes=order.notes,
         billed_lock=order.billed_lock,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
-        reviewers=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in reviewer_users],
+        reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
     )
 
 
-@router.patch("/orders/{order_id}/notes", response_model=LabOrderDetailResponse)
+@router.patch("/orders/{order_id}/notes", response_model=OrderDetailResponse)
 def update_order_notes(
     order_id: str,
     notes_data: OrderNotesUpdate,
@@ -289,7 +323,7 @@ def update_order_notes(
     user: AppUser = Depends(current_user),
 ):
     """Update the notes/description of an order"""
-    order = session.get(LabOrder, order_id)
+    order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     if str(order.tenant_id) != ctx.tenant_id:
@@ -304,7 +338,7 @@ def update_order_notes(
         session.add(order)
         
         # Create timeline event for notes update
-        event = CaseEvent(
+        event = OrderEvent(
             tenant_id=order.tenant_id,
             branch_id=order.branch_id,
             order_id=order.id,
@@ -323,7 +357,7 @@ def update_order_notes(
         session.commit()
         session.refresh(order)
     
-    return LabOrderDetailResponse(
+    return OrderDetailResponse(
         id=str(order.id),
         order_code=order.order_code,
         status=order.status,
@@ -352,7 +386,7 @@ def get_order_comments(
     from app.models.laboratory import OrderComment, OrderCommentMention
     
     # Validate order access
-    order = session.get(LabOrder, order_id)
+    order = session.get(Order, order_id)
     if not order or str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Order not found")
     
@@ -486,7 +520,7 @@ def create_order_comment(
     from app.models.laboratory import OrderComment, OrderCommentMention
     
     # Validate order access
-    order = session.get(LabOrder, order_id)
+    order = session.get(Order, order_id)
     if not order or str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Order not found")
     
@@ -534,7 +568,7 @@ def create_order_comment(
             ))
     
     # Create timeline event
-    event = CaseEvent(
+    event = OrderEvent(
         tenant_id=order.tenant_id,
         branch_id=order.branch_id,
         order_id=order.id,
@@ -614,8 +648,31 @@ def list_samples(
     items: list[SampleListItem] = []
     for s in samples:
         branch = session.get(Branch, s.branch_id)
-        order = session.get(LabOrder, s.order_id)
+        order = session.get(Order, s.order_id)
         patient = session.get(Patient, order.patient_id) if order else None
+        
+        # Get only own labels (not inherited from order)
+        sample_label_ids = session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == s.id)).all()
+        labels = []
+        if sample_label_ids:
+            labels_objs = session.exec(select(Label).where(Label.id.in_(sample_label_ids))).all()
+            labels = [LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels_objs]
+        
+        # Get assignees
+        assignee_ids = session.exec(
+            select(Assignment.assignee_user_id).where(
+                and_(
+                    Assignment.item_type == "sample",
+                    Assignment.item_id == s.id,
+                    Assignment.unassigned_at.is_(None)
+                )
+            )
+        ).all()
+        assignees = []
+        if assignee_ids:
+            users = session.exec(select(AppUser).where(AppUser.id.in_(assignee_ids))).all()
+            assignees = [UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in users]
+        
         items.append(
             SampleListItem(
                 id=str(s.id),
@@ -635,6 +692,8 @@ def list_samples(
                         patient_code=patient.patient_code if patient else "",
                     ) if patient else None,
                 ),
+                labels=labels if labels else None,
+                assignees=assignees if assignees else None,
             )
         )
     return SamplesListResponse(samples=items)
@@ -653,13 +712,11 @@ def get_sample_detail(
         raise HTTPException(404, "Sample not found")
 
     branch = session.get(Branch, s.branch_id)
-    order = session.get(LabOrder, s.order_id)
+    order = session.get(Order, s.order_id)
     patient = session.get(Patient, order.patient_id) if order else None
 
-    # Get assignees
-    assignee_users = []
-    if s.assignees:
-        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(s.assignees))).all()
+    # Get assignees from Assignment table
+    assignee_users = _get_sample_assignees(session, s.id, ctx.tenant_id)
     
     # Get labels (inherited from order + own labels)
     order_label_ids = set(
@@ -752,7 +809,7 @@ def update_sample_state(
     
     # Create timeline event with structured metadata (no localized description)
     # The UI will build the message based on event_type and metadata
-    event = CaseEvent(
+    event = OrderEvent(
         tenant_id=sample.tenant_id,
         branch_id=sample.branch_id,
         order_id=sample.order_id,
@@ -811,7 +868,7 @@ def update_sample_notes(
         session.add(sample)
         
         # Create timeline event for notes update
-        event = CaseEvent(
+        event = OrderEvent(
             tenant_id=sample.tenant_id,
             branch_id=sample.branch_id,
             order_id=sample.order_id,
@@ -853,7 +910,7 @@ def create_sample(sample_data: SampleCreate, session: Session = Depends(get_sess
     if not branch:
         raise HTTPException(404, "Branch not found")
     
-    order = session.get(LabOrder, sample_data.order_id)
+    order = session.get(Order, sample_data.order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     
@@ -883,7 +940,7 @@ def create_sample(sample_data: SampleCreate, session: Session = Depends(get_sess
     session.flush()  # Get sample.id for event
     
     # Create SAMPLE_CREATED event
-    sample_created_event = CaseEvent(
+    sample_created_event = OrderEvent(
         order_id=sample_data.order_id,
         sample_id=sample.id,
         event_type=EventType.SAMPLE_CREATED,
@@ -915,8 +972,8 @@ def create_sample(sample_data: SampleCreate, session: Session = Depends(get_sess
     )
 
 
-@router.post("/orders/unified", response_model=LabOrderUnifiedResponse)
-def create_order_with_samples(payload: LabOrderUnifiedCreate, session: Session = Depends(get_session)):
+@router.post("/orders/unified", response_model=OrderUnifiedResponse)
+def create_order_with_samples(payload: OrderUnifiedCreate, session: Session = Depends(get_session)):
     """Create a new laboratory order and multiple samples in one operation.
 
     - Validates tenant, branch, and patient
@@ -936,16 +993,16 @@ def create_order_with_samples(payload: LabOrderUnifiedCreate, session: Session =
 
     # Ensure order_code unique per branch
     existing = session.exec(
-        select(LabOrder).where(
-            LabOrder.order_code == payload.order_code,
-            LabOrder.branch_id == payload.branch_id,
+        select(Order).where(
+            Order.order_code == payload.order_code,
+            Order.branch_id == payload.branch_id,
         )
     ).first()
     if existing:
         raise HTTPException(400, "Order code already exists for this branch")
 
     # Create order
-    order = LabOrder(
+    order = Order(
         tenant_id=payload.tenant_id,
         branch_id=payload.branch_id,
         patient_id=payload.patient_id,
@@ -990,7 +1047,7 @@ def create_order_with_samples(payload: LabOrderUnifiedCreate, session: Session =
         session.flush()  # Get sample.id for event
         
         # Create SAMPLE_CREATED event for each sample
-        sample_created_event = CaseEvent(
+        sample_created_event = OrderEvent(
             order_id=order.id,
             sample_id=sample.id,
             event_type=EventType.SAMPLE_CREATED,
@@ -1015,8 +1072,8 @@ def create_order_with_samples(payload: LabOrderUnifiedCreate, session: Session =
     for s in created_samples:
         session.refresh(s)
 
-    return LabOrderUnifiedResponse(
-        order=LabOrderResponse(
+    return OrderUnifiedResponse(
+        order=OrderResponse(
             id=str(order.id),
             order_code=order.order_code,
             status=order.status,
@@ -1191,7 +1248,7 @@ def upload_sample_image(
         session.add(sample)
     
     # Create timeline event for image upload with structured metadata
-    event = CaseEvent(
+    event = OrderEvent(
         tenant_id=sample.tenant_id,
         branch_id=sample.branch_id,
         order_id=sample.order_id,
@@ -1213,7 +1270,7 @@ def upload_sample_image(
     
     # If state changed, also add state change event
     if is_first_image and sample.state == SampleState.PROCESSING:
-        state_event = CaseEvent(
+        state_event = OrderEvent(
             tenant_id=sample.tenant_id,
             branch_id=sample.branch_id,
             order_id=sample.order_id,
@@ -1352,7 +1409,7 @@ def delete_sample_image(
             session.delete(storage_obj)
     
     # Create timeline event for image deletion
-    event = CaseEvent(
+    event = OrderEvent(
         tenant_id=sample.tenant_id,
         branch_id=sample.branch_id,
         order_id=sample.order_id,
@@ -1384,14 +1441,14 @@ def delete_sample_image(
     return {"message": "Image deleted successfully", "image_id": image_id}
 
 
-@router.get("/orders/{order_id}/full", response_model=LabOrderFullDetailResponse)
+@router.get("/orders/{order_id}/full", response_model=OrderFullDetailResponse)
 def get_order_full_detail(
     order_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
 ):
     """Return complete information for an order: order details, patient details, and samples."""
-    order = session.get(LabOrder, order_id)
+    order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     if str(order.tenant_id) != ctx.tenant_id:
@@ -1404,15 +1461,11 @@ def get_order_full_detail(
     # Fetch samples for this order
     samples = session.exec(select(Sample).where(Sample.order_id == order.id)).all()
 
-    # Get assignees
-    assignee_users = []
-    if order.assignees:
-        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(order.assignees))).all()
+    # Get assignees from Assignment table
+    assignee_users = _get_order_assignees(session, order.id, ctx.tenant_id)
     
-    # Get reviewers
-    reviewer_users = []
-    if order.reviewers:
-        reviewer_users = session.exec(select(AppUser).where(AppUser.id.in_(order.reviewers))).all()
+    # Get reviewers with status from Assignment + ReportReview tables
+    reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
     
     # Get labels
     label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
@@ -1421,7 +1474,7 @@ def get_order_full_detail(
         labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
 
     # Build response objects
-    order_resp = LabOrderDetailResponse(
+    order_resp = OrderDetailResponse(
         id=str(order.id),
         order_code=order.order_code,
         status=order.status,
@@ -1432,7 +1485,7 @@ def get_order_full_detail(
         notes=order.notes,
         billed_lock=order.billed_lock,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
-        reviewers=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in reviewer_users],
+        reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
     )
 
@@ -1449,104 +1502,38 @@ def get_order_full_detail(
         email=getattr(patient, "email", None),
     )
 
-    sample_resps = [
-        SampleResponse(
-            id=str(s.id),
-            sample_code=s.sample_code,
-            type=s.type,
-            state=s.state,
-            order_id=str(s.order_id),
-            tenant_id=str(s.tenant_id),
-            branch_id=str(s.branch_id),
+    # Get order label IDs for inheritance check
+    order_label_ids = set(label_ids)
+
+    # Build sample responses with assignees and labels
+    sample_resps = []
+    for s in samples:
+        # Get sample assignees
+        sample_assignee_users = _get_sample_assignees(session, s.id, ctx.tenant_id)
+        
+        # Get sample labels (own + inherited from order)
+        sample_label_ids = set(
+            session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == s.id)).all()
         )
-        for s in samples
-    ]
-
-    return LabOrderFullDetailResponse(order=order_resp, patient=patient_resp, samples=sample_resps)
-
-
-@router.get("/patients/{patient_id}/orders", response_model=PatientOrdersListResponse)
-def list_patient_orders(
-    patient_id: str,
-    session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx),
-):
-    """List all orders for a given patient (enriched summary)."""
-    patient = session.get(Patient, patient_id)
-    if not patient:
-        raise HTTPException(404, "Patient not found")
-
-    if str(patient.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Patient not found")
-    orders = session.exec(select(LabOrder).where(LabOrder.patient_id == patient.id, LabOrder.tenant_id == ctx.tenant_id)).all()
-    summaries = []
-    for o in orders:
-        sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
-        has_report = session.exec(select(Report).where(Report.order_id == o.id)).first() is not None
-        summaries.append(
-            PatientOrderSummary(
-                id=str(o.id),
-                order_code=o.order_code,
-                status=o.status,
-                tenant_id=str(o.tenant_id),
-                branch_id=str(o.branch_id),
-                patient_id=str(o.patient_id),
-                requested_by=o.requested_by,
-                notes=o.notes,
-                created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
-                sample_count=sample_count,
-                has_report=has_report,
-            )
-        )
-
-    full_patient = PatientFullResponse(
-        id=str(patient.id),
-        tenant_id=str(patient.tenant_id),
-        branch_id=str(patient.branch_id),
-        patient_code=patient.patient_code,
-        first_name=patient.first_name,
-        last_name=patient.last_name,
-        dob=getattr(patient, "dob", None),
-        sex=getattr(patient, "sex", None),
-        phone=getattr(patient, "phone", None),
-        email=getattr(patient, "email", None),
-    )
-
-    return PatientOrdersListResponse(patient=full_patient, orders=summaries)
-
-
-@router.get("/patients/{patient_id}/cases", response_model=PatientCasesListResponse)
-def list_patient_cases(
-    patient_id: str,
-    session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx),
-):
-    """List all cases for a patient with full details: order, samples, and report metadata (if any)."""
-    patient = session.get(Patient, patient_id)
-    if not patient:
-        raise HTTPException(404, "Patient not found")
-
-    if str(patient.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Patient not found")
-    orders = session.exec(select(LabOrder).where(LabOrder.patient_id == patient.id, LabOrder.tenant_id == ctx.tenant_id)).all()
-    cases = []
-    for order in orders:
-        # Order detail
-        order_resp = LabOrderDetailResponse(
-            id=str(order.id),
-            order_code=order.order_code,
-            status=order.status,
-            patient_id=str(order.patient_id),
-            tenant_id=str(order.tenant_id),
-            branch_id=str(order.branch_id),
-            requested_by=order.requested_by,
-            notes=order.notes,
-            billed_lock=order.billed_lock,
-        )
-
-        # Samples list
-        samples = session.exec(select(Sample).where(Sample.order_id == order.id)).all()
-        sample_resps = [
+        
+        # Combine all label IDs
+        all_sample_label_ids = order_label_ids | sample_label_ids
+        
+        # Get label objects with inheritance flag
+        sample_labels_with_inheritance = []
+        if all_sample_label_ids:
+            all_sample_labels = session.exec(select(Label).where(Label.id.in_(all_sample_label_ids))).all()
+            for label in all_sample_labels:
+                sample_labels_with_inheritance.append(
+                    LabelWithInheritance(
+                        id=str(label.id),
+                        name=label.name,
+                        color=label.color,
+                        inherited=(label.id in order_label_ids),
+                    )
+                )
+        
+        sample_resps.append(
             SampleResponse(
                 id=str(s.id),
                 sample_code=s.sample_code,
@@ -1555,51 +1542,104 @@ def list_patient_cases(
                 order_id=str(s.order_id),
                 tenant_id=str(s.tenant_id),
                 branch_id=str(s.branch_id),
+                assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in sample_assignee_users] if sample_assignee_users else None,
+                labels=sample_labels_with_inheritance if sample_labels_with_inheritance else None,
             )
-            for s in samples
-        ]
+        )
 
-        # Report meta (if any) using latest/current version
-        report_meta = None
-        report = session.exec(select(Report).where(Report.order_id == order.id)).first()
-        if report:
-            current_version = session.exec(
-                select(ReportVersion)
-                .where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
-                .order_by(ReportVersion.version_no.desc())
-            ).first()
-            has_pdf = bool(current_version and current_version.pdf_storage_id)
-            report_meta = ReportMetaResponse(
-                id=str(report.id),
-                status=report.status,
-                title=report.title,
-                published_at=report.published_at,
-                version_no=current_version.version_no if current_version else None,
-                has_pdf=has_pdf,
+    # Get report meta (if any) using latest/current version
+    report_meta = None
+    report = session.exec(select(Report).where(Report.order_id == order.id)).first()
+    if report:
+        current_version = session.exec(
+            select(ReportVersion)
+            .where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
+            .order_by(ReportVersion.version_no.desc())
+        ).first()
+        has_pdf = bool(current_version and current_version.pdf_storage_id)
+        report_meta = ReportMetaResponse(
+            id=str(report.id),
+            status=report.status,
+            title=report.title,
+            published_at=report.published_at,
+            version_no=current_version.version_no if current_version else None,
+            has_pdf=has_pdf,
+        )
+
+    return OrderFullDetailResponse(order=order_resp, patient=patient_resp, samples=sample_resps, report=report_meta)
+
+
+@router.get("/patients/{patient_id}/orders", response_model=OrdersListResponse)
+def list_patient_orders(
+    patient_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
+    """List all orders for a given patient with full enrichment (labels, assignees, etc)."""
+    patient = session.get(Patient, patient_id)
+    if not patient:
+        raise HTTPException(404, "Patient not found")
+
+    if str(patient.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Patient not found")
+    
+    orders = session.exec(select(Order).where(Order.patient_id == patient.id, Order.tenant_id == ctx.tenant_id)).all()
+    results: list[OrderListItem] = []
+    
+    for o in orders:
+        # Resolve related entities
+        branch = session.get(Branch, o.branch_id)
+        sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
+        has_report = session.exec(select(Report).where(Report.order_id == o.id)).first() is not None
+
+        # Get labels
+        label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == o.id)).all()
+        labels = []
+        if label_ids:
+            labels_objs = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
+            labels = [LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels_objs]
+        
+        # Get assignees
+        assignee_ids = session.exec(
+            select(Assignment.assignee_user_id).where(
+                and_(
+                    Assignment.item_type == "lab_order",
+                    Assignment.item_id == o.id,
+                    Assignment.unassigned_at.is_(None)
+                )
             )
+        ).all()
+        assignees = []
+        if assignee_ids:
+            users = session.exec(select(AppUser).where(AppUser.id.in_(assignee_ids))).all()
+            assignees = [UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in users]
+        
+        results.append(
+            OrderListItem(
+                id=str(o.id),
+                order_code=o.order_code,
+                status=o.status,
+                tenant_id=str(o.tenant_id),
+                branch=BranchRef(id=str(o.branch_id), name=branch.name if branch else "", code=branch.code if branch else None),
+                patient=PatientRef(
+                    id=str(o.patient_id),
+                    full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
+                    patient_code=patient.patient_code if patient else "",
+                ),
+                requested_by=o.requested_by,
+                notes=o.notes,
+                created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
+                sample_count=sample_count,
+                has_report=has_report,
+                labels=labels if labels else None,
+                assignees=assignees if assignees else None,
+            )
+        )
 
-        cases.append({
-            "order": order_resp,
-            "samples": sample_resps,
-            "report": report_meta,
-        })
+    return OrdersListResponse(orders=results)
 
-    # Build patient full profile to attach at top-level of cases list
-    full_patient = PatientFullResponse(
-        id=str(patient.id),
-        tenant_id=str(patient.tenant_id),
-        branch_id=str(patient.branch_id),
-        patient_code=patient.patient_code,
-        first_name=patient.first_name,
-        last_name=patient.last_name,
-        dob=getattr(patient, "dob", None),
-        sex=getattr(patient, "sex", None),
-        phone=getattr(patient, "phone", None),
-        email=getattr(patient, "email", None),
-    )
 
-    # Reuse PatientCaseDetail schema structure via dicts already matching response_model
-    return PatientCasesListResponse(patient=full_patient, patient_id=str(patient.id), cases=cases)
+# Endpoint /patients/{patient_id}/cases has been removed - use /patients/{patient_id}/orders instead
 
 
 # Case Events (Timeline) Endpoints
@@ -1614,7 +1654,7 @@ def create_case_event(
 ):
     """Create a new event in the case timeline"""
     # Verify order exists and belongs to tenant
-    order = session.get(LabOrder, order_id)
+    order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     
@@ -1622,7 +1662,7 @@ def create_case_event(
         raise HTTPException(403, "Order does not belong to your tenant")
     
     # Create event
-    event = CaseEvent(
+    event = OrderEvent(
         tenant_id=order.tenant_id,
         branch_id=order.branch_id,
         order_id=order.id,
@@ -1667,7 +1707,7 @@ def list_case_events(
 ):
     """Get timeline of events for a case (order + all samples + report)"""
     # Verify order exists and belongs to tenant
-    order = session.get(LabOrder, order_id)
+    order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     
@@ -1676,9 +1716,9 @@ def list_case_events(
     
     # Get events ordered by creation date (oldest first, top to bottom)
     events = session.exec(
-        select(CaseEvent)
-        .where(CaseEvent.order_id == order_id)
-        .order_by(CaseEvent.created_at.asc())
+        select(OrderEvent)
+        .where(OrderEvent.order_id == order_id)
+        .order_by(OrderEvent.created_at.asc())
     ).all()
     
     # Get user info for display (name + avatar)
@@ -1730,9 +1770,9 @@ def list_sample_events(
     
     # Get events for this sample ordered by creation date (oldest first, top to bottom)
     events = session.exec(
-        select(CaseEvent)
-        .where(CaseEvent.sample_id == sample_id)
-        .order_by(CaseEvent.created_at.asc())
+        select(OrderEvent)
+        .where(OrderEvent.sample_id == sample_id)
+        .order_by(OrderEvent.created_at.asc())
     ).all()
     
     # Get user info for display (name + avatar)
@@ -1885,9 +1925,193 @@ def delete_label(
     return {"message": "Label deleted successfully"}
 
 
+# === Helper functions for assignments ===
+
+def _get_order_assignees(session: Session, order_id: UUID, tenant_id: str) -> List[AppUser]:
+    """Get assignees for an order from Assignment table"""
+    assignments = session.exec(
+        select(Assignment).where(
+            and_(
+                Assignment.tenant_id == UUID(tenant_id),
+                cast(Assignment.item_type, String) == AssignmentItemType.LAB_ORDER.value,
+                Assignment.item_id == order_id,
+                Assignment.unassigned_at.is_(None),
+            )
+        )
+    ).all()
+    
+    if not assignments:
+        return []
+    
+    user_ids = [a.assignee_user_id for a in assignments]
+    return list(session.exec(select(AppUser).where(AppUser.id.in_(user_ids))).all())
+
+
+def _get_order_reviewers_with_status(session: Session, order_id: UUID, tenant_id: str) -> List[ReviewerWithStatus]:
+    """Get reviewers for an order with their review status from ReportReview table"""
+    # Get reviewers directly from report_review table
+    reviews = session.exec(
+        select(ReportReview).where(
+            and_(
+                ReportReview.tenant_id == UUID(tenant_id),
+                ReportReview.order_id == order_id,
+            )
+        )
+    ).all()
+    
+    if not reviews:
+        return []
+    
+    user_ids = [r.reviewer_user_id for r in reviews]
+    users_dict = {u.id: u for u in session.exec(select(AppUser).where(AppUser.id.in_(user_ids))).all()}
+    
+    reviewers_with_status = []
+    for review in reviews:
+        user = users_dict.get(review.reviewer_user_id)
+        if not user:
+            continue
+            
+        reviewers_with_status.append(
+            ReviewerWithStatus(
+                id=str(user.id),
+                name=user.full_name or user.username,
+                email=user.email,
+                avatar_url=user.avatar_url,
+                status=(review.status.value if hasattr(review.status, 'value') else str(review.status)).lower(),
+                review_id=str(review.id),
+            )
+        )
+    
+    return reviewers_with_status
+
+
+def _get_sample_assignees(session: Session, sample_id: UUID, tenant_id: str) -> List[AppUser]:
+    """Get assignees for a sample from Assignment table"""
+    assignments = session.exec(
+        select(Assignment).where(
+            and_(
+                Assignment.tenant_id == UUID(tenant_id),
+                cast(Assignment.item_type, String) == AssignmentItemType.SAMPLE.value,
+                Assignment.item_id == sample_id,
+                Assignment.unassigned_at.is_(None),
+            )
+        )
+    ).all()
+    
+    if not assignments:
+        return []
+    
+    user_ids = [a.assignee_user_id for a in assignments]
+    return list(session.exec(select(AppUser).where(AppUser.id.in_(user_ids))).all())
+
+
+def _sync_assignments(
+    session: Session,
+    tenant_id: UUID,
+    item_type: AssignmentItemType,
+    item_id: UUID,
+    new_user_ids: Set[UUID],
+    assigned_by_user_id: UUID,
+) -> tuple[Set[UUID], Set[UUID]]:
+    """
+    Synchronize assignments for an item. Returns (added_ids, removed_ids).
+    """
+    # Get current active assignments
+    # Use cast to compare enum as string
+    item_type_value = item_type.value if hasattr(item_type, 'value') else str(item_type)
+    current_assignments = session.exec(
+        select(Assignment).where(
+            and_(
+                Assignment.tenant_id == tenant_id,
+                cast(Assignment.item_type, String) == item_type_value,
+                Assignment.item_id == item_id,
+                Assignment.unassigned_at.is_(None),
+            )
+        )
+    ).all()
+    
+    current_user_ids = {a.assignee_user_id for a in current_assignments}
+    
+    # Calculate diff
+    added = new_user_ids - current_user_ids
+    removed = current_user_ids - new_user_ids
+    
+    # Remove old assignments (soft delete)
+    for assignment in current_assignments:
+        if assignment.assignee_user_id in removed:
+            assignment.unassigned_at = datetime.utcnow()
+            session.add(assignment)
+    
+    # Add new assignments
+    for user_id in added:
+        assignment = Assignment(
+            tenant_id=tenant_id,
+            item_type=item_type,
+            item_id=item_id,
+            assignee_user_id=user_id,
+            assigned_by_user_id=assigned_by_user_id,
+        )
+        session.add(assignment)
+    
+    return added, removed
+
+
+def _sync_report_reviewers(
+    session: Session,
+    tenant_id: UUID,
+    order_id: UUID,
+    new_reviewer_ids: Set[UUID],
+    assigned_by_user_id: UUID,
+) -> tuple[Set[UUID], Set[UUID]]:
+    """
+    Synchronize report reviewers for an order. Returns (added_ids, removed_ids).
+    Works directly with report_review table.
+    """
+    # Get current reviewers for this order
+    current_reviews = session.exec(
+        select(ReportReview).where(
+            and_(
+                ReportReview.tenant_id == tenant_id,
+                ReportReview.order_id == order_id,
+            )
+        )
+    ).all()
+    
+    current_reviewer_ids = {r.reviewer_user_id for r in current_reviews}
+    
+    # Calculate diff
+    added = new_reviewer_ids - current_reviewer_ids
+    removed = current_reviewer_ids - new_reviewer_ids
+    
+    # Remove old reviewers (hard delete since they're independent)
+    for review in current_reviews:
+        if review.reviewer_user_id in removed:
+            session.delete(review)
+    
+    # Check if report exists for this order
+    report = session.exec(
+        select(Report).where(Report.order_id == order_id)
+    ).first()
+    report_id = report.id if report else None
+    
+    # Add new reviewers
+    for reviewer_id in added:
+        review = ReportReview(
+            tenant_id=tenant_id,
+            order_id=order_id,
+            report_id=report_id,  # Will be None if no report exists yet
+            reviewer_user_id=reviewer_id,
+            assigned_by_user_id=assigned_by_user_id,
+            status=ReviewStatus.PENDING,
+        )
+        session.add(review)
+    
+    return added, removed
+
+
 # --- Order Assignees Endpoint ---
 
-@router.put("/orders/{order_id}/assignees", response_model=LabOrderDetailResponse)
+@router.put("/orders/{order_id}/assignees", response_model=OrderDetailResponse)
 def update_order_assignees(
     order_id: str,
     data: AssigneesUpdate,
@@ -1895,9 +2119,9 @@ def update_order_assignees(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update assignees for an order"""
+    """Update assignees for an order (uses Assignment table)"""
     # Verify order exists and belongs to tenant
-    order = session.get(LabOrder, order_id)
+    order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     
@@ -1905,26 +2129,27 @@ def update_order_assignees(
         raise HTTPException(403, "Order does not belong to your tenant")
     
     # Validate all assignee IDs belong to tenant
-    new_assignees = [UUID(aid) for aid in data.assignee_ids]
-    for assignee_id in new_assignees:
-        assignee_user = session.get(AppUser, assignee_id)
+    new_assignees = set()
+    for aid in data.assignee_ids:
+        assignee_user = session.get(AppUser, UUID(aid))
         if not assignee_user or str(assignee_user.tenant_id) != ctx.tenant_id:
-            raise HTTPException(400, f"User {assignee_id} not found or not in tenant")
+            raise HTTPException(400, f"User {aid} not found or not in tenant")
+        new_assignees.add(UUID(aid))
     
-    # Calculate diff
-    old_assignees = set(order.assignees or [])
-    new_assignees_set = set(new_assignees)
-    added = new_assignees_set - old_assignees
-    removed = old_assignees - new_assignees_set
-    
-    # Update order
-    order.assignees = new_assignees if new_assignees else None
-    session.add(order)
+    # Sync assignments
+    added, removed = _sync_assignments(
+        session=session,
+        tenant_id=UUID(ctx.tenant_id),
+        item_type=AssignmentItemType.LAB_ORDER,
+        item_id=order.id,
+        new_user_ids=new_assignees,
+        assigned_by_user_id=user.id,
+    )
     
     # Generate events if there were changes
     if added:
         added_users = session.exec(select(AppUser).where(AppUser.id.in_(added))).all()
-        event = CaseEvent(
+        event = OrderEvent(
             tenant_id=order.tenant_id,
             branch_id=order.branch_id,
             order_id=order.id,
@@ -1940,7 +2165,7 @@ def update_order_assignees(
     
     if removed:
         removed_users = session.exec(select(AppUser).where(AppUser.id.in_(removed))).all()
-        event = CaseEvent(
+        event = OrderEvent(
             tenant_id=order.tenant_id,
             branch_id=order.branch_id,
             order_id=order.id,
@@ -1955,14 +2180,11 @@ def update_order_assignees(
         session.add(event)
     
     session.commit()
-    session.refresh(order)
     
     # Build response with user details
-    assignee_users = []
-    if order.assignees:
-        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(order.assignees))).all()
+    assignee_users = _get_order_assignees(session, order.id, ctx.tenant_id)
     
-    return LabOrderDetailResponse(
+    return OrderDetailResponse(
         id=str(order.id),
         order_code=order.order_code,
         status=order.status,
@@ -1980,7 +2202,7 @@ def update_order_assignees(
 
 # --- Order Reviewers Endpoint ---
 
-@router.put("/orders/{order_id}/reviewers", response_model=LabOrderDetailResponse)
+@router.put("/orders/{order_id}/reviewers", response_model=OrderDetailResponse)
 def update_order_reviewers(
     order_id: str,
     data: ReviewersUpdate,
@@ -1988,9 +2210,14 @@ def update_order_reviewers(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update reviewers for an order"""
+    """
+    Update reviewers for an order.
+    
+    Works directly with report_review table. Reviewers are now completely decoupled from assignments.
+    If a report exists for this order, report_id will be initialized in the review records.
+    """
     # Verify order exists and belongs to tenant
-    order = session.get(LabOrder, order_id)
+    order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     
@@ -1998,26 +2225,26 @@ def update_order_reviewers(
         raise HTTPException(403, "Order does not belong to your tenant")
     
     # Validate all reviewer IDs belong to tenant
-    new_reviewers = [UUID(rid) for rid in data.reviewer_ids]
-    for reviewer_id in new_reviewers:
-        reviewer_user = session.get(AppUser, reviewer_id)
+    new_reviewers = set()
+    for rid in data.reviewer_ids:
+        reviewer_user = session.get(AppUser, UUID(rid))
         if not reviewer_user or str(reviewer_user.tenant_id) != ctx.tenant_id:
-            raise HTTPException(400, f"User {reviewer_id} not found or not in tenant")
+            raise HTTPException(400, f"User {rid} not found or not in tenant")
+        new_reviewers.add(UUID(rid))
     
-    # Calculate diff
-    old_reviewers = set(order.reviewers or [])
-    new_reviewers_set = set(new_reviewers)
-    added = new_reviewers_set - old_reviewers
-    removed = old_reviewers - new_reviewers_set
-    
-    # Update order
-    order.reviewers = new_reviewers if new_reviewers else None
-    session.add(order)
+    # Sync reviewers directly in report_review table
+    added, removed = _sync_report_reviewers(
+        session=session,
+        tenant_id=UUID(ctx.tenant_id),
+        order_id=order.id,
+        new_reviewer_ids=new_reviewers,
+        assigned_by_user_id=user.id,
+    )
     
     # Generate events if there were changes
     if added:
         added_users = session.exec(select(AppUser).where(AppUser.id.in_(added))).all()
-        event = CaseEvent(
+        event = OrderEvent(
             tenant_id=order.tenant_id,
             branch_id=order.branch_id,
             order_id=order.id,
@@ -2033,7 +2260,7 @@ def update_order_reviewers(
     
     if removed:
         removed_users = session.exec(select(AppUser).where(AppUser.id.in_(removed))).all()
-        event = CaseEvent(
+        event = OrderEvent(
             tenant_id=order.tenant_id,
             branch_id=order.branch_id,
             order_id=order.id,
@@ -2048,14 +2275,11 @@ def update_order_reviewers(
         session.add(event)
     
     session.commit()
-    session.refresh(order)
     
-    # Build response with user details
-    reviewer_users = []
-    if order.reviewers:
-        reviewer_users = session.exec(select(AppUser).where(AppUser.id.in_(order.reviewers))).all()
+    # Build response with reviewers with status from ReportReview table
+    reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
     
-    return LabOrderDetailResponse(
+    return OrderDetailResponse(
         id=str(order.id),
         order_code=order.order_code,
         status=order.status,
@@ -2066,14 +2290,14 @@ def update_order_reviewers(
         notes=order.notes,
         billed_lock=order.billed_lock,
         assignees=None,
-        reviewers=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in reviewer_users],
+        reviewers=reviewers_with_status,
         labels=None,
     )
 
 
 # --- Order Labels Endpoint ---
 
-@router.put("/orders/{order_id}/labels", response_model=LabOrderDetailResponse)
+@router.put("/orders/{order_id}/labels", response_model=OrderDetailResponse)
 def update_order_labels(
     order_id: str,
     data: LabelsUpdate,
@@ -2083,7 +2307,7 @@ def update_order_labels(
 ):
     """Update labels for an order"""
     # Verify order exists and belongs to tenant
-    order = session.get(LabOrder, order_id)
+    order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     
@@ -2122,7 +2346,7 @@ def update_order_labels(
     # Generate events if there were changes
     if added:
         added_labels = session.exec(select(Label).where(Label.id.in_(added))).all()
-        event = CaseEvent(
+        event = OrderEvent(
             tenant_id=order.tenant_id,
             branch_id=order.branch_id,
             order_id=order.id,
@@ -2138,7 +2362,7 @@ def update_order_labels(
     
     if removed:
         removed_labels = session.exec(select(Label).where(Label.id.in_(removed))).all()
-        event = CaseEvent(
+        event = OrderEvent(
             tenant_id=order.tenant_id,
             branch_id=order.branch_id,
             order_id=order.id,
@@ -2160,7 +2384,7 @@ def update_order_labels(
     if new_label_ids:
         labels = session.exec(select(Label).where(Label.id.in_(new_label_ids))).all()
     
-    return LabOrderDetailResponse(
+    return OrderDetailResponse(
         id=str(order.id),
         order_code=order.order_code,
         status=order.status,
@@ -2186,7 +2410,7 @@ def update_sample_assignees(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update assignees for a sample"""
+    """Update assignees for a sample (uses Assignment table)"""
     # Verify sample exists and belongs to tenant
     sample = session.get(Sample, sample_id)
     if not sample:
@@ -2196,26 +2420,27 @@ def update_sample_assignees(
         raise HTTPException(403, "Sample does not belong to your tenant")
     
     # Validate all assignee IDs belong to tenant
-    new_assignees = [UUID(aid) for aid in data.assignee_ids]
-    for assignee_id in new_assignees:
-        assignee_user = session.get(AppUser, assignee_id)
+    new_assignees = set()
+    for aid in data.assignee_ids:
+        assignee_user = session.get(AppUser, UUID(aid))
         if not assignee_user or str(assignee_user.tenant_id) != ctx.tenant_id:
-            raise HTTPException(400, f"User {assignee_id} not found or not in tenant")
+            raise HTTPException(400, f"User {aid} not found or not in tenant")
+        new_assignees.add(UUID(aid))
     
-    # Calculate diff
-    old_assignees = set(sample.assignees or [])
-    new_assignees_set = set(new_assignees)
-    added = new_assignees_set - old_assignees
-    removed = old_assignees - new_assignees_set
-    
-    # Update sample
-    sample.assignees = new_assignees if new_assignees else None
-    session.add(sample)
+    # Sync assignments
+    added, removed = _sync_assignments(
+        session=session,
+        tenant_id=UUID(ctx.tenant_id),
+        item_type=AssignmentItemType.SAMPLE,
+        item_id=sample.id,
+        new_user_ids=new_assignees,
+        assigned_by_user_id=user.id,
+    )
     
     # Generate events if there were changes
     if added:
         added_users = session.exec(select(AppUser).where(AppUser.id.in_(added))).all()
-        event = CaseEvent(
+        event = OrderEvent(
             tenant_id=sample.tenant_id,
             branch_id=sample.branch_id,
             order_id=sample.order_id,
@@ -2233,7 +2458,7 @@ def update_sample_assignees(
     
     if removed:
         removed_users = session.exec(select(AppUser).where(AppUser.id.in_(removed))).all()
-        event = CaseEvent(
+        event = OrderEvent(
             tenant_id=sample.tenant_id,
             branch_id=sample.branch_id,
             order_id=sample.order_id,
@@ -2250,17 +2475,14 @@ def update_sample_assignees(
         session.add(event)
     
     session.commit()
-    session.refresh(sample)
     
     # Build full response
-    order = session.get(LabOrder, sample.order_id)
+    order = session.get(Order, sample.order_id)
     branch = session.get(Branch, sample.branch_id)
     patient = session.get(Patient, order.patient_id if order else None)
     
-    # Get assignees
-    assignee_users = []
-    if sample.assignees:
-        assignee_users = session.exec(select(AppUser).where(AppUser.id.in_(sample.assignees))).all()
+    # Get assignees from Assignment table
+    assignee_users = _get_sample_assignees(session, sample.id, ctx.tenant_id)
     
     # Get labels (inherited + own) - will implement full logic later
     labels = []
@@ -2340,7 +2562,7 @@ def update_sample_labels(
     # Generate events if there were changes
     if added:
         added_labels = session.exec(select(Label).where(Label.id.in_(added))).all()
-        event = CaseEvent(
+        event = OrderEvent(
             tenant_id=sample.tenant_id,
             branch_id=sample.branch_id,
             order_id=sample.order_id,
@@ -2358,7 +2580,7 @@ def update_sample_labels(
     
     if removed:
         removed_labels = session.exec(select(Label).where(Label.id.in_(removed))).all()
-        event = CaseEvent(
+        event = OrderEvent(
             tenant_id=sample.tenant_id,
             branch_id=sample.branch_id,
             order_id=sample.order_id,
@@ -2378,7 +2600,7 @@ def update_sample_labels(
     session.refresh(sample)
     
     # Build full response with inherited + own labels
-    order = session.get(LabOrder, sample.order_id)
+    order = session.get(Order, sample.order_id)
     branch = session.get(Branch, sample.branch_id)
     patient = session.get(Patient, order.patient_id if order else None)
     

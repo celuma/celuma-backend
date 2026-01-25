@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import select, Session
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
-from app.models.laboratory import LabOrder
+from app.models.laboratory import Order
 from app.models.patient import Patient
 from app.models.report import Report, ReportVersion
 from app.models.storage import StorageObject
@@ -43,9 +43,9 @@ def list_physician_orders(
     """List orders for the authenticated physician"""
     # Get orders where user's email matches requested_by
     orders = session.exec(
-        select(LabOrder).where(
-            LabOrder.tenant_id == ctx.tenant_id,
-            LabOrder.requested_by == user.email
+        select(Order).where(
+            Order.tenant_id == ctx.tenant_id,
+            Order.requested_by == user.email
         )
     ).all()
     
@@ -84,7 +84,7 @@ def get_physician_report(
     user: AppUser = Depends(current_user),
 ):
     """Get report for a specific order (physician must be the requesting physician)"""
-    order = session.get(LabOrder, order_id)
+    order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
     
@@ -153,7 +153,7 @@ def get_patient_report(
     # Try to find matching order by attempting to match code
     # This is a simplified version - in production you'd want a dedicated access_code field
     
-    orders = session.exec(select(LabOrder)).all()
+    orders = session.exec(select(Order)).all()
     
     matched_order = None
     for order in orders:
