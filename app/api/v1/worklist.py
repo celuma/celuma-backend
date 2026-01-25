@@ -222,26 +222,34 @@ def _build_review_worklist_item(session: Session, review: ReportReview) -> Optio
     if not order:
         return None
     
-    # Get report for this order (if exists)
-    report = session.exec(
-        select(Report).where(Report.order_id == review.order_id)
-    ).first()
+    # Get report for this order - use review.report_id if available, otherwise query by order_id
+    report = None
+    if review.report_id:
+        report = session.get(Report, review.report_id)
+    else:
+        report = session.exec(
+            select(Report).where(Report.order_id == review.order_id)
+        ).first()
+    
+    # Reviews require a report to exist - skip if no report found
+    if not report:
+        return None
     
     patient = session.get(Patient, order.patient_id) if order else None
     
     return WorklistItemResponse(
         id=str(review.id),
         kind="review",
-        item_type="lab_order",
-        item_id=str(review.order_id),
-        display_id=order.order_code,
+        item_type="report",
+        item_id=str(report.id),
+        display_id=report.title or order.order_code,
         item_status=review.status.value if hasattr(review.status, 'value') else str(review.status),
         assigned_at=review.assigned_at,
         patient_id=str(patient.id) if patient else None,
         patient_name=patient.first_name + " " + patient.last_name if patient else None,
         patient_code=patient.patient_code if patient else None,
         order_code=order.order_code if order else None,
-        link=f"/orders/{review.order_id}" if report else f"/orders/{review.order_id}"
+        link=f"/reports/{report.id}"
     )
 
 
