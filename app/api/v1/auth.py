@@ -35,6 +35,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth")
 scheme = HTTPBearer()
 
+
+def split_full_name(full_name: str) -> tuple[str, str]:
+    """Split full_name into first_name and last_name.
+    
+    If full_name has spaces, first token is first_name, rest is last_name.
+    If no spaces, entire string is first_name, last_name is empty string.
+    """
+    if not full_name:
+        return "", ""
+    parts = full_name.strip().split(None, 1)  # Split on first space only
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], parts[1]
+
 @router.post("/register", response_model=UserResponse)
 def register(user_data: UserRegister, session: Session = Depends(get_session)):
     """Register a new user"""
@@ -58,10 +72,13 @@ def register(user_data: UserRegister, session: Session = Depends(get_session)):
             logger.warning("Username already registered for tenant", extra={"event": "auth.register.conflict_username", "username": user_data.username, "tenant_id": str(user_data.tenant_id)})
             raise HTTPException(400, "Username already registered for this tenant")
     
+    first_name, last_name = split_full_name(user_data.full_name)
     u = AppUser(
         email=user_data.email, 
         username=user_data.username,
-        full_name=user_data.full_name, 
+        full_name=user_data.full_name,
+        first_name=first_name,
+        last_name=last_name,
         role=user_data.role, 
         tenant_id=user_data.tenant_id, 
         hashed_password=hash_password(user_data.password)
@@ -407,11 +424,14 @@ def unified_registration(payload: RegistrationRequest, session: Session = Depend
                     logger.warning("Admin username already registered for tenant", extra={"event": "auth.register_unified.conflict_username", "username": payload.admin_user.username, "tenant_id": str(tenant.id)})
                     raise HTTPException(400, "Username already registered for this tenant")
 
+            first_name, last_name = split_full_name(payload.admin_user.full_name)
             user = AppUser(
                 tenant_id=tenant.id,
                 email=payload.admin_user.email,
                 username=payload.admin_user.username,
                 full_name=payload.admin_user.full_name,
+                first_name=first_name,
+                last_name=last_name,
                 role=UserRole.ADMIN,
                 hashed_password=hash_password(payload.admin_user.password),
             )
