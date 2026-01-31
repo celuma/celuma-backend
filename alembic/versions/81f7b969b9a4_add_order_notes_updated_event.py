@@ -33,5 +33,5 @@ def downgrade() -> None:
     # For simplicity in this example, we'll recreate the enum
     op.execute("ALTER TYPE eventtype RENAME TO eventtype_old")
     op.execute("CREATE TYPE eventtype AS ENUM('ORDER_CREATED', 'ORDER_DELIVERED', 'ORDER_CANCELLED', 'ORDER_STATUS_CHANGED', 'SAMPLE_CREATED', 'SAMPLE_RECEIVED', 'SAMPLE_PREPARED', 'SAMPLE_STATE_CHANGED', 'SAMPLE_NOTES_UPDATED', 'SAMPLE_DAMAGED', 'SAMPLE_CANCELLED', 'IMAGE_UPLOADED', 'IMAGE_DELETED', 'REPORT_CREATED', 'REPORT_VERSION_CREATED', 'REPORT_SUBMITTED', 'REPORT_APPROVED', 'REPORT_CHANGES_REQUESTED', 'REPORT_SIGNED', 'REPORT_PUBLISHED', 'REPORT_RETRACTED', 'INVOICE_CREATED', 'PAYMENT_RECEIVED', 'STATUS_CHANGED', 'NOTE_ADDED', 'COMMENT_ADDED')")
-    op.execute("ALTER TABLE case_event ALTER COLUMN event_type TYPE eventtype USING event_type::text::eventtype")
+    op.execute("ALTER TABLE order_event ALTER COLUMN event_type TYPE eventtype USING event_type::text::eventtype")
     op.execute("DROP TYPE eventtype_old")
