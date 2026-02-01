@@ -159,7 +159,7 @@ def upgrade() -> None:
     # Create partial unique index for pending reviews
     op.execute("""
         CREATE UNIQUE INDEX ix_report_review_unique_pending 
-        ON report_review (tenant_id, report_id, reviewer_user_id) 
+        ON report_review (tenant_id, order_id, reviewer_user_id) 
         WHERE status = 'PENDING'
     """)
     

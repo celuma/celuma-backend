@@ -26,6 +26,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/users")
 
 
+def split_full_name(full_name: str) -> tuple[str, str]:
+    """Split full_name into first_name and last_name.
+    
+    If full_name has spaces, first token is first_name, rest is last_name.
+    If no spaces, entire string is first_name, last_name is empty string.
+    """
+    if not full_name:
+        return "", ""
+    parts = full_name.strip().split(None, 1)  # Split on first space only
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], parts[1]
+
+
 class InvitationCreate(BaseModel):
     """Schema for creating an invitation"""
     email: str

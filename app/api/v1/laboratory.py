@@ -357,6 +357,18 @@ def update_order_notes(
         session.commit()
         session.refresh(order)
     
+    # Get assignees from Assignment table
+    assignee_users = _get_order_assignees(session, order.id, ctx.tenant_id)
+    
+    # Get reviewers with status from Assignment + ReportReview tables
+    reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
+    
+    # Get labels
+    label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
+    labels = []
+    if label_ids:
+        labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
+    
     return OrderDetailResponse(
         id=str(order.id),
         order_code=order.order_code,
@@ -366,7 +378,10 @@ def update_order_notes(
         branch_id=str(order.branch_id),
         requested_by=order.requested_by,
         notes=order.notes,
-        billed_lock=order.billed_lock
+        billed_lock=order.billed_lock,
+        assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
+        reviewers=reviewers_with_status,
+        labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
     )
 
 
@@ -833,6 +848,34 @@ def update_sample_state(
     session.commit()
     session.refresh(sample)
     
+    # Get assignees from Assignment table
+    assignee_users = _get_sample_assignees(session, sample.id, ctx.tenant_id)
+    
+    # Get labels (inherited from order + own labels)
+    order_label_ids = set(
+        session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == sample.order_id)).all()
+    )
+    sample_label_ids = set(
+        session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == sample_id)).all()
+    )
+    
+    # Combine all label IDs
+    all_label_ids = order_label_ids | sample_label_ids
+    
+    # Get label objects with inheritance flag
+    labels_with_inheritance = []
+    if all_label_ids:
+        all_labels = session.exec(select(Label).where(Label.id.in_(all_label_ids))).all()
+        for label in all_labels:
+            labels_with_inheritance.append(
+                LabelWithInheritance(
+                    id=str(label.id),
+                    name=label.name,
+                    color=label.color,
+                    inherited=(label.id in order_label_ids),
+                )
+            )
+    
     return SampleResponse(
         id=str(sample.id),
         sample_code=sample.sample_code,
@@ -841,6 +884,8 @@ def update_sample_state(
         order_id=str(sample.order_id),
         tenant_id=str(sample.tenant_id),
         branch_id=str(sample.branch_id),
+        assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
+        labels=labels_with_inheritance if labels_with_inheritance else None,
     )
 
 
@@ -887,6 +932,34 @@ def update_sample_notes(
         session.commit()
         session.refresh(sample)
     
+    # Get assignees from Assignment table
+    assignee_users = _get_sample_assignees(session, sample.id, ctx.tenant_id)
+    
+    # Get labels (inherited from order + own labels)
+    order_label_ids = set(
+        session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == sample.order_id)).all()
+    )
+    sample_label_ids = set(
+        session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == sample_id)).all()
+    )
+    
+    # Combine all label IDs
+    all_label_ids = order_label_ids | sample_label_ids
+    
+    # Get label objects with inheritance flag
+    labels_with_inheritance = []
+    if all_label_ids:
+        all_labels = session.exec(select(Label).where(Label.id.in_(all_label_ids))).all()
+        for label in all_labels:
+            labels_with_inheritance.append(
+                LabelWithInheritance(
+                    id=str(label.id),
+                    name=label.name,
+                    color=label.color,
+                    inherited=(label.id in order_label_ids),
+                )
+            )
+    
     return SampleResponse(
         id=str(sample.id),
         sample_code=sample.sample_code,
@@ -895,6 +968,8 @@ def update_sample_notes(
         order_id=str(sample.order_id),
         tenant_id=str(sample.tenant_id),
         branch_id=str(sample.branch_id),
+        assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
+        labels=labels_with_inheritance if labels_with_inheritance else None,
     )
 
 
@@ -941,6 +1016,8 @@ def create_sample(sample_data: SampleCreate, session: Session = Depends(get_sess
     
     # Create SAMPLE_CREATED event
     sample_created_event = OrderEvent(
+        tenant_id=sample.tenant_id,
+        branch_id=sample.branch_id,
         order_id=sample_data.order_id,
         sample_id=sample.id,
         event_type=EventType.SAMPLE_CREATED,
@@ -961,6 +1038,34 @@ def create_sample(sample_data: SampleCreate, session: Session = Depends(get_sess
     session.commit()
     session.refresh(sample)
     
+    # Get assignees from Assignment table (new sample won't have any, but include for consistency)
+    assignee_users = _get_sample_assignees(session, sample.id, str(sample.tenant_id))
+    
+    # Get labels (inherited from order + own labels)
+    order_label_ids = set(
+        session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == sample.order_id)).all()
+    )
+    sample_label_ids = set(
+        session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == sample.id)).all()
+    )
+    
+    # Combine all label IDs
+    all_label_ids = order_label_ids | sample_label_ids
+    
+    # Get label objects with inheritance flag
+    labels_with_inheritance = []
+    if all_label_ids:
+        all_labels = session.exec(select(Label).where(Label.id.in_(all_label_ids))).all()
+        for label in all_labels:
+            labels_with_inheritance.append(
+                LabelWithInheritance(
+                    id=str(label.id),
+                    name=label.name,
+                    color=label.color,
+                    inherited=(label.id in order_label_ids),
+                )
+            )
+    
     return SampleResponse(
         id=str(sample.id),
         sample_code=sample.sample_code,
@@ -968,7 +1073,9 @@ def create_sample(sample_data: SampleCreate, session: Session = Depends(get_sess
         state=sample.state,
         order_id=str(sample.order_id),
         tenant_id=str(sample.tenant_id),
-        branch_id=str(sample.branch_id)
+        branch_id=str(sample.branch_id),
+        assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
+        labels=labels_with_inheritance if labels_with_inheritance else None,
     )
 
 
@@ -1048,6 +1155,8 @@ def create_order_with_samples(payload: OrderUnifiedCreate, session: Session = De
         
         # Create SAMPLE_CREATED event for each sample
         sample_created_event = OrderEvent(
+            tenant_id=sample.tenant_id,
+            branch_id=sample.branch_id,
             order_id=order.id,
             sample_id=sample.id,
             event_type=EventType.SAMPLE_CREATED,
@@ -1072,6 +1181,51 @@ def create_order_with_samples(payload: OrderUnifiedCreate, session: Session = De
     for s in created_samples:
         session.refresh(s)
 
+    # Build sample responses with assignees and labels
+    sample_responses = []
+    for s in created_samples:
+        # Get assignees from Assignment table (new samples won't have any, but include for consistency)
+        assignee_users = _get_sample_assignees(session, s.id, str(s.tenant_id))
+        
+        # Get labels (inherited from order + own labels)
+        order_label_ids = set(
+            session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == s.order_id)).all()
+        )
+        sample_label_ids = set(
+            session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == s.id)).all()
+        )
+        
+        # Combine all label IDs
+        all_label_ids = order_label_ids | sample_label_ids
+        
+        # Get label objects with inheritance flag
+        labels_with_inheritance = []
+        if all_label_ids:
+            all_labels = session.exec(select(Label).where(Label.id.in_(all_label_ids))).all()
+            for label in all_labels:
+                labels_with_inheritance.append(
+                    LabelWithInheritance(
+                        id=str(label.id),
+                        name=label.name,
+                        color=label.color,
+                        inherited=(label.id in order_label_ids),
+                    )
+                )
+        
+        sample_responses.append(
+            SampleResponse(
+                id=str(s.id),
+                sample_code=s.sample_code,
+                type=s.type,
+                state=s.state,
+                order_id=str(s.order_id),
+                tenant_id=str(s.tenant_id),
+                branch_id=str(s.branch_id),
+                assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
+                labels=labels_with_inheritance if labels_with_inheritance else None,
+            )
+        )
+    
     return OrderUnifiedResponse(
         order=OrderResponse(
             id=str(order.id),
@@ -1081,18 +1235,7 @@ def create_order_with_samples(payload: OrderUnifiedCreate, session: Session = De
             tenant_id=str(order.tenant_id),
             branch_id=str(order.branch_id),
         ),
-        samples=[
-            SampleResponse(
-                id=str(s.id),
-                sample_code=s.sample_code,
-                type=s.type,
-                state=s.state,
-                order_id=str(s.order_id),
-                tenant_id=str(s.tenant_id),
-                branch_id=str(s.branch_id),
-            )
-            for s in created_samples
-        ],
+        samples=sample_responses,
     )
 
 
@@ -2184,6 +2327,15 @@ def update_order_assignees(
     # Build response with user details
     assignee_users = _get_order_assignees(session, order.id, ctx.tenant_id)
     
+    # Get reviewers with status from Assignment + ReportReview tables
+    reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
+    
+    # Get labels
+    label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
+    labels = []
+    if label_ids:
+        labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
+    
     return OrderDetailResponse(
         id=str(order.id),
         order_code=order.order_code,
@@ -2195,8 +2347,8 @@ def update_order_assignees(
         notes=order.notes,
         billed_lock=order.billed_lock,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
-        reviewers=None,
-        labels=None,
+        reviewers=reviewers_with_status,
+        labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
     )
 
 
@@ -2276,8 +2428,17 @@ def update_order_reviewers(
     
     session.commit()
     
+    # Get assignees from Assignment table
+    assignee_users = _get_order_assignees(session, order.id, ctx.tenant_id)
+    
     # Build response with reviewers with status from ReportReview table
     reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
+    
+    # Get labels
+    label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
+    labels = []
+    if label_ids:
+        labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
     
     return OrderDetailResponse(
         id=str(order.id),
@@ -2289,9 +2450,9 @@ def update_order_reviewers(
         requested_by=order.requested_by,
         notes=order.notes,
         billed_lock=order.billed_lock,
-        assignees=None,
+        assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
-        labels=None,
+        labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
     )
 
 
@@ -2379,6 +2540,12 @@ def update_order_labels(
     session.commit()
     session.refresh(order)
     
+    # Get assignees from Assignment table
+    assignee_users = _get_order_assignees(session, order.id, ctx.tenant_id)
+    
+    # Get reviewers with status from Assignment + ReportReview tables
+    reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
+    
     # Build response with label details
     labels = []
     if new_label_ids:
@@ -2394,8 +2561,8 @@ def update_order_labels(
         requested_by=order.requested_by,
         notes=order.notes,
         billed_lock=order.billed_lock,
-        assignees=None,
-        reviewers=None,
+        assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
+        reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
     )
 
