@@ -56,9 +56,7 @@ def list_physician_orders(
         patient_code = patient.patient_code if patient else ""
         
         # Check if report exists
-        report = session.exec(
-            select(Report).where(Report.order_id == order.id)
-        ).first()
+        report = session.get(Report, order.report_id) if order.report_id else None
         
         results.append(
             PhysicianOrderSummary(
@@ -97,9 +95,7 @@ def get_physician_report(
         raise HTTPException(403, "Report access blocked due to pending payment")
     
     # Get report
-    report = session.exec(
-        select(Report).where(Report.order_id == order_id)
-    ).first()
+    report = session.get(Report, order.report_id) if order.report_id else None
     
     if not report:
         raise HTTPException(404, "Report not found for this order")
@@ -172,9 +168,7 @@ def get_patient_report(
         raise HTTPException(403, "Report access blocked due to pending payment")
     
     # Get report
-    report = session.exec(
-        select(Report).where(Report.order_id == matched_order.id)
-    ).first()
+    report = session.get(Report, matched_order.report_id) if matched_order.report_id else None
     
     if not report:
         raise HTTPException(404, "Report not available for this case")

@@ -75,6 +75,7 @@ class OrderDetailResponse(BaseModel):
     requested_by: Optional[str] = None
     notes: Optional[str] = None
     billed_lock: Optional[bool] = None
+    report_id: Optional[str] = None
     assignees: Optional[List[UserRef]] = None
     reviewers: Optional[List[ReviewerWithStatus]] = None
     labels: Optional[List[LabelResponse]] = None
@@ -334,6 +335,7 @@ class PatientOrderSummary(BaseModel):
     requested_by: Optional[str] = None
     notes: Optional[str] = None
     created_at: Optional[str] = None
+    report_id: Optional[str] = None
     sample_count: int
     has_report: bool
 
@@ -380,6 +382,7 @@ class OrderListItem(BaseModel):
     requested_by: Optional[str] = None
     notes: Optional[str] = None
     created_at: Optional[str] = None
+    report_id: Optional[str] = None
     sample_count: int
     has_report: bool
     labels: Optional[List[LabelResponse]] = None
