@@ -7,6 +7,7 @@ from .patient import Patient
 from .storage import StorageObject, SampleImageRendition
 from .laboratory import Order, Sample, SampleImage, OrderComment, Label, OrderLabel, SampleLabel, LabOrderLabel
 from .report import Report, ReportVersion, ReportTemplate
+from .study_type import StudyType
 from .billing import Invoice, Payment, ServiceCatalog, InvoiceItem
 from .audit import AuditLog
 from .events import OrderEvent
@@ -47,6 +48,7 @@ __all__ = [
     "Report",
     "ReportVersion",
     "ReportTemplate",
+    "StudyType",
     "Invoice",
     "Payment",
     "ServiceCatalog",
