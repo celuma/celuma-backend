@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select, Session, func
 from typing import List
+from datetime import datetime
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
-from app.models.billing import Invoice, Payment, ServiceCatalog, InvoiceItem
+from app.models.billing import Invoice, Payment, InvoiceItem
 from app.models.laboratory import Order
 from app.models.tenant import Tenant, Branch
 from app.models.user import AppUser
@@ -11,7 +12,6 @@ from app.models.enums import PaymentStatus, UserRole
 from app.schemas.billing import (
     InvoiceCreate, InvoiceResponse, InvoiceDetailResponse, 
     PaymentCreate, PaymentResponse,
-    ServiceCatalogCreate, ServiceCatalogUpdate, ServiceCatalogResponse,
     InvoiceItemCreate, InvoiceItemResponse, InvoiceWithItemsResponse
 )
 import logging
@@ -21,33 +21,170 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/billing")
 
 
+def create_invoice_for_order(session: Session, order: Order) -> Invoice:
+    """Create invoice automatically for an order with default price from price_catalog
+    
+    Args:
+        session: Database session
+        order: Order object (must be flushed/committed with id)
+    
+    Returns:
+        Created Invoice object
+    """
+    # Check if invoice already exists
+    if order.invoice_id:
+        existing_invoice = session.get(Invoice, order.invoice_id)
+        if existing_invoice:
+            logger.info(f"Invoice already exists for order {order.id}")
+            return existing_invoice
+    
+    # Check if invoice exists by order_id (in case invoice_id wasn't set on order)
+    existing_invoice = session.exec(
+        select(Invoice).where(Invoice.order_id == order.id)
+    ).first()
+    
+    if existing_invoice:
+        logger.info(f"Invoice already exists for order {order.id}")
+        order.invoice_id = existing_invoice.id
+        session.add(order)
+        return existing_invoice
+    
+    # Get price from price_catalog if study_type is set
+    unit_price = 0.0
+    study_type_name = "Servicio"
+    
+    if order.study_type_id:
+        from app.models.study_type import StudyType
+        from app.models.price_catalog import PriceCatalog
+        
+        study_type = session.get(StudyType, order.study_type_id)
+        if study_type:
+            study_type_name = study_type.name
+            
+            # Get active price for this study type
+            price_entry = session.exec(
+                select(PriceCatalog).where(
+                    PriceCatalog.study_type_id == order.study_type_id,
+                    PriceCatalog.tenant_id == order.tenant_id,
+                    PriceCatalog.is_active == True
+                ).order_by(PriceCatalog.created_at.desc())
+            ).first()
+            
+            if price_entry:
+                unit_price = float(price_entry.unit_price)
+    
+    # Generate invoice_number (simple: branch_id + order_code or sequential)
+    invoice_number = f"INV-{order.order_code}"
+    
+    # Create Invoice
+    invoice = Invoice(
+        tenant_id=order.tenant_id,
+        branch_id=order.branch_id,
+        order_id=order.id,
+        invoice_number=invoice_number,
+        subtotal=unit_price,
+        discount_total=0.0,
+        tax_total=0.0,
+        total=unit_price,
+        amount_total=unit_price,  # Keep for backwards compatibility
+        amount_paid=0.0,
+        currency="MXN",
+        status=PaymentStatus.PENDING,
+        issued_at=datetime.utcnow(),
+    )
+    
+    session.add(invoice)
+    session.flush()  # Get invoice.id
+    
+    # Create InvoiceItem (one line)
+    item = InvoiceItem(
+        tenant_id=order.tenant_id,
+        invoice_id=invoice.id,
+        study_type_id=order.study_type_id,
+        description=study_type_name,
+        quantity=1,
+        unit_price=unit_price,
+        subtotal=unit_price,
+    )
+    
+    session.add(item)
+    
+    # Update order.invoice_id
+    order.invoice_id = invoice.id
+    session.add(order)
+    
+    # Create event
+    from app.models.events import OrderEvent
+    from app.models.enums import EventType
+    
+    event = OrderEvent(
+        tenant_id=order.tenant_id,
+        branch_id=order.branch_id,
+        order_id=order.id,
+        event_type=EventType.INVOICE_CREATED,
+        description="Factura creada",
+        event_metadata={
+            "invoice_id": str(invoice.id),
+            "invoice_number": invoice_number,
+            "total": unit_price,
+        },
+        created_by=order.created_by,
+    )
+    session.add(event)
+    
+    logger.info(
+        f"Invoice created for order {order.order_code}",
+        extra={
+            "event": "invoice.auto_created",
+            "order_id": str(order.id),
+            "invoice_id": str(invoice.id),
+            "total": unit_price,
+        },
+    )
+    
+    return invoice
+
+
 def calculate_invoice_balance(session: Session, invoice_id: str) -> float:
     """Calculate remaining balance for an invoice"""
     invoice = session.get(Invoice, invoice_id)
     if not invoice:
         return 0.0
     
-    # Sum all payments for this invoice
+    # Sum all payments for this invoice (using new 'amount' field)
     total_paid = session.exec(
-        select(func.sum(Payment.amount_paid))
+        select(func.sum(Payment.amount))
         .where(Payment.invoice_id == invoice_id)
     ).first() or 0.0
     
-    balance = float(invoice.amount_total) - float(total_paid)
+    balance = float(invoice.total) - float(total_paid)
     return max(balance, 0.0)  # Never negative
 
 
 def update_invoice_status(session: Session, invoice_id: str) -> None:
-    """Update invoice status based on payment balance"""
+    """Update invoice status based on payment balance and cache amount_paid/paid_at"""
     invoice = session.get(Invoice, invoice_id)
     if not invoice:
         return
     
-    balance = calculate_invoice_balance(session, invoice_id)
+    # Calculate total paid
+    total_paid = session.exec(
+        select(func.sum(Payment.amount))
+        .where(Payment.invoice_id == invoice_id)
+    ).first() or 0.0
     
-    if balance == 0.0:
+    balance = float(invoice.total) - float(total_paid)
+    
+    # Update amount_paid cache
+    invoice.amount_paid = total_paid
+    invoice.updated_at = datetime.utcnow()
+    
+    # Update status
+    if balance <= 0.0:
         invoice.status = PaymentStatus.PAID
-    elif balance < float(invoice.amount_total):
+        if not invoice.paid_at:
+            invoice.paid_at = datetime.utcnow()
+    elif balance < float(invoice.total):
         invoice.status = PaymentStatus.PARTIAL
     else:
         invoice.status = PaymentStatus.PENDING
@@ -94,12 +231,17 @@ def list_invoices(
     return [{
         "id": str(i.id),
         "invoice_number": i.invoice_number,
-        "amount_total": float(i.amount_total),
+        "subtotal": float(i.subtotal),
+        "discount_total": float(i.discount_total),
+        "tax_total": float(i.tax_total),
+        "total": float(i.total),
+        "amount_paid": float(i.amount_paid),
         "currency": i.currency,
         "status": i.status,
         "order_id": str(i.order_id),
         "tenant_id": str(i.tenant_id),
-        "branch_id": str(i.branch_id)
+        "branch_id": str(i.branch_id),
+        "paid_at": i.paid_at,
     } for i in invoices]
 
 @router.post("/invoices/", response_model=InvoiceResponse)
@@ -134,7 +276,12 @@ def create_invoice(invoice_data: InvoiceCreate, session: Session = Depends(get_s
         branch_id=invoice_data.branch_id,
         order_id=invoice_data.order_id,
         invoice_number=invoice_data.invoice_number,
-        amount_total=invoice_data.amount_total,
+        subtotal=invoice_data.subtotal,
+        discount_total=invoice_data.discount_total,
+        tax_total=invoice_data.tax_total,
+        total=invoice_data.total,
+        amount_total=invoice_data.total,  # Keep for backwards compatibility
+        amount_paid=0.0,
         currency=invoice_data.currency,
         issued_at=invoice_data.issued_at if invoice_data.issued_at is not None else None
     )
@@ -146,12 +293,17 @@ def create_invoice(invoice_data: InvoiceCreate, session: Session = Depends(get_s
     return InvoiceResponse(
         id=str(invoice.id),
         invoice_number=invoice.invoice_number,
-        amount_total=float(invoice.amount_total),
+        subtotal=float(invoice.subtotal),
+        discount_total=float(invoice.discount_total),
+        tax_total=float(invoice.tax_total),
+        total=float(invoice.total),
+        amount_paid=float(invoice.amount_paid),
         currency=invoice.currency,
         status=invoice.status,
         order_id=str(invoice.order_id),
         tenant_id=str(invoice.tenant_id),
-        branch_id=str(invoice.branch_id)
+        branch_id=str(invoice.branch_id),
+        paid_at=invoice.paid_at,
     )
 
 @router.get("/invoices/{invoice_id}", response_model=InvoiceDetailResponse)
@@ -170,13 +322,19 @@ def get_invoice(
     return InvoiceDetailResponse(
         id=str(invoice.id),
         invoice_number=invoice.invoice_number,
-        amount_total=float(invoice.amount_total),
+        subtotal=float(invoice.subtotal),
+        discount_total=float(invoice.discount_total),
+        tax_total=float(invoice.tax_total),
+        total=float(invoice.total),
+        amount_paid=float(invoice.amount_paid),
         currency=invoice.currency,
         status=invoice.status,
         order_id=str(invoice.order_id),
         tenant_id=str(invoice.tenant_id),
         branch_id=str(invoice.branch_id),
-        issued_at=invoice.issued_at
+        issued_at=invoice.issued_at,
+        updated_at=invoice.updated_at,
+        paid_at=invoice.paid_at,
     )
 
 
@@ -209,18 +367,24 @@ def get_invoice_with_items(
     return InvoiceWithItemsResponse(
         id=str(invoice.id),
         invoice_number=invoice.invoice_number,
-        amount_total=float(invoice.amount_total),
+        subtotal=float(invoice.subtotal),
+        discount_total=float(invoice.discount_total),
+        tax_total=float(invoice.tax_total),
+        total=float(invoice.total),
+        amount_paid=float(invoice.amount_paid),
         currency=invoice.currency,
         status=invoice.status,
         order_id=str(invoice.order_id),
         tenant_id=str(invoice.tenant_id),
         branch_id=str(invoice.branch_id),
         issued_at=invoice.issued_at,
+        updated_at=invoice.updated_at,
+        paid_at=invoice.paid_at,
         items=[
             InvoiceItemResponse(
                 id=str(item.id),
                 invoice_id=str(item.invoice_id),
-                service_id=str(item.service_id) if item.service_id else None,
+                study_type_id=str(item.study_type_id) if item.study_type_id else None,
                 description=item.description,
                 quantity=item.quantity,
                 unit_price=float(item.unit_price),
@@ -231,11 +395,14 @@ def get_invoice_with_items(
         payments=[
             PaymentResponse(
                 id=str(p.id),
-                amount_paid=float(p.amount_paid),
+                amount=float(p.amount),
+                currency=p.currency,
                 method=p.method,
+                reference=p.reference,
                 invoice_id=str(p.invoice_id),
                 tenant_id=str(p.tenant_id),
-                branch_id=str(p.branch_id),
+                received_at=p.received_at,
+                created_by=str(p.created_by) if p.created_by else None,
             )
             for p in payments
         ],
@@ -269,7 +436,7 @@ def add_invoice_item(
     item = InvoiceItem(
         tenant_id=invoice.tenant_id,
         invoice_id=invoice.id,
-        service_id=item_data.service_id if item_data.service_id else None,
+        study_type_id=item_data.study_type_id if item_data.study_type_id else None,
         description=item_data.description,
         quantity=item_data.quantity,
         unit_price=item_data.unit_price,
@@ -279,11 +446,15 @@ def add_invoice_item(
     session.add(item)
     session.flush()
     
-    # Recalculate invoice total
+    # Recalculate invoice totals
     all_items = session.exec(
         select(InvoiceItem).where(InvoiceItem.invoice_id == invoice_id)
     ).all()
-    invoice.amount_total = sum(float(i.subtotal) for i in all_items)
+    new_subtotal = sum(float(i.subtotal) for i in all_items)
+    invoice.subtotal = new_subtotal
+    invoice.total = new_subtotal + invoice.discount_total + invoice.tax_total
+    invoice.amount_total = invoice.total  # Keep backwards compatibility
+    invoice.updated_at = datetime.utcnow()
     session.add(invoice)
     
     # Update payment lock since invoice total changed
@@ -295,7 +466,7 @@ def add_invoice_item(
     return InvoiceItemResponse(
         id=str(item.id),
         invoice_id=str(item.invoice_id),
-        service_id=str(item.service_id) if item.service_id else None,
+        study_type_id=str(item.study_type_id) if item.study_type_id else None,
         description=item.description,
         quantity=item.quantity,
         unit_price=float(item.unit_price),
@@ -311,17 +482,25 @@ def list_payments(
     payments = session.exec(select(Payment).where(Payment.tenant_id == ctx.tenant_id)).all()
     return [{
         "id": str(p.id),
-        "amount_paid": float(p.amount_paid),
+        "amount": float(p.amount),
+        "currency": p.currency,
         "method": p.method,
+        "reference": p.reference,
         "invoice_id": str(p.invoice_id),
         "tenant_id": str(p.tenant_id),
-        "branch_id": str(p.branch_id)
+        "received_at": p.received_at,
+        "created_by": str(p.created_by) if p.created_by else None,
     } for p in payments]
 
 @router.post("/payments/", response_model=PaymentResponse)
-def create_payment(payment_data: PaymentCreate, session: Session = Depends(get_session), ctx: AuthContext = Depends(get_auth_ctx)):
+def create_payment(
+    payment_data: PaymentCreate, 
+    session: Session = Depends(get_session), 
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
     """Create a new payment and update invoice/order status"""
-    # Verify tenant, branch, and invoice exist
+    # Verify tenant and invoice exist
     tenant = session.get(Tenant, payment_data.tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
@@ -329,31 +508,49 @@ def create_payment(payment_data: PaymentCreate, session: Session = Depends(get_s
     if str(tenant.id) != ctx.tenant_id:
         raise HTTPException(403, "Cannot create payment for different tenant")
     
-    branch = session.get(Branch, payment_data.branch_id)
-    if not branch:
-        raise HTTPException(404, "Branch not found")
-    
     invoice = session.get(Invoice, payment_data.invoice_id)
     if not invoice:
         raise HTTPException(404, "Invoice not found")
     
     payment = Payment(
         tenant_id=payment_data.tenant_id,
-        branch_id=payment_data.branch_id,
         invoice_id=payment_data.invoice_id,
-        amount_paid=payment_data.amount_paid,
+        amount=payment_data.amount,
+        currency=payment_data.currency,
         method=payment_data.method,
-        paid_at=payment_data.paid_at if payment_data.paid_at is not None else None
+        reference=payment_data.reference,
+        received_at=payment_data.received_at if payment_data.received_at else datetime.utcnow(),
+        created_by=payment_data.created_by if payment_data.created_by else user.id,
     )
     
     session.add(payment)
     session.flush()
     
-    # Update invoice status based on new balance
+    # Update invoice status based on new balance (also updates amount_paid and paid_at)
     update_invoice_status(session, str(invoice.id))
     
     # Update order payment lock
     update_order_payment_lock(session, str(invoice.order_id))
+    
+    # Create payment event
+    from app.models.events import OrderEvent
+    from app.models.enums import EventType
+    
+    event = OrderEvent(
+        tenant_id=invoice.tenant_id,
+        branch_id=invoice.branch_id,
+        order_id=invoice.order_id,
+        event_type=EventType.PAYMENT_RECEIVED,
+        description="Pago recibido",
+        event_metadata={
+            "payment_id": str(payment.id),
+            "amount": float(payment.amount),
+            "method": payment.method,
+            "invoice_number": invoice.invoice_number,
+        },
+        created_by=payment.created_by,
+    )
+    session.add(event)
     
     session.commit()
     session.refresh(payment)
@@ -364,17 +561,20 @@ def create_payment(payment_data: PaymentCreate, session: Session = Depends(get_s
             "event": "payment.created",
             "payment_id": str(payment.id),
             "invoice_id": str(invoice.id),
-            "amount": float(payment.amount_paid),
+            "amount": float(payment.amount),
         },
     )
     
     return PaymentResponse(
         id=str(payment.id),
-        amount_paid=float(payment.amount_paid),
+        amount=float(payment.amount),
+        currency=payment.currency,
         method=payment.method,
+        reference=payment.reference,
         invoice_id=str(payment.invoice_id),
         tenant_id=str(payment.tenant_id),
-        branch_id=str(payment.branch_id)
+        received_at=payment.received_at,
+        created_by=str(payment.created_by) if payment.created_by else None,
     )
 
 
@@ -397,15 +597,8 @@ def get_order_balance(
         select(Invoice).where(Invoice.order_id == order_id)
     ).all()
     
-    total_invoiced = sum(float(inv.amount_total) for inv in invoices)
-    total_paid = 0.0
-    
-    for invoice in invoices:
-        payments = session.exec(
-            select(Payment).where(Payment.invoice_id == invoice.id)
-        ).all()
-        total_paid += sum(float(p.amount_paid) for p in payments)
-    
+    total_invoiced = sum(float(inv.total) for inv in invoices)
+    total_paid = sum(float(inv.amount_paid) for inv in invoices)
     balance = total_invoiced - total_paid
     
     return {
@@ -418,7 +611,7 @@ def get_order_balance(
             {
                 "id": str(inv.id),
                 "invoice_number": inv.invoice_number,
-                "amount_total": float(inv.amount_total),
+                "total": float(inv.total),
                 "status": inv.status,
                 "balance": calculate_invoice_balance(session, str(inv.id)),
             }
@@ -427,198 +620,82 @@ def get_order_balance(
     }
 
 
-# Service Catalog Endpoints
-
-@router.get("/catalog", response_model=List[ServiceCatalogResponse])
-def list_services(
+@router.get("/orders/{order_id}/invoice", response_model=InvoiceWithItemsResponse)
+def get_order_invoice(
+    order_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
-    active_only: bool = True,
 ):
-    """List all services in catalog"""
-    query = select(ServiceCatalog).where(ServiceCatalog.tenant_id == ctx.tenant_id)
+    """Get invoice for an order (convenience endpoint)"""
+    order = session.get(Order, order_id)
+    if not order:
+        raise HTTPException(404, "Order not found")
     
-    if active_only:
-        query = query.where(ServiceCatalog.is_active == True)
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Order does not belong to your tenant")
     
-    services = session.exec(query).all()
-    
-    return [
-        ServiceCatalogResponse(
-            id=str(s.id),
-            tenant_id=str(s.tenant_id),
-            service_name=s.service_name,
-            service_code=s.service_code,
-            description=s.description,
-            price=float(s.price),
-            currency=s.currency,
-            is_active=s.is_active,
-            valid_from=s.valid_from,
-            valid_until=s.valid_until,
-            created_at=s.created_at,
-        )
-        for s in services
-    ]
-
-
-@router.post("/catalog", response_model=ServiceCatalogResponse)
-def create_service(
-    service_data: ServiceCatalogCreate,
-    session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx),
-    user: AppUser = Depends(current_user),
-):
-    """Create a new service (Admin only)"""
-    # Check user role
-    if user.role != UserRole.ADMIN:
-        raise HTTPException(403, "Only administrators can create services")
-    
-    # Check if service code already exists for this tenant
-    existing = session.exec(
-        select(ServiceCatalog).where(
-            ServiceCatalog.tenant_id == ctx.tenant_id,
-            ServiceCatalog.service_code == service_data.service_code
-        )
+    # Get invoice by order_id
+    invoice = session.exec(
+        select(Invoice).where(Invoice.order_id == order_id)
     ).first()
     
-    if existing:
-        raise HTTPException(400, "Service code already exists")
+    if not invoice:
+        raise HTTPException(404, "Invoice not found for this order")
     
-    service = ServiceCatalog(
-        tenant_id=ctx.tenant_id,
-        service_name=service_data.service_name,
-        service_code=service_data.service_code,
-        description=service_data.description,
-        price=service_data.price,
-        currency=service_data.currency,
-        valid_from=service_data.valid_from,
-        valid_until=service_data.valid_until,
+    # Get items
+    items = session.exec(
+        select(InvoiceItem).where(InvoiceItem.invoice_id == invoice.id)
+    ).all()
+    
+    # Get payments
+    payments = session.exec(
+        select(Payment).where(Payment.invoice_id == invoice.id)
+    ).all()
+    
+    # Calculate balance
+    balance = calculate_invoice_balance(session, str(invoice.id))
+    
+    return InvoiceWithItemsResponse(
+        id=str(invoice.id),
+        invoice_number=invoice.invoice_number,
+        subtotal=float(invoice.subtotal),
+        discount_total=float(invoice.discount_total),
+        tax_total=float(invoice.tax_total),
+        total=float(invoice.total),
+        amount_paid=float(invoice.amount_paid),
+        currency=invoice.currency,
+        status=invoice.status,
+        order_id=str(invoice.order_id),
+        tenant_id=str(invoice.tenant_id),
+        branch_id=str(invoice.branch_id),
+        issued_at=invoice.issued_at,
+        updated_at=invoice.updated_at,
+        paid_at=invoice.paid_at,
+        items=[
+            InvoiceItemResponse(
+                id=str(item.id),
+                invoice_id=str(item.invoice_id),
+                study_type_id=str(item.study_type_id) if item.study_type_id else None,
+                description=item.description,
+                quantity=item.quantity,
+                unit_price=float(item.unit_price),
+                subtotal=float(item.subtotal),
+            )
+            for item in items
+        ],
+        payments=[
+            PaymentResponse(
+                id=str(p.id),
+                amount=float(p.amount),
+                currency=p.currency,
+                method=p.method,
+                reference=p.reference,
+                invoice_id=str(p.invoice_id),
+                tenant_id=str(p.tenant_id),
+                received_at=p.received_at,
+                created_by=str(p.created_by) if p.created_by else None,
+            )
+            for p in payments
+        ],
+        balance=balance,
     )
-    
-    session.add(service)
-    session.commit()
-    session.refresh(service)
-    
-    logger.info(
-        f"Service {service.service_code} created",
-        extra={
-            "event": "service.created",
-            "service_id": str(service.id),
-            "user_id": str(user.id),
-        },
-    )
-    
-    return ServiceCatalogResponse(
-        id=str(service.id),
-        tenant_id=str(service.tenant_id),
-        service_name=service.service_name,
-        service_code=service.service_code,
-        description=service.description,
-        price=float(service.price),
-        currency=service.currency,
-        is_active=service.is_active,
-        valid_from=service.valid_from,
-        valid_until=service.valid_until,
-        created_at=service.created_at,
-    )
-
-
-@router.put("/catalog/{service_id}", response_model=ServiceCatalogResponse)
-def update_service(
-    service_id: str,
-    service_data: ServiceCatalogUpdate,
-    session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx),
-    user: AppUser = Depends(current_user),
-):
-    """Update a service (Admin only)"""
-    # Check user role
-    if user.role != UserRole.ADMIN:
-        raise HTTPException(403, "Only administrators can update services")
-    
-    service = session.get(ServiceCatalog, service_id)
-    if not service:
-        raise HTTPException(404, "Service not found")
-    
-    if str(service.tenant_id) != ctx.tenant_id:
-        raise HTTPException(403, "Service does not belong to your tenant")
-    
-    # Update fields
-    if service_data.service_name is not None:
-        service.service_name = service_data.service_name
-    if service_data.service_code is not None:
-        service.service_code = service_data.service_code
-    if service_data.description is not None:
-        service.description = service_data.description
-    if service_data.price is not None:
-        service.price = service_data.price
-    if service_data.currency is not None:
-        service.currency = service_data.currency
-    if service_data.is_active is not None:
-        service.is_active = service_data.is_active
-    if service_data.valid_from is not None:
-        service.valid_from = service_data.valid_from
-    if service_data.valid_until is not None:
-        service.valid_until = service_data.valid_until
-    
-    session.add(service)
-    session.commit()
-    session.refresh(service)
-    
-    logger.info(
-        f"Service {service.service_code} updated",
-        extra={
-            "event": "service.updated",
-            "service_id": str(service.id),
-            "user_id": str(user.id),
-        },
-    )
-    
-    return ServiceCatalogResponse(
-        id=str(service.id),
-        tenant_id=str(service.tenant_id),
-        service_name=service.service_name,
-        service_code=service.service_code,
-        description=service.description,
-        price=float(service.price),
-        currency=service.currency,
-        is_active=service.is_active,
-        valid_from=service.valid_from,
-        valid_until=service.valid_until,
-        created_at=service.created_at,
-    )
-
-
-@router.delete("/catalog/{service_id}")
-def deactivate_service(
-    service_id: str,
-    session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx),
-    user: AppUser = Depends(current_user),
-):
-    """Deactivate a service (Admin only)"""
-    # Check user role
-    if user.role != UserRole.ADMIN:
-        raise HTTPException(403, "Only administrators can deactivate services")
-    
-    service = session.get(ServiceCatalog, service_id)
-    if not service:
-        raise HTTPException(404, "Service not found")
-    
-    if str(service.tenant_id) != ctx.tenant_id:
-        raise HTTPException(403, "Service does not belong to your tenant")
-    
-    service.is_active = False
-    session.add(service)
-    session.commit()
-    
-    logger.info(
-        f"Service {service.service_code} deactivated",
-        extra={
-            "event": "service.deactivated",
-            "service_id": str(service.id),
-            "user_id": str(user.id),
-        },
-    )
-    
-    return {"message": "Service deactivated successfully"}

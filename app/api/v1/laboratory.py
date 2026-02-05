@@ -176,6 +176,7 @@ def list_orders(
         patient = session.get(Patient, o.patient_id)
         sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
         has_report = o.report_id is not None
+        has_invoice = o.invoice_id is not None
 
         # Get labels
         label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == o.id)).all()
@@ -215,9 +216,11 @@ def list_orders(
                 notes=o.notes,
                 created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
                 report_id=str(o.report_id) if o.report_id else None,
+                invoice_id=str(o.invoice_id) if o.invoice_id else None,
                 study_type_id=str(o.study_type_id) if o.study_type_id else None,
                 sample_count=sample_count,
                 has_report=has_report,
+                has_invoice=has_invoice,
                 labels=labels if labels else None,
                 assignees=assignees if assignees else None,
             )
@@ -273,6 +276,18 @@ def create_order(order_data: OrderCreate, session: Session = Depends(get_session
     )
     
     session.add(order)
+    session.flush()  # Get order.id before creating invoice
+    
+    # Create invoice automatically
+    from app.api.v1.billing import create_invoice_for_order
+    try:
+        create_invoice_for_order(session, order)
+    except Exception as e:
+        logger.warning(
+            f"Failed to create invoice for order {order.order_code}: {e}",
+            extra={"event": "invoice.auto_create_failed", "order_id": str(order.id), "error": str(e)},
+        )
+    
     session.commit()
     session.refresh(order)
     
@@ -321,6 +336,7 @@ def get_order(
         notes=order.notes,
         billed_lock=order.billed_lock,
         report_id=str(order.report_id) if order.report_id else None,
+        invoice_id=str(order.invoice_id) if order.invoice_id else None,
         study_type_id=str(order.study_type_id) if order.study_type_id else None,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
@@ -394,6 +410,7 @@ def update_order_notes(
         notes=order.notes,
         billed_lock=order.billed_lock,
         report_id=str(order.report_id) if order.report_id else None,
+        invoice_id=str(order.invoice_id) if order.invoice_id else None,
         study_type_id=str(order.study_type_id) if order.study_type_id else None,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
@@ -1200,6 +1217,16 @@ def create_order_with_samples(payload: OrderUnifiedCreate, session: Session = De
 
     # Update order status based on new samples
     update_order_status(str(order.id), session)
+    
+    # Create invoice automatically
+    from app.api.v1.billing import create_invoice_for_order
+    try:
+        create_invoice_for_order(session, order)
+    except Exception as e:
+        logger.warning(
+            f"Failed to create invoice for order {order.order_code}: {e}",
+            extra={"event": "invoice.auto_create_failed", "order_id": str(order.id), "error": str(e)},
+        )
 
     # Commit transaction
     session.commit()
@@ -1762,6 +1789,7 @@ def list_patient_orders(
         branch = session.get(Branch, o.branch_id)
         sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
         has_report = o.report_id is not None
+        has_invoice = o.invoice_id is not None
 
         # Get labels
         label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == o.id)).all()
@@ -1801,9 +1829,11 @@ def list_patient_orders(
                 notes=o.notes,
                 created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
                 report_id=str(o.report_id) if o.report_id else None,
+                invoice_id=str(o.invoice_id) if o.invoice_id else None,
                 study_type_id=str(o.study_type_id) if o.study_type_id else None,
                 sample_count=sample_count,
                 has_report=has_report,
+                has_invoice=has_invoice,
                 labels=labels if labels else None,
                 assignees=assignees if assignees else None,
             )
@@ -2377,6 +2407,7 @@ def update_order_assignees(
         notes=order.notes,
         billed_lock=order.billed_lock,
         report_id=str(order.report_id) if order.report_id else None,
+        invoice_id=str(order.invoice_id) if order.invoice_id else None,
         study_type_id=str(order.study_type_id) if order.study_type_id else None,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
@@ -2483,6 +2514,7 @@ def update_order_reviewers(
         notes=order.notes,
         billed_lock=order.billed_lock,
         report_id=str(order.report_id) if order.report_id else None,
+        invoice_id=str(order.invoice_id) if order.invoice_id else None,
         study_type_id=str(order.study_type_id) if order.study_type_id else None,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
@@ -2596,6 +2628,7 @@ def update_order_labels(
         notes=order.notes,
         billed_lock=order.billed_lock,
         report_id=str(order.report_id) if order.report_id else None,
+        invoice_id=str(order.invoice_id) if order.invoice_id else None,
         study_type_id=str(order.study_type_id) if order.study_type_id else None,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,

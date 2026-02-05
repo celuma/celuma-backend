@@ -8,7 +8,8 @@ from .storage import StorageObject, SampleImageRendition
 from .laboratory import Order, Sample, SampleImage, OrderComment, Label, OrderLabel, SampleLabel, LabOrderLabel
 from .report import Report, ReportVersion, ReportTemplate
 from .study_type import StudyType
-from .billing import Invoice, Payment, ServiceCatalog, InvoiceItem
+from .price_catalog import PriceCatalog
+from .billing import Invoice, Payment, InvoiceItem
 from .audit import AuditLog
 from .events import OrderEvent
 from .invitation import UserInvitation, PasswordResetToken
@@ -49,9 +50,9 @@ __all__ = [
     "ReportVersion",
     "ReportTemplate",
     "StudyType",
+    "PriceCatalog",
     "Invoice",
     "Payment",
-    "ServiceCatalog",
     "InvoiceItem",
     "AuditLog",
     "OrderEvent",

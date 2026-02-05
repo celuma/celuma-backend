@@ -77,6 +77,7 @@ class OrderDetailResponse(BaseModel):
     notes: Optional[str] = None
     billed_lock: Optional[bool] = None
     report_id: Optional[str] = None
+    invoice_id: Optional[str] = None
     study_type_id: Optional[str] = None
     assignees: Optional[List[UserRef]] = None
     reviewers: Optional[List[ReviewerWithStatus]] = None
@@ -386,9 +387,11 @@ class OrderListItem(BaseModel):
     notes: Optional[str] = None
     created_at: Optional[str] = None
     report_id: Optional[str] = None
+    invoice_id: Optional[str] = None
     study_type_id: Optional[str] = None
     sample_count: int
     has_report: bool
+    has_invoice: bool
     labels: Optional[List[LabelResponse]] = None
     assignees: Optional[List[UserRef]] = None
 
