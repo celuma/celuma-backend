@@ -2231,7 +2231,6 @@ Headers: `Authorization: Bearer <token>`
     {
       "id": "item-uuid",
       "invoice_id": "invoice-uuid",
-      "service_id": "service-uuid",
       "description": "Biopsy Analysis",
       "quantity": 1,
       "unit_price": 1500.0,
@@ -2424,70 +2423,75 @@ Headers: `Authorization: Bearer <token>`
 }
 ```
 
-## 🛒 Service Catalog Endpoints
+## 💰 Price Catalog Endpoints
 
-### GET /api/v1/billing/catalog
-**List all service catalog items**
+### GET /api/v1/price-catalog/
+**List all price catalog entries**
+
+**Query Parameters:**
+- `active_only` (boolean, default: true) - Filter by active status
 
 **Response:**
 ```json
-[
-  {
-    "id": "service-uuid",
-    "tenant_id": "tenant-uuid",
-    "service_name": "Biopsy Analysis",
-    "service_code": "BIO-001",
-    "description": "Complete biopsy analysis service",
-    "price": 1500.00,
-    "currency": "MXN",
-    "is_active": true,
-    "valid_from": "2025-01-01T00:00:00Z",
-    "valid_until": null,
-    "created_at": "2025-01-01T00:00:00Z"
-  }
-]
-```
-
-### POST /api/v1/billing/catalog
-**Create a new service catalog item**
-
-**Request Body:**
-```json
 {
-  "service_name": "Biopsy Analysis",
-  "service_code": "BIO-001",
-  "description": "Complete biopsy analysis service",
-  "price": 1500.00,
-  "currency": "MXN",
-  "is_active": true,
-  "valid_from": "2025-01-01T00:00:00Z",
-  "valid_until": null
+  "prices": [
+    {
+      "id": "price-uuid",
+      "tenant_id": "tenant-uuid",
+      "study_type_id": "study-type-uuid",
+      "unit_price": 1500.00,
+      "currency": "MXN",
+      "is_active": true,
+      "effective_from": "2025-01-01T00:00:00Z",
+      "effective_to": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "study_type": {
+        "id": "study-type-uuid",
+        "code": "BIOPSIA",
+        "name": "Biopsia de tejido"
+      }
+    }
+  ]
 }
 ```
 
-**Response:** Returns the created service catalog item.
-
-### PUT /api/v1/billing/catalog/{id}
-**Update a service catalog item**
+### POST /api/v1/price-catalog/
+**Create a new price catalog entry**
 
 **Request Body:**
 ```json
 {
-  "service_name": "Updated Service Name",
-  "price": 1800.00,
+  "study_type_id": "study-type-uuid",
+  "unit_price": 1500.00,
+  "is_active": true,
+  "effective_from": "2025-01-01T00:00:00Z",
+  "effective_to": null
+}
+```
+
+**Response:** Returns the created price catalog entry.
+
+### PUT /api/v1/price-catalog/{id}
+**Update a price catalog entry**
+
+**Request Body:**
+```json
+{
+  "unit_price": 1800.00,
   "is_active": false
 }
 ```
 
-**Response:** Returns the updated service catalog item.
+**Response:** Returns the updated price catalog entry.
 
-### DELETE /api/v1/billing/catalog/{id}
-**Delete a service catalog item**
+### DELETE /api/v1/price-catalog/{id}
+**Delete (deactivate) a price catalog entry**
 
 **Response:**
 ```json
 {
-  "message": "Service deleted successfully"
+  "message": "Price catalog entry deactivated",
+  "id": "price-uuid"
 }
 ```
 
@@ -2501,14 +2505,11 @@ Headers: `Authorization: Bearer <token>`
 [
   {
     "id": "item-uuid",
-    "tenant_id": "tenant-uuid",
     "invoice_id": "invoice-uuid",
-    "service_id": "service-uuid",
     "description": "Biopsy Analysis",
     "quantity": 1,
     "unit_price": 1500.00,
-    "subtotal": 1500.00,
-    "created_at": "2025-01-01T00:00:00Z"
+    "subtotal": 1500.00
   }
 ]
 ```
@@ -2519,10 +2520,10 @@ Headers: `Authorization: Bearer <token>`
 **Request Body:**
 ```json
 {
-  "service_id": "service-uuid",
   "description": "Biopsy Analysis",
   "quantity": 1,
   "unit_price": 1500.00
+}
 }
 ```
 
