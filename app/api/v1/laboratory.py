@@ -1681,6 +1681,7 @@ def get_order_full_detail(
         notes=order.notes,
         billed_lock=order.billed_lock,
         report_id=str(order.report_id) if order.report_id else None,
+        invoice_id=str(order.invoice_id) if order.invoice_id else None,
         study_type_id=str(order.study_type_id) if order.study_type_id else None,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
