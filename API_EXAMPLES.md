@@ -1332,56 +1332,50 @@ print(f"✅ Payment created: ${payment['amount_paid']}")
 print("\n🎉 Complete laboratory workflow created successfully!")
 ```
 
-## 🛒 Service Catalog Management
+## 💰 Price Catalog Management
 
-### Create Service Catalog Item
+### Create Price Catalog Entry
 ```bash
-curl -X POST "http://localhost:8000/api/v1/billing/catalog" \
+curl -X POST "http://localhost:8000/api/v1/price-catalog/" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -d '{
-    "service_name": "Biopsy Analysis",
-    "service_code": "BIO-001",
-    "description": "Complete biopsy analysis service",
-    "price": 1500.00,
-    "currency": "MXN",
+    "study_type_id": "study-type-uuid",
+    "unit_price": 1500.00,
     "is_active": true,
-    "valid_from": "2025-01-01T00:00:00Z"
+    "effective_from": "2025-01-01T00:00:00Z"
   }'
 ```
 
 **Python Example:**
 ```python
-service_response = requests.post(
-    f"{BASE_URL}/api/v1/billing/catalog",
+price_response = requests.post(
+    f"{BASE_URL}/api/v1/price-catalog/",
     headers={"Authorization": f"Bearer {token}"},
     json={
-        "service_name": "Biopsy Analysis",
-        "service_code": "BIO-001",
-        "description": "Complete biopsy analysis service",
-        "price": 1500.00,
-        "currency": "MXN",
+        "study_type_id": study_type_id,
+        "unit_price": 1500.00,
         "is_active": True,
-        "valid_from": "2025-01-01T00:00:00Z"
+        "effective_from": "2025-01-01T00:00:00Z"
     }
 )
-service = service_response.json()
-print(f"✅ Service created: {service['service_name']}")
+price = price_response.json()
+print(f"✅ Price created for study type: ${price['unit_price']}")
 ```
 
-### List Service Catalog
+### List Price Catalog
 ```bash
-curl "http://localhost:8000/api/v1/billing/catalog" \
+curl "http://localhost:8000/api/v1/price-catalog/?active_only=true" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
 ```
 
-### Update Service Catalog Item
+### Update Price Catalog Entry
 ```bash
-curl -X PUT "http://localhost:8000/api/v1/billing/catalog/{service_id}" \
+curl -X PUT "http://localhost:8000/api/v1/price-catalog/{price_id}" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -d '{
-    "price": 1800.00,
+    "unit_price": 1800.00,
     "is_active": false
   }'
 ```
@@ -1394,7 +1388,6 @@ curl -X POST "http://localhost:8000/api/v1/billing/invoices/{invoice_id}/items" 
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -d '{
-    "service_id": "service-uuid",
     "description": "Biopsy Analysis",
     "quantity": 1,
     "unit_price": 1500.00
@@ -1407,7 +1400,6 @@ item_response = requests.post(
     f"{BASE_URL}/api/v1/billing/invoices/{invoice_id}/items",
     headers={"Authorization": f"Bearer {token}"},
     json={
-        "service_id": service_id,
         "description": "Biopsy Analysis",
         "quantity": 1,
         "unit_price": 1500.00
@@ -2552,7 +2544,6 @@ for invoice in balance["invoices"]:
 ```python
 # Add a line item to an existing invoice
 item_data = {
-    "service_id": service_catalog_id,
     "description": "Additional Test - Immunohistochemistry",
     "quantity": 2,
     "unit_price": 500.00

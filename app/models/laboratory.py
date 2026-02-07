@@ -24,10 +24,17 @@ class Order(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     notes: Optional[str] = Field(default=None)
     billed_lock: bool = Field(default=False)  # Lock release if no payment
     created_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
+    report_id: Optional[UUID] = Field(foreign_key="report.id", default=None)  # 1-to-1 relationship with report
+    invoice_id: Optional[UUID] = Field(foreign_key="invoice.id", default=None)  # 1-to-1 relationship with invoice
+    study_type_id: Optional[UUID] = Field(foreign_key="study_type.id", default=None)
     # NOTE: assignees and reviewers columns removed - now in 'assignment' table
     
     # Basic relationships only
     samples: List["Sample"] = Relationship(back_populates="order")
+    # No Order.report relationship: use order.report_id + session.get(Report, order.report_id)
+    # to avoid AmbiguousForeignKeysError (Order.report_id and Report.order_id both link the tables).
+    # No Order.invoice relationship: use order.invoice_id + session.get(Invoice, order.invoice_id)
+    # to avoid AmbiguousForeignKeysError (Order.invoice_id and Invoice.order_id both link the tables).
 
 class Sample(BaseModel, TenantMixin, BranchMixin, table=True):
     """Sample model for laboratory samples

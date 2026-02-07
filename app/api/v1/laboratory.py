@@ -175,7 +175,8 @@ def list_orders(
         branch = session.get(Branch, o.branch_id)
         patient = session.get(Patient, o.patient_id)
         sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
-        has_report = session.exec(select(Report).where(Report.order_id == o.id)).first() is not None
+        has_report = o.report_id is not None
+        has_invoice = o.invoice_id is not None
 
         # Get labels
         label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == o.id)).all()
@@ -214,8 +215,12 @@ def list_orders(
                 requested_by=o.requested_by,
                 notes=o.notes,
                 created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
+                report_id=str(o.report_id) if o.report_id else None,
+                invoice_id=str(o.invoice_id) if o.invoice_id else None,
+                study_type_id=str(o.study_type_id) if o.study_type_id else None,
                 sample_count=sample_count,
                 has_report=has_report,
+                has_invoice=has_invoice,
                 labels=labels if labels else None,
                 assignees=assignees if assignees else None,
             )
@@ -239,6 +244,15 @@ def create_order(order_data: OrderCreate, session: Session = Depends(get_session
     if not patient:
         raise HTTPException(404, "Patient not found")
     
+    # Verify study_type if provided
+    if order_data.study_type_id:
+        from app.models.study_type import StudyType
+        study_type = session.get(StudyType, order_data.study_type_id)
+        if not study_type:
+            raise HTTPException(404, "Study type not found")
+        if str(study_type.tenant_id) != str(order_data.tenant_id):
+            raise HTTPException(403, "Study type does not belong to this tenant")
+    
     # Check if order_code is unique for this branch
     existing_order = session.exec(
         select(Order).where(
@@ -257,10 +271,23 @@ def create_order(order_data: OrderCreate, session: Session = Depends(get_session
         order_code=order_data.order_code,
         requested_by=order_data.requested_by,
         notes=order_data.notes,
-        created_by=order_data.created_by
+        created_by=order_data.created_by,
+        study_type_id=order_data.study_type_id
     )
     
     session.add(order)
+    session.flush()  # Get order.id before creating invoice
+    
+    # Create invoice automatically
+    from app.api.v1.billing import create_invoice_for_order
+    try:
+        create_invoice_for_order(session, order)
+    except Exception as e:
+        logger.warning(
+            f"Failed to create invoice for order {order.order_code}: {e}",
+            extra={"event": "invoice.auto_create_failed", "order_id": str(order.id), "error": str(e)},
+        )
+    
     session.commit()
     session.refresh(order)
     
@@ -308,6 +335,9 @@ def get_order(
         requested_by=order.requested_by,
         notes=order.notes,
         billed_lock=order.billed_lock,
+        report_id=str(order.report_id) if order.report_id else None,
+        invoice_id=str(order.invoice_id) if order.invoice_id else None,
+        study_type_id=str(order.study_type_id) if order.study_type_id else None,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
@@ -379,6 +409,9 @@ def update_order_notes(
         requested_by=order.requested_by,
         notes=order.notes,
         billed_lock=order.billed_lock,
+        report_id=str(order.report_id) if order.report_id else None,
+        invoice_id=str(order.invoice_id) if order.invoice_id else None,
+        study_type_id=str(order.study_type_id) if order.study_type_id else None,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
@@ -1098,6 +1131,15 @@ def create_order_with_samples(payload: OrderUnifiedCreate, session: Session = De
     if not patient:
         raise HTTPException(404, "Patient not found")
 
+    # Verify study_type if provided
+    if payload.study_type_id:
+        from app.models.study_type import StudyType
+        study_type = session.get(StudyType, payload.study_type_id)
+        if not study_type:
+            raise HTTPException(404, "Study type not found")
+        if str(study_type.tenant_id) != str(payload.tenant_id):
+            raise HTTPException(403, "Study type does not belong to this tenant")
+
     # Ensure order_code unique per branch
     existing = session.exec(
         select(Order).where(
@@ -1117,6 +1159,7 @@ def create_order_with_samples(payload: OrderUnifiedCreate, session: Session = De
         requested_by=payload.requested_by,
         notes=payload.notes,
         created_by=payload.created_by,
+        study_type_id=payload.study_type_id,
     )
     session.add(order)
     session.flush()  # get order.id for samples
@@ -1174,6 +1217,16 @@ def create_order_with_samples(payload: OrderUnifiedCreate, session: Session = De
 
     # Update order status based on new samples
     update_order_status(str(order.id), session)
+    
+    # Create invoice automatically
+    from app.api.v1.billing import create_invoice_for_order
+    try:
+        create_invoice_for_order(session, order)
+    except Exception as e:
+        logger.warning(
+            f"Failed to create invoice for order {order.order_code}: {e}",
+            extra={"event": "invoice.auto_create_failed", "order_id": str(order.id), "error": str(e)},
+        )
 
     # Commit transaction
     session.commit()
@@ -1627,6 +1680,9 @@ def get_order_full_detail(
         requested_by=order.requested_by,
         notes=order.notes,
         billed_lock=order.billed_lock,
+        report_id=str(order.report_id) if order.report_id else None,
+        invoice_id=str(order.invoice_id) if order.invoice_id else None,
+        study_type_id=str(order.study_type_id) if order.study_type_id else None,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
@@ -1692,7 +1748,7 @@ def get_order_full_detail(
 
     # Get report meta (if any) using latest/current version
     report_meta = None
-    report = session.exec(select(Report).where(Report.order_id == order.id)).first()
+    report = session.get(Report, order.report_id) if order.report_id else None
     if report:
         current_version = session.exec(
             select(ReportVersion)
@@ -1733,7 +1789,8 @@ def list_patient_orders(
         # Resolve related entities
         branch = session.get(Branch, o.branch_id)
         sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
-        has_report = session.exec(select(Report).where(Report.order_id == o.id)).first() is not None
+        has_report = o.report_id is not None
+        has_invoice = o.invoice_id is not None
 
         # Get labels
         label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == o.id)).all()
@@ -1772,8 +1829,12 @@ def list_patient_orders(
                 requested_by=o.requested_by,
                 notes=o.notes,
                 created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
+                report_id=str(o.report_id) if o.report_id else None,
+                invoice_id=str(o.invoice_id) if o.invoice_id else None,
+                study_type_id=str(o.study_type_id) if o.study_type_id else None,
                 sample_count=sample_count,
                 has_report=has_report,
+                has_invoice=has_invoice,
                 labels=labels if labels else None,
                 assignees=assignees if assignees else None,
             )
@@ -2346,6 +2407,9 @@ def update_order_assignees(
         requested_by=order.requested_by,
         notes=order.notes,
         billed_lock=order.billed_lock,
+        report_id=str(order.report_id) if order.report_id else None,
+        invoice_id=str(order.invoice_id) if order.invoice_id else None,
+        study_type_id=str(order.study_type_id) if order.study_type_id else None,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
@@ -2450,6 +2514,9 @@ def update_order_reviewers(
         requested_by=order.requested_by,
         notes=order.notes,
         billed_lock=order.billed_lock,
+        report_id=str(order.report_id) if order.report_id else None,
+        invoice_id=str(order.invoice_id) if order.invoice_id else None,
+        study_type_id=str(order.study_type_id) if order.study_type_id else None,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
@@ -2561,6 +2628,9 @@ def update_order_labels(
         requested_by=order.requested_by,
         notes=order.notes,
         billed_lock=order.billed_lock,
+        report_id=str(order.report_id) if order.report_id else None,
+        invoice_id=str(order.invoice_id) if order.invoice_id else None,
+        study_type_id=str(order.study_type_id) if order.study_type_id else None,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],

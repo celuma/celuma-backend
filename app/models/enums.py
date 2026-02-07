@@ -57,6 +57,7 @@ class PaymentStatus(str, Enum):
     FAILED = "FAILED"
     REFUNDED = "REFUNDED"
     PARTIAL = "PARTIAL"
+    VOID = "VOID"
 
 class EventType(str, Enum):
     # Order events

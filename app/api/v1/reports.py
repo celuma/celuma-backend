@@ -187,6 +187,10 @@ def create_report(
     session.add(report)
     session.flush()
     
+    # Update order with report_id (1-to-1 relationship)
+    order.report_id = report.id
+    session.add(order)
+    
     # Initialize report_id in existing report_review records for this order
     from app.models.report_review import ReportReview
     existing_reviews = session.exec(

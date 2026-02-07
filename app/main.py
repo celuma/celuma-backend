@@ -16,6 +16,8 @@ from app.api.v1.branches import router as branches_router
 from app.api.v1.patients import router as patients_router
 from app.api.v1.laboratory import router as laboratory_router
 from app.api.v1.reports import router as reports_router
+from app.api.v1.study_types import router as study_types_router
+from app.api.v1.price_catalog import router as price_catalog_router
 from app.api.v1.billing import router as billing_router
 from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.portal import router as portal_router
@@ -244,6 +246,8 @@ app.include_router(branches_router, prefix="/api/v1", dependencies=[Depends(curr
 app.include_router(patients_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(laboratory_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(reports_router, prefix="/api/v1", dependencies=[Depends(current_user)])
+app.include_router(study_types_router, prefix="/api/v1", dependencies=[Depends(current_user)])
+app.include_router(price_catalog_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(billing_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(dashboard_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(worklist_router, prefix="/api/v1", dependencies=[Depends(current_user)])

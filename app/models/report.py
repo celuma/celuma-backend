@@ -22,6 +22,8 @@ class Report(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     
     # Basic relationships only
     versions: List["ReportVersion"] = Relationship(back_populates="report")
+    # No Report.order relationship: use Report.order_id + session.get(Order, report.order_id)
+    # to avoid AmbiguousForeignKeysError with Order.report_id
 
 class ReportVersion(BaseModel, TimestampMixin, table=True):
     """Report version model for versioning reports"""

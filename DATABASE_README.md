@@ -194,11 +194,13 @@ This document describes the complete database schema for the Celuma laboratory m
 
 ### 6. Billing System
 
-#### ServiceCatalog
-- Catalog of services and pricing
-- Tenant-scoped service definitions
-- Supports time-based pricing validity
-- Active/inactive status for service management
+#### PriceCatalog
+- Pricing catalog per study type
+- Links study types to unit prices
+- Tenant-scoped pricing definitions
+- Supports time-based pricing validity (effective_from/effective_to)
+- Active/inactive status for price management
+- Currency support (default MXN)
 
 #### Invoice
 - Billing records for laboratory orders
@@ -207,8 +209,7 @@ This document describes the complete database schema for the Celuma laboratory m
 
 #### InvoiceItem
 - Detailed line items for invoices
-- Links to service catalog for pricing
-- Supports custom descriptions and quantities
+- Custom descriptions and quantities
 - Calculates subtotals for each item
 
 #### Payment
