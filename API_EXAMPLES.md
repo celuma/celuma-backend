@@ -15,7 +15,7 @@ This document provides comprehensive examples of how to use the Celuma API with 
 
 ## 🔐 Authentication
 
-Note: Except for `GET /`, `GET /health`, `GET /api/v1/health`, and `POST /api/v1/auth/*` (login/register), all endpoints require a Bearer token in the header:
+Note: Except for `GET /`, `GET /health`, `GET /api/v1/health`, `POST /api/v1/auth/*` (login/register/password-reset), `GET /api/v1/users/invitations/{token}`, `POST /api/v1/users/invitations/{token}/accept`, and `GET /api/v1/portal/patient/report`, all endpoints require a Bearer token in the header:
 ```
 Authorization: Bearer YOUR_ACCESS_TOKEN
 ```
@@ -814,23 +814,22 @@ curl -X POST "http://localhost:8000/api/v1/reports/$REPORT_ID/new_version" \
 **Python Example:**
 ```python
 response = requests.post(
-    "http://localhost:8000/api/v1/reports/versions/",
+    f"http://localhost:8000/api/v1/reports/{report_id}/new_version",
+    headers={"Authorization": f"Bearer {token}"},
     json={
-        "report_id": report_id,
-        "version_no": 1,
-        "pdf_storage_id": pdf_id,
-        "html_storage_id": html_id,
-        "changelog": "Initial report version",
-        "authored_by": user_id,
-        "authored_at": "2025-08-18T12:30:00Z"
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "order_id": order_id,
+        "title": "Blood Test Report",
+        "diagnosis_text": "Normal blood count results",
+        "published_at": "2025-08-18T12:00:00Z",
+        "created_by": user_id,
+        "report": {"tipo": "citologia_mamaria", "base": {}, "secciones": {}, "flags": {}, "images": []}
     }
 )
-```
-
 if response.status_code == 200:
-    report = response.json()
-    report_id = report['id']
-    print(f"Report created: {report['title']}")
+    version = response.json()
+    print(f"New version created: version_no={version['version_no']}")
 ```
 
 ### List All Reports (enriched)
@@ -937,6 +936,7 @@ pdf_path = "/path/to/report.pdf"
 with open(pdf_path, "rb") as f:
     resp = requests.post(
         f"http://localhost:8000/api/v1/reports/{report_id}/versions/{version_no}/pdf",
+        headers={"Authorization": f"Bearer {token}"},
         files={"file": (pdf_path.split("/")[-1], f, "application/pdf")},
     )
 
@@ -967,6 +967,7 @@ pdf_path = "/path/to/report.pdf"
 with open(pdf_path, "rb") as f:
     resp = requests.post(
         f"http://localhost:8000/api/v1/reports/{report_id}/pdf",
+        headers={"Authorization": f"Bearer {token}"},
         files={"file": (pdf_path.split("/")[-1], f, "application/pdf")},
     )
 
@@ -987,7 +988,10 @@ import requests
 
 report_id = "REPORT_UUID"
 version_no = 2
-resp = requests.get(f"http://localhost:8000/api/v1/reports/{report_id}/versions/{version_no}/pdf")
+resp = requests.get(
+    f"http://localhost:8000/api/v1/reports/{report_id}/versions/{version_no}/pdf",
+    headers={"Authorization": f"Bearer {token}"}
+)
 resp.raise_for_status()
 data = resp.json()
 print("Presigned URL:", data["pdf_url"])  # Use this URL to download the PDF
@@ -1004,7 +1008,10 @@ curl "http://localhost:8000/api/v1/reports/$REPORT_ID/pdf" | jq .
 import requests
 
 report_id = "REPORT_UUID"
-resp = requests.get(f"http://localhost:8000/api/v1/reports/{report_id}/pdf")
+resp = requests.get(
+    f"http://localhost:8000/api/v1/reports/{report_id}/pdf",
+    headers={"Authorization": f"Bearer {token}"}
+)
 resp.raise_for_status()
 data = resp.json()
 print("Presigned URL:", data["pdf_url"])  # Use this URL to download the PDF
@@ -1104,12 +1111,16 @@ if response.status_code == 200:
 ```bash
 curl -X POST "http://localhost:8000/api/v1/billing/invoices/" \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -d '{
     "tenant_id": "tenant-uuid-here",
     "branch_id": "branch-uuid-here",
     "order_id": "order-uuid-here",
     "invoice_number": "INV001",
-    "amount_total": 1500.00,
+    "subtotal": 1500.00,
+    "discount_total": 0.0,
+    "tax_total": 0.0,
+    "total": 1500.00,
     "currency": "MXN",
     "issued_at": "2025-08-18T01:50:51.386774"
   }'
@@ -1119,12 +1130,16 @@ curl -X POST "http://localhost:8000/api/v1/billing/invoices/" \
 ```python
 response = requests.post(
     "http://localhost:8000/api/v1/billing/invoices/",
+    headers={"Authorization": f"Bearer {token}"},
     json={
         "tenant_id": tenant_id,
         "branch_id": branch_id,
         "order_id": order_id,
         "invoice_number": "INV001",
-        "amount_total": 1500.00,
+        "subtotal": 1500.00,
+        "discount_total": 0.0,
+        "tax_total": 0.0,
+        "total": 1500.00,
         "currency": "MXN",
         "issued_at": "2025-08-18T01:50:51.386774"
     }
@@ -1140,13 +1155,15 @@ if response.status_code == 200:
 ```bash
 curl -X POST "http://localhost:8000/api/v1/billing/payments/" \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -d '{
     "tenant_id": "tenant-uuid-here",
-    "branch_id": "branch-uuid-here",
     "invoice_id": "invoice-uuid-here",
-    "amount_paid": 1500.00,
+    "amount": 1500.00,
+    "currency": "MXN",
     "method": "credit_card",
-    "paid_at": "2025-08-18T02:10:00Z"
+    "reference": "TXN-12345",
+    "received_at": "2025-08-18T02:10:00Z"
   }'
 ```
 
@@ -1154,19 +1171,32 @@ curl -X POST "http://localhost:8000/api/v1/billing/payments/" \
 ```python
 response = requests.post(
     "http://localhost:8000/api/v1/billing/payments/",
+    headers={"Authorization": f"Bearer {token}"},
     json={
         "tenant_id": tenant_id,
-        "branch_id": branch_id,
         "invoice_id": invoice_id,
-        "amount_paid": 1500.00,
+        "amount": 1500.00,
+        "currency": "MXN",
         "method": "credit_card",
-        "paid_at": "2025-08-18T02:10:00Z"
+        "reference": "TXN-12345",
+        "received_at": "2025-08-18T02:10:00Z"
     }
 )
 
 if response.status_code == 200:
     payment = response.json()
-    print(f"Payment created: ${payment['amount_paid']}")
+    print(f"Payment created: ${payment['amount']}")
+```
+
+### Get Invoice for Order
+```python
+# Convenience endpoint to get invoice by order ID
+invoice_response = requests.get(
+    f"{BASE_URL}/api/v1/billing/orders/{order_id}/invoice",
+    headers=headers,
+)
+invoice = invoice_response.json()
+print(f"Invoice: {invoice['invoice_number']}, Total: {invoice['total']}, Balance: {invoice['balance']}")
 ```
 
 ## 📚 API Usage Examples
@@ -1303,12 +1333,16 @@ print(f"✅ Report created: {report['title']}")
 # 7. Create Invoice
 invoice_response = requests.post(
     f"{BASE_URL}/api/v1/billing/invoices/",
+    headers=headers,
     json={
         "tenant_id": tenant_id,
         "branch_id": branch_id,
         "order_id": order_id,
         "invoice_number": "INV001",
-        "amount_total": 2500.00,
+        "subtotal": 2500.00,
+        "discount_total": 0.0,
+        "tax_total": 0.0,
+        "total": 2500.00,
         "currency": "MXN"
     }
 )
@@ -1318,18 +1352,66 @@ print(f"✅ Invoice created: {invoice['invoice_number']}")
 # 8. Create Payment
 payment_response = requests.post(
     f"{BASE_URL}/api/v1/billing/payments/",
+    headers=headers,
     json={
         "tenant_id": tenant_id,
-        "branch_id": branch_id,
         "invoice_id": invoice['id'],
-        "amount_paid": 2500.00,
+        "amount": 2500.00,
+        "currency": "MXN",
         "method": "credit_card"
     }
 )
 payment = payment_response.json()
-print(f"✅ Payment created: ${payment['amount_paid']}")
+print(f"✅ Payment created: ${payment['amount']}")
 
 print("\n🎉 Complete laboratory workflow created successfully!")
+```
+
+## 📚 Study Types Management
+
+### List Study Types
+```bash
+curl "http://localhost:8000/api/v1/study-types/?active_only=true" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+study_types_response = requests.get(
+    f"{BASE_URL}/api/v1/study-types/",
+    headers={"Authorization": f"Bearer {token}"},
+    params={"active_only": True}
+)
+data = study_types_response.json()
+for st in data["study_types"]:
+    print(f"- {st['code']}: {st['name']}")
+```
+
+### Create Study Type
+```bash
+curl -X POST "http://localhost:8000/api/v1/study-types/" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "code": "BIOPSIA",
+    "name": "Biopsia de tejido",
+    "description": "Análisis de biopsia",
+    "is_active": true,
+    "default_report_template_id": "template-uuid"
+  }'
+```
+
+### Update Study Type
+```python
+update_response = requests.put(
+    f"{BASE_URL}/api/v1/study-types/{study_type_id}",
+    headers=headers,
+    json={
+        "name": "Biopsia de tejido (actualizado)",
+        "description": "Descripción actualizada",
+        "default_report_template_id": template_id
+    }
+)
 ```
 
 ## 💰 Price Catalog Management
@@ -1409,17 +1491,15 @@ item = item_response.json()
 print(f"✅ Invoice item added: {item['description']}")
 ```
 
-### List Invoice Items
-```bash
-curl "http://localhost:8000/api/v1/billing/invoices/{invoice_id}/items" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
-```
+**Note:** Invoice items are included in `GET /api/v1/billing/invoices/{invoice_id}/full`. There is no separate endpoint to list items only.
 
-## 👥 User Invitations and Portal
+## 👥 User Invitations and Password Reset
+
+User invitations are handled via `/api/v1/users/invitations`. Password reset is handled via `/api/v1/auth/password-reset/*`.
 
 ### Send User Invitation
 ```bash
-curl -X POST "http://localhost:8000/api/v1/portal/invite" \
+curl -X POST "http://localhost:8000/api/v1/users/invitations" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -d '{
@@ -1429,47 +1509,40 @@ curl -X POST "http://localhost:8000/api/v1/portal/invite" \
   }'
 ```
 
-**Python Example:**
-```python
-invitation_response = requests.post(
-    f"{BASE_URL}/api/v1/portal/invite",
-    headers={"Authorization": f"Bearer {token}"},
-    json={
-        "email": "newuser@example.com",
-        "full_name": "New User",
-        "role": "lab_tech"
-    }
-)
-invitation = invitation_response.json()
-print(f"✅ Invitation sent to: {invitation['email']}")
-print(f"   Token: {invitation['token']}")
-```
-
-### Accept Invitation
+### Accept Invitation (Public endpoint)
 ```bash
-curl -X POST "http://localhost:8000/api/v1/portal/accept-invitation" \
+curl -X POST "http://localhost:8000/api/v1/users/invitations/{token}/accept" \
   -H "Content-Type: application/json" \
   -d '{
-    "token": "invitation-token",
-    "password": "SecurePassword123!"
+    "password": "SecurePassword123!",
+    "username": "myusername"
   }'
 ```
 
-### Request Password Reset
+### Request Password Reset (Public endpoint)
 ```bash
-curl -X POST "http://localhost:8000/api/v1/portal/request-password-reset" \
+curl -X POST "http://localhost:8000/api/v1/auth/password-reset/request" \
   -H "Content-Type: application/json" \
   -d '{
     "email": "user@example.com"
   }'
 ```
 
-### Reset Password
+### Verify Password Reset Token (Public endpoint)
 ```bash
-curl -X POST "http://localhost:8000/api/v1/portal/reset-password" \
+curl -X POST "http://localhost:8000/api/v1/auth/password-reset/verify" \
   -H "Content-Type: application/json" \
   -d '{
-    "token": "reset-token",
+    "token": "reset-token-string"
+  }'
+```
+
+### Confirm Password Reset (Public endpoint)
+```bash
+curl -X POST "http://localhost:8000/api/v1/auth/password-reset/confirm" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "token": "reset-token-string",
     "new_password": "NewSecurePassword123!"
   }'
 ```
@@ -2406,9 +2479,9 @@ print(f"✅ {result['message']}")
 print(f"New status: {result['status']}")  # IN_REVIEW
 ```
 
-### Get Pathologist Worklist
+### Get Pathologist Worklist (Reports in Review)
 ```python
-# Get all reports waiting for review
+# Get all reports waiting for review (pathologist-focused)
 worklist_response = requests.get(
     f"{BASE_URL}/api/v1/reports/worklist",
     headers=headers,
@@ -2419,6 +2492,64 @@ for report in worklist:
     patient = report["order"]["patient"]["full_name"]
     order_code = report["order"]["order_code"]
     print(f"- {report['title']} (Order: {order_code}, Patient: {patient})")
+```
+
+### Get Unified Worklist (Assignments + Report Reviews)
+```python
+# Get unified worklist for current user (assignments and pending reviews)
+worklist_response = requests.get(
+    f"{BASE_URL}/api/v1/me/worklist",
+    headers=headers,
+    params={"kind": "assignment", "page": 1, "page_size": 20},
+)
+data = worklist_response.json()
+print(f"Total items: {data['total']}")
+for item in data["items"]:
+    print(f"- {item['kind']}: {item['item_type']} {item['display_id']} | Patient: {item.get('patient_name')} | Status: {item['item_status']}")
+```
+
+### List Assignments
+```python
+# List assignments with optional filters
+assignments_response = requests.get(
+    f"{BASE_URL}/api/v1/assignments",
+    headers=headers,
+    params={"item_type": "lab_order", "page": 1},
+)
+assignments = assignments_response.json()
+```
+
+### Create Assignment
+```python
+# Assign a user to an order
+assignment_data = {
+    "item_type": "lab_order",
+    "item_id": order_id,
+    "assignee_id": user_id
+}
+assignment_response = requests.post(
+    f"{BASE_URL}/api/v1/assignments",
+    headers=headers,
+    json=assignment_data,
+)
+assignment = assignment_response.json()
+print(f"✅ Assignment created: {assignment['id']}")
+```
+
+### Report Review Decision
+```python
+# Approve or reject a report review
+decision_data = {
+    "decision": "approve",
+    "comment": "Report reviewed and approved"
+}
+decision_response = requests.post(
+    f"{BASE_URL}/api/v1/report-reviews/{review_id}/decision",
+    headers=headers,
+    json=decision_data,
+)
+result = decision_response.json()
+print(f"✅ Review decision: {result}")
 ```
 
 ### Approve Report (Pathologist Only)
@@ -2503,7 +2634,7 @@ invoice_full_response = requests.get(
 invoice_full = invoice_full_response.json()
 
 print(f"Invoice: {invoice_full['invoice_number']}")
-print(f"Total: {invoice_full['amount_total']} {invoice_full['currency']}")
+print(f"Total: {invoice_full['total']} {invoice_full['currency']}")
 print(f"Status: {invoice_full['status']}")
 print(f"Balance: {invoice_full['balance']} {invoice_full['currency']}")
 
@@ -2513,7 +2644,7 @@ for item in invoice_full["items"]:
 
 print("\nPayments:")
 for payment in invoice_full["payments"]:
-    print(f"- {payment['method']}: {payment['amount_paid']}")
+    print(f"- {payment['method']}: {payment['amount']}")
 ```
 
 ### Get Order Payment Balance
@@ -2537,7 +2668,7 @@ if balance['is_locked']:
 print("\nInvoices:")
 for invoice in balance["invoices"]:
     status_icon = "✅" if invoice['status'] == "PAID" else "⏳"
-    print(f"{status_icon} {invoice['invoice_number']}: {invoice['amount_total']} (Balance: {invoice['balance']})")
+    print(f"{status_icon} {invoice['invoice_number']}: {invoice['total']} (Balance: {invoice['balance']})")
 ```
 
 ### Add Invoice Item
