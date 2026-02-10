@@ -2636,6 +2636,115 @@ Headers: `Authorization: Bearer <token>`
 ### DELETE /api/v1/study-types/{study_type_id}
 **Delete (deactivate) a study type**
 
+## 📋 Report Sections Endpoints
+
+### GET /api/v1/report-sections/
+**List all report sections for the tenant**
+
+Returns a catalog of all available report sections for building report templates. Report sections can include predefined text to speed up report creation.
+
+**Response:**
+```json
+{
+  "report_sections": [
+    {
+      "id": "section-uuid",
+      "tenant_id": "tenant-uuid",
+      "section": "Diagnóstico",
+      "description": "Sección de diagnóstico principal",
+      "predefined_text": "El diagnóstico es...",
+      "created_at": "2025-01-01T00:00:00Z",
+      "created_by": "user-uuid"
+    }
+  ]
+}
+```
+
+### GET /api/v1/report-sections/{report_section_id}
+**Get a specific report section by ID**
+
+Returns detailed information about a single report section.
+
+**Response:**
+```json
+{
+  "id": "section-uuid",
+  "tenant_id": "tenant-uuid",
+  "section": "Diagnóstico",
+  "description": "Sección de diagnóstico principal",
+  "predefined_text": "El diagnóstico es...",
+  "created_at": "2025-01-01T00:00:00Z",
+  "created_by": "user-uuid"
+}
+```
+
+### POST /api/v1/report-sections/
+**Create a new report section**
+
+Creates a new report section in the catalog. The section name is required, while description and predefined_text are optional.
+
+**Request Body:**
+```json
+{
+  "section": "Diagnóstico",
+  "description": "Sección de diagnóstico principal",
+  "predefined_text": "El diagnóstico es..."
+}
+```
+
+**Response:**
+```json
+{
+  "id": "section-uuid",
+  "tenant_id": "tenant-uuid",
+  "section": "Diagnóstico",
+  "description": "Sección de diagnóstico principal",
+  "predefined_text": "El diagnóstico es...",
+  "created_at": "2025-01-01T00:00:00Z",
+  "created_by": "user-uuid"
+}
+```
+
+### PUT /api/v1/report-sections/{report_section_id}
+**Update an existing report section**
+
+Updates one or more fields of an existing report section. All fields are optional in the request body.
+
+**Request Body:**
+```json
+{
+  "section": "Diagnóstico Actualizado",
+  "description": "Nueva descripción",
+  "predefined_text": "Texto actualizado..."
+}
+```
+
+**Response:**
+```json
+{
+  "id": "section-uuid",
+  "tenant_id": "tenant-uuid",
+  "section": "Diagnóstico Actualizado",
+  "description": "Nueva descripción",
+  "predefined_text": "Texto actualizado...",
+  "created_at": "2025-01-01T00:00:00Z",
+  "created_by": "user-uuid"
+}
+```
+
+### DELETE /api/v1/report-sections/{report_section_id}
+**Delete a report section**
+
+Permanently deletes a report section from the catalog.
+
+**Response:**
+```json
+{
+  "message": "Report section deleted",
+  "id": "section-uuid"
+}
+```
+
 ## 🔍 System Endpoints
 
 ### GET /

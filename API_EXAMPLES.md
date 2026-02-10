@@ -1414,6 +1414,113 @@ update_response = requests.put(
 )
 ```
 
+## 📋 Report Sections Management
+
+### List Report Sections
+```bash
+curl "http://localhost:8000/api/v1/report-sections/" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+sections_response = requests.get(
+    f"{BASE_URL}/api/v1/report-sections/",
+    headers={"Authorization": f"Bearer {token}"}
+)
+data = sections_response.json()
+for section in data["report_sections"]:
+    print(f"- {section['section']}: {section['description']}")
+```
+
+### Get Report Section Details
+```bash
+curl "http://localhost:8000/api/v1/report-sections/{section_id}" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+section_response = requests.get(
+    f"{BASE_URL}/api/v1/report-sections/{section_id}",
+    headers={"Authorization": f"Bearer {token}"}
+)
+section = section_response.json()
+print(f"Section: {section['section']}")
+print(f"Predefined text: {section['predefined_text']}")
+```
+
+### Create Report Section
+```bash
+curl -X POST "http://localhost:8000/api/v1/report-sections/" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "section": "Diagnóstico",
+    "description": "Sección de diagnóstico principal",
+    "predefined_text": "El diagnóstico es..."
+  }'
+```
+
+**Python Example:**
+```python
+section_data = {
+    "section": "Hallazgos Microscópicos",
+    "description": "Descripción detallada de los hallazgos microscópicos",
+    "predefined_text": "Se observan los siguientes hallazgos microscópicos:\n- "
+}
+
+create_response = requests.post(
+    f"{BASE_URL}/api/v1/report-sections/",
+    headers={"Authorization": f"Bearer {token}"},
+    json=section_data
+)
+section = create_response.json()
+print(f"✅ Section created: {section['section']} (ID: {section['id']})")
+```
+
+### Update Report Section
+```bash
+curl -X PUT "http://localhost:8000/api/v1/report-sections/{section_id}" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "section": "Diagnóstico Actualizado",
+    "description": "Nueva descripción",
+    "predefined_text": "Texto actualizado..."
+  }'
+```
+
+**Python Example:**
+```python
+update_response = requests.put(
+    f"{BASE_URL}/api/v1/report-sections/{section_id}",
+    headers=headers,
+    json={
+        "description": "Descripción actualizada",
+        "predefined_text": "Nuevo texto predefinido..."
+    }
+)
+updated_section = update_response.json()
+print(f"✅ Section updated: {updated_section['section']}")
+```
+
+### Delete Report Section
+```bash
+curl -X DELETE "http://localhost:8000/api/v1/report-sections/{section_id}" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+delete_response = requests.delete(
+    f"{BASE_URL}/api/v1/report-sections/{section_id}",
+    headers={"Authorization": f"Bearer {token}"}
+)
+result = delete_response.json()
+print(f"✅ {result['message']}: {result['id']}")
+```
+
 ## 💰 Price Catalog Management
 
 ### Create Price Catalog Entry
