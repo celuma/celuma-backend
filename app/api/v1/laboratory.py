@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from typing import Dict, Optional, List, Set
 from uuid import UUID
-from sqlmodel import select, Session, and_
+from sqlmodel import select, Session, and_, func
 from sqlalchemy import cast, String
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
@@ -244,31 +244,44 @@ def create_order(order_data: OrderCreate, session: Session = Depends(get_session
     if not patient:
         raise HTTPException(404, "Patient not found")
     
-    # Verify study_type if provided
-    if order_data.study_type_id:
-        from app.models.study_type import StudyType
-        study_type = session.get(StudyType, order_data.study_type_id)
-        if not study_type:
-            raise HTTPException(404, "Study type not found")
-        if str(study_type.tenant_id) != str(order_data.tenant_id):
-            raise HTTPException(403, "Study type does not belong to this tenant")
+    # Verify study_type (now required)
+    from app.models.study_type import StudyType
+    study_type = session.get(StudyType, order_data.study_type_id)
+    if not study_type:
+        raise HTTPException(404, "Study type not found")
+    if str(study_type.tenant_id) != str(order_data.tenant_id):
+        raise HTTPException(403, "Study type does not belong to this tenant")
     
-    # Check if order_code is unique for this branch
+    # Generate order_code if not provided
+    if not order_data.order_code:
+        # Count existing orders with same tenant_id and study_type_id
+        count = session.exec(
+            select(func.count(Order.id)).where(
+                Order.tenant_id == order_data.tenant_id,
+                Order.study_type_id == order_data.study_type_id
+            )
+        ).first() or 0
+        next_seq = count + 1
+        order_code = f"{study_type.code}-{next_seq}"
+    else:
+        order_code = order_data.order_code
+    
+    # Check if order_code is unique for this tenant
     existing_order = session.exec(
         select(Order).where(
-            Order.order_code == order_data.order_code,
-            Order.branch_id == order_data.branch_id
+            Order.order_code == order_code,
+            Order.tenant_id == order_data.tenant_id
         )
     ).first()
     
     if existing_order:
-        raise HTTPException(400, "Order code already exists for this branch")
+        raise HTTPException(400, "Order code already exists for this tenant")
     
     order = Order(
         tenant_id=order_data.tenant_id,
         branch_id=order_data.branch_id,
         patient_id=order_data.patient_id,
-        order_code=order_data.order_code,
+        order_code=order_code,
         requested_by=order_data.requested_by,
         notes=order_data.notes,
         created_by=order_data.created_by,
@@ -1117,7 +1130,8 @@ def create_order_with_samples(payload: OrderUnifiedCreate, session: Session = De
     """Create a new laboratory order and multiple samples in one operation.
 
     - Validates tenant, branch, and patient
-    - Ensures `order_code` uniqueness per branch
+    - Generates order_code automatically if not provided
+    - Ensures `order_code` uniqueness per tenant
     - Creates order and all samples atomically
     """
     # Validate tenant, branch, and patient
@@ -1131,31 +1145,44 @@ def create_order_with_samples(payload: OrderUnifiedCreate, session: Session = De
     if not patient:
         raise HTTPException(404, "Patient not found")
 
-    # Verify study_type if provided
-    if payload.study_type_id:
-        from app.models.study_type import StudyType
-        study_type = session.get(StudyType, payload.study_type_id)
-        if not study_type:
-            raise HTTPException(404, "Study type not found")
-        if str(study_type.tenant_id) != str(payload.tenant_id):
-            raise HTTPException(403, "Study type does not belong to this tenant")
+    # Verify study_type (now required)
+    from app.models.study_type import StudyType
+    study_type = session.get(StudyType, payload.study_type_id)
+    if not study_type:
+        raise HTTPException(404, "Study type not found")
+    if str(study_type.tenant_id) != str(payload.tenant_id):
+        raise HTTPException(403, "Study type does not belong to this tenant")
 
-    # Ensure order_code unique per branch
+    # Generate order_code if not provided
+    if not payload.order_code:
+        # Count existing orders with same tenant_id and study_type_id
+        count = session.exec(
+            select(func.count(Order.id)).where(
+                Order.tenant_id == payload.tenant_id,
+                Order.study_type_id == payload.study_type_id
+            )
+        ).first() or 0
+        next_seq = count + 1
+        order_code = f"{study_type.code}-{next_seq}"
+    else:
+        order_code = payload.order_code
+
+    # Ensure order_code unique per tenant
     existing = session.exec(
         select(Order).where(
-            Order.order_code == payload.order_code,
-            Order.branch_id == payload.branch_id,
+            Order.order_code == order_code,
+            Order.tenant_id == payload.tenant_id,
         )
     ).first()
     if existing:
-        raise HTTPException(400, "Order code already exists for this branch")
+        raise HTTPException(400, "Order code already exists for this tenant")
 
     # Create order
     order = Order(
         tenant_id=payload.tenant_id,
         branch_id=payload.branch_id,
         patient_id=payload.patient_id,
-        order_code=payload.order_code,
+        order_code=order_code,
         requested_by=payload.requested_by,
         notes=payload.notes,
         created_by=payload.created_by,
