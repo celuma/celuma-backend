@@ -7,6 +7,7 @@ from .patient import Patient
 from .storage import StorageObject, SampleImageRendition
 from .laboratory import Order, Sample, SampleImage, OrderComment, Label, OrderLabel, SampleLabel, LabOrderLabel
 from .report import Report, ReportVersion, ReportTemplate
+from .report_section import ReportSection
 from .study_type import StudyType
 from .price_catalog import PriceCatalog
 from .billing import Invoice, Payment, InvoiceItem
@@ -49,6 +50,7 @@ __all__ = [
     "Report",
     "ReportVersion",
     "ReportTemplate",
+    "ReportSection",
     "StudyType",
     "PriceCatalog",
     "Invoice",

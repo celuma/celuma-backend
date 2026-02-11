@@ -30,6 +30,12 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
   - `POST /api/v1/auth/login`
   - `POST /api/v1/auth/register`
   - `POST /api/v1/auth/register/unified`
+  - `POST /api/v1/auth/password-reset/request`
+  - `POST /api/v1/auth/password-reset/verify`
+  - `POST /api/v1/auth/password-reset/confirm`
+  - `GET /api/v1/users/invitations/{token}` (public invitation verification)
+  - `POST /api/v1/users/invitations/{token}/accept` (public invitation acceptance)
+  - `GET /api/v1/portal/patient/report` (public patient report access by code)
 - For all other endpoints, include:
 ```
 Authorization: Bearer <jwt_token>
@@ -173,6 +179,75 @@ Response body:
 - Authentication prioritizes username match first, then falls back to email.
 - The same password is used regardless of whether you log in with username or email.
 - On error, the endpoint returns `401 Unauthorized`.
+
+### POST /api/v1/auth/password-reset/request
+**Request password reset - sends email with reset link**
+
+**Request Body:**
+```json
+{
+  "email": "user@example.com"
+}
+```
+
+**Response:**
+```json
+{
+  "message": "If an account with this email exists, a password reset link has been sent"
+}
+```
+
+**Notes:**
+- Public endpoint - no authentication required
+- For security, always returns success to avoid user enumeration
+- Sends reset email if user exists (token valid for 1 hour)
+
+### POST /api/v1/auth/password-reset/verify
+**Verify if a password reset token is valid**
+
+**Request Body:**
+```json
+{
+  "token": "reset-token-string"
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Token is valid",
+  "valid": true
+}
+```
+
+**Notes:**
+- Public endpoint - no authentication required
+- Returns 404 if token is invalid or expired
+- Returns 400 if token has expired
+
+### POST /api/v1/auth/password-reset/confirm
+**Confirm password reset with token and new password**
+
+**Request Body:**
+```json
+{
+  "token": "reset-token-string",
+  "new_password": "NewSecurePassword123!"
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Password reset successfully"
+}
+```
+
+**Notes:**
+- Public endpoint - no authentication required
+- Returns 404 if token is invalid or expired
+- Returns 400 if token has expired
+- Marks token as used after successful reset
 
 ### POST /api/v1/auth/logout
 **Logout user and blacklist token**
@@ -2155,7 +2230,10 @@ Headers: `Authorization: Bearer <token>`
   "branch_id": "branch-uuid-here",
   "order_id": "order-uuid-here",
   "invoice_number": "INV001",
-  "amount_total": 1500.00,
+  "subtotal": 1500.00,
+  "discount_total": 0.0,
+  "tax_total": 0.0,
+  "total": 1500.00,
   "currency": "MXN",
   "issued_at": "2025-08-18T01:50:51.386774"
 }
@@ -2166,7 +2244,11 @@ Headers: `Authorization: Bearer <token>`
 {
   "id": "invoice-uuid",
   "invoice_number": "INV001",
-  "amount_total": 1500.0,
+  "subtotal": 1500.0,
+  "discount_total": 0.0,
+  "tax_total": 0.0,
+  "total": 1500.0,
+  "amount_paid": 0.0,
   "currency": "MXN",
   "status": "PENDING",
   "order_id": "order-uuid-here",
@@ -2231,6 +2313,7 @@ Headers: `Authorization: Bearer <token>`
     {
       "id": "item-uuid",
       "invoice_id": "invoice-uuid",
+      "study_type_id": null,
       "description": "Biopsy Analysis",
       "quantity": 1,
       "unit_price": 1500.0,
@@ -2240,11 +2323,14 @@ Headers: `Authorization: Bearer <token>`
   "payments": [
     {
       "id": "payment-uuid",
-      "amount_paid": 750.0,
+      "amount": 750.0,
+      "currency": "MXN",
       "method": "credit_card",
+      "reference": null,
       "invoice_id": "invoice-uuid",
       "tenant_id": "tenant-uuid",
-      "branch_id": "branch-uuid"
+      "received_at": "2025-08-18T02:10:00Z",
+      "created_by": "user-uuid"
     }
   ],
   "balance": 750.0
@@ -2263,11 +2349,12 @@ Headers: `Authorization: Bearer <token>`
 ```json
 {
   "tenant_id": "tenant-uuid-here",
-  "branch_id": "branch-uuid-here",
   "invoice_id": "invoice-uuid-here",
-  "amount_paid": 1500.00,
+  "amount": 1500.00,
+  "currency": "MXN",
   "method": "credit_card",
-  "paid_at": "2025-08-18T02:10:00Z"
+  "reference": "TXN-12345",
+  "received_at": "2025-08-18T02:10:00Z"
 }
 ```
 
@@ -2275,11 +2362,14 @@ Headers: `Authorization: Bearer <token>`
 ```json
 {
   "id": "payment-uuid",
-  "amount_paid": 1500.0,
+  "amount": 1500.0,
+  "currency": "MXN",
   "method": "credit_card",
+  "reference": "TXN-12345",
   "invoice_id": "invoice-uuid-here",
   "tenant_id": "tenant-uuid-here",
-  "branch_id": "branch-uuid-here"
+  "received_at": "2025-08-18T02:10:00Z",
+  "created_by": "user-uuid"
 }
 ```
 
@@ -2339,6 +2429,16 @@ Headers: `Authorization: Bearer <token>`
 - `invoices`: Array of all invoices with their individual balances
 - Useful for checking order payment status and managing billing locks
 
+### GET /api/v1/billing/orders/{order_id}/invoice
+**Get invoice for an order (convenience endpoint)**
+
+Returns the full invoice with items and payments for the given order.
+
+**Response:** Same shape as `GET /api/v1/billing/invoices/{invoice_id}/full`
+
+**Notes:**
+- Returns 404 if order has no invoice
+
 ## 📊 Dashboard Endpoints
 
 Headers: `Authorization: Bearer <token>`
@@ -2384,6 +2484,267 @@ Headers: `Authorization: Bearer <token>`
 - Recent activity includes the 8 most recent items across orders, reports, and samples
 - Optimized endpoint that combines multiple queries for better performance
 
+## 📋 Worklist Endpoints
+
+Headers: `Authorization: Bearer <token>`
+
+Unified worklist for managing assignments and report reviews.
+
+### GET /api/v1/me/worklist
+**Get unified worklist for current user**
+
+**Query Parameters:**
+- `kind` (optional): Filter by kind - `assignment` | `review`
+- `item_type` (optional): Filter by item type - `lab_order` | `sample` | `report`
+- `status` (optional): Filter by status
+- `page` (optional, default: 1): Page number
+- `page_size` (optional, default: 20, max: 100): Items per page
+
+**Response:**
+```json
+{
+  "items": [
+    {
+      "id": "assignment-uuid",
+      "kind": "assignment",
+      "item_type": "lab_order",
+      "item_id": "order-uuid",
+      "display_id": "ORD001",
+      "item_status": "RECEIVED",
+      "assigned_at": "2025-01-15T10:00:00Z",
+      "patient_id": "patient-uuid",
+      "patient_name": "John Doe",
+      "patient_code": "P001",
+      "order_code": "ORD001",
+      "link": "/orders/order-uuid"
+    }
+  ],
+  "total": 10,
+  "page": 1,
+  "page_size": 20,
+  "has_more": false
+}
+```
+
+**Notes:**
+- Returns both assignments and pending report reviews in unified format
+- Sorted by assigned_at descending
+
+### GET /api/v1/assignments
+**List assignments with optional filters**
+
+**Query Parameters:**
+- `assignee_id` (optional): Filter by assignee user ID
+- `item_type` (optional): Filter by item type - `lab_order` | `sample` | `report`
+- `item_id` (optional): Filter by specific item ID
+- `page`, `page_size` (optional): Pagination
+
+### POST /api/v1/assignments
+**Create a new assignment**
+
+**Request Body:**
+```json
+{
+  "item_type": "lab_order",
+  "item_id": "order-uuid",
+  "assignee_id": "user-uuid"
+}
+```
+
+### DELETE /api/v1/assignments/{assignment_id}
+**Soft unassign - remove assignment**
+
+**Response:**
+```json
+{
+  "message": "Assignment removed"
+}
+```
+
+### GET /api/v1/report-reviews
+**List report reviews with optional filters**
+
+**Query Parameters:**
+- `reviewer_id` (optional): Filter by reviewer user ID
+- `status` (optional): Filter by status - `PENDING` | `APPROVED` | `REJECTED`
+- `page`, `page_size` (optional): Pagination
+
+### POST /api/v1/report-reviews/{review_id}/decision
+**Approve or reject a report review**
+
+**Request Body:**
+```json
+{
+  "decision": "approve",
+  "comment": "Optional comment"
+}
+```
+
+**Notes:**
+- `decision` must be `approve` or `reject`
+- Creates corresponding report workflow events
+
+## 📚 Study Types Endpoints
+
+Headers: `Authorization: Bearer <token>`
+
+### GET /api/v1/study-types/
+**List all study types for the tenant**
+
+**Query Parameters:**
+- `active_only` (optional, default: true): If true, only returns active study types
+
+**Response:**
+```json
+{
+  "study_types": [
+    {
+      "id": "study-type-uuid",
+      "tenant_id": "tenant-uuid",
+      "code": "BIOPSIA",
+      "name": "Biopsia de tejido",
+      "description": "Análisis de biopsia",
+      "is_active": true,
+      "created_at": "2025-01-01T00:00:00Z",
+      "default_report_template_id": "template-uuid",
+      "default_template": { "id": "template-uuid", "name": "Template Name" }
+    }
+  ]
+}
+```
+
+### GET /api/v1/study-types/{study_type_id}
+**Get a specific study type by ID**
+
+### POST /api/v1/study-types/
+**Create a new study type**
+
+**Request Body:**
+```json
+{
+  "code": "BIOPSIA",
+  "name": "Biopsia de tejido",
+  "description": "Análisis de biopsia",
+  "is_active": true,
+  "default_report_template_id": "template-uuid"
+}
+```
+
+### PUT /api/v1/study-types/{study_type_id}
+**Update an existing study type**
+
+### DELETE /api/v1/study-types/{study_type_id}
+**Delete (deactivate) a study type**
+
+## 📋 Report Sections Endpoints
+
+### GET /api/v1/report-sections/
+**List all report sections for the tenant**
+
+Returns a catalog of all available report sections for building report templates. Report sections can include predefined text to speed up report creation.
+
+**Response:**
+```json
+{
+  "report_sections": [
+    {
+      "id": "section-uuid",
+      "tenant_id": "tenant-uuid",
+      "section": "Diagnóstico",
+      "description": "Sección de diagnóstico principal",
+      "predefined_text": "El diagnóstico es...",
+      "created_at": "2025-01-01T00:00:00Z",
+      "created_by": "user-uuid"
+    }
+  ]
+}
+```
+
+### GET /api/v1/report-sections/{report_section_id}
+**Get a specific report section by ID**
+
+Returns detailed information about a single report section.
+
+**Response:**
+```json
+{
+  "id": "section-uuid",
+  "tenant_id": "tenant-uuid",
+  "section": "Diagnóstico",
+  "description": "Sección de diagnóstico principal",
+  "predefined_text": "El diagnóstico es...",
+  "created_at": "2025-01-01T00:00:00Z",
+  "created_by": "user-uuid"
+}
+```
+
+### POST /api/v1/report-sections/
+**Create a new report section**
+
+Creates a new report section in the catalog. The section name is required, while description and predefined_text are optional.
+
+**Request Body:**
+```json
+{
+  "section": "Diagnóstico",
+  "description": "Sección de diagnóstico principal",
+  "predefined_text": "El diagnóstico es..."
+}
+```
+
+**Response:**
+```json
+{
+  "id": "section-uuid",
+  "tenant_id": "tenant-uuid",
+  "section": "Diagnóstico",
+  "description": "Sección de diagnóstico principal",
+  "predefined_text": "El diagnóstico es...",
+  "created_at": "2025-01-01T00:00:00Z",
+  "created_by": "user-uuid"
+}
+```
+
+### PUT /api/v1/report-sections/{report_section_id}
+**Update an existing report section**
+
+Updates one or more fields of an existing report section. All fields are optional in the request body.
+
+**Request Body:**
+```json
+{
+  "section": "Diagnóstico Actualizado",
+  "description": "Nueva descripción",
+  "predefined_text": "Texto actualizado..."
+}
+```
+
+**Response:**
+```json
+{
+  "id": "section-uuid",
+  "tenant_id": "tenant-uuid",
+  "section": "Diagnóstico Actualizado",
+  "description": "Nueva descripción",
+  "predefined_text": "Texto actualizado...",
+  "created_at": "2025-01-01T00:00:00Z",
+  "created_by": "user-uuid"
+}
+```
+
+### DELETE /api/v1/report-sections/{report_section_id}
+**Delete a report section**
+
+Permanently deletes a report section from the catalog.
+
+**Response:**
+```json
+{
+  "message": "Report section deleted",
+  "id": "section-uuid"
+}
+```
+
 ## 🔍 System Endpoints
 
 ### GET /
@@ -2414,12 +2775,24 @@ Headers: `Authorization: Bearer <token>`
 ```
 
 ### GET /api/v1/health
-**Health check endpoint**
+**API-specific health check**
 
 **Response:**
 ```json
 {
-  "status": "ok"
+  "status": "healthy",
+  "api_version": "v1"
+}
+```
+
+### GET /health
+**Health check endpoint for load balancers**
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "version": "1.0.0"
 }
 ```
 
@@ -2471,7 +2844,7 @@ Headers: `Authorization: Bearer <token>`
 
 **Response:** Returns the created price catalog entry.
 
-### PUT /api/v1/price-catalog/{id}
+### PUT /api/v1/price-catalog/{price_id}
 **Update a price catalog entry**
 
 **Request Body:**
@@ -2484,7 +2857,7 @@ Headers: `Authorization: Bearer <token>`
 
 **Response:** Returns the updated price catalog entry.
 
-### DELETE /api/v1/price-catalog/{id}
+### DELETE /api/v1/price-catalog/{price_id}
 **Delete (deactivate) a price catalog entry**
 
 **Response:**
@@ -2497,22 +2870,7 @@ Headers: `Authorization: Bearer <token>`
 
 ## 📄 Invoice Items Endpoints
 
-### GET /api/v1/billing/invoices/{invoice_id}/items
-**List all items for an invoice**
-
-**Response:**
-```json
-[
-  {
-    "id": "item-uuid",
-    "invoice_id": "invoice-uuid",
-    "description": "Biopsy Analysis",
-    "quantity": 1,
-    "unit_price": 1500.00,
-    "subtotal": 1500.00
-  }
-]
-```
+**Note:** Invoice items are included in `GET /api/v1/billing/invoices/{invoice_id}/full`. Use that endpoint to retrieve items. To add items, use POST below.
 
 ### POST /api/v1/billing/invoices/{invoice_id}/items
 **Add an item to an invoice**
@@ -2522,19 +2880,27 @@ Headers: `Authorization: Bearer <token>`
 {
   "description": "Biopsy Analysis",
   "quantity": 1,
-  "unit_price": 1500.00
-}
+  "unit_price": 1500.00,
+  "study_type_id": "study-type-uuid"
 }
 ```
 
-**Response:** Returns the created invoice item.
+**Response:** Returns the created invoice item with `id`, `invoice_id`, `study_type_id`, `description`, `quantity`, `unit_price`, `subtotal`.
+
+**Notes:**
+- Requires Admin or Billing role
+- Automatically recalculates invoice totals and updates order payment lock
 
 ## 👥 Portal Endpoints
+
+**Note:** Portal invitations and password reset are handled via `/api/v1/users/invitations` and `/api/v1/auth/password-reset/*` respectively. The portal endpoints below are for physician and patient report access only.
 
 ### GET /api/v1/portal/physician/orders
 **List orders for the authenticated physician**
 
 Returns orders where the `requested_by` field matches the authenticated user's email.
+
+**Headers:** `Authorization: Bearer <token>`
 
 **Response:**
 ```json
@@ -2558,6 +2924,8 @@ Returns orders where the `requested_by` field matches the authenticated user's e
 
 ### GET /api/v1/portal/physician/orders/{order_id}/report
 **Get published report for a specific order (physician only)**
+
+**Headers:** `Authorization: Bearer <token>`
 
 **Response:**
 ```json
@@ -2604,86 +2972,6 @@ Returns orders where the `requested_by` field matches the authenticated user's e
 - Returns 403 if the order is locked due to pending payment
 - Returns 404 if no report exists or report is not PUBLISHED
 - PDF URL is a presigned URL valid for 10 minutes
-
-### POST /api/v1/portal/invite
-**Send a user invitation**
-
-**Request Body:**
-```json
-{
-  "email": "newuser@example.com",
-  "full_name": "New User",
-  "role": "lab_tech"
-}
-```
-
-**Response:**
-```json
-{
-  "id": "invitation-uuid",
-  "email": "newuser@example.com",
-  "token": "invitation-token",
-  "expires_at": "2025-01-08T00:00:00Z",
-  "message": "Invitation sent successfully"
-}
-```
-
-### POST /api/v1/portal/accept-invitation
-**Accept an invitation and create user account**
-
-**Request Body:**
-```json
-{
-  "token": "invitation-token",
-  "password": "SecurePassword123!"
-}
-```
-
-**Response:**
-```json
-{
-  "id": "user-uuid",
-  "email": "newuser@example.com",
-  "full_name": "New User",
-  "role": "lab_tech",
-  "message": "Account created successfully"
-}
-```
-
-### POST /api/v1/portal/request-password-reset
-**Request a password reset token**
-
-**Request Body:**
-```json
-{
-  "email": "user@example.com"
-}
-```
-
-**Response:**
-```json
-{
-  "message": "Password reset email sent"
-}
-```
-
-### POST /api/v1/portal/reset-password
-**Reset password using a token**
-
-**Request Body:**
-```json
-{
-  "token": "reset-token",
-  "new_password": "NewSecurePassword123!"
-}
-```
-
-**Response:**
-```json
-{
-  "message": "Password reset successfully"
-}
-```
 
 ## 📋 Event Timeline Endpoints
 
