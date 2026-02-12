@@ -452,7 +452,7 @@ def add_invoice_item(
     ).all()
     new_subtotal = sum(float(i.subtotal) for i in all_items)
     invoice.subtotal = new_subtotal
-    invoice.total = new_subtotal + invoice.discount_total + invoice.tax_total
+    invoice.total = new_subtotal + float(invoice.discount_total) + float(invoice.tax_total)
     invoice.amount_total = invoice.total  # Keep backwards compatibility
     invoice.updated_at = datetime.utcnow()
     session.add(invoice)
@@ -522,7 +522,7 @@ def update_invoice_item(
     ).all()
     new_subtotal = sum(float(i.subtotal) for i in all_items)
     invoice.subtotal = new_subtotal
-    invoice.total = new_subtotal + invoice.discount_total + invoice.tax_total
+    invoice.total = new_subtotal + float(invoice.discount_total) + float(invoice.tax_total)
     invoice.amount_total = invoice.total  # Keep backwards compatibility
     invoice.updated_at = datetime.utcnow()
     session.add(invoice)
