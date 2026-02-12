@@ -599,8 +599,11 @@ def create_payment(
     # Update invoice status based on new balance (also updates amount_paid and paid_at)
     update_invoice_status(session, str(invoice.id))
     
-    # Update order payment lock
+    # Update order payment lock (billed_lock = False when balance is 0)
     update_order_payment_lock(session, str(invoice.order_id))
+    # Recompute order status so it can move from CLOSED to RELEASED when payment is cleared
+    from app.api.v1.laboratory import update_order_status
+    update_order_status(str(invoice.order_id), session)
     
     # Create payment event
     from app.models.events import OrderEvent
