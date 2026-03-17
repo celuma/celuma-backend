@@ -12,7 +12,7 @@ from app.models.enums import PaymentStatus, UserRole
 from app.schemas.billing import (
     InvoiceCreate, InvoiceResponse, InvoiceDetailResponse, 
     PaymentCreate, PaymentResponse,
-    InvoiceItemCreate, InvoiceItemResponse, InvoiceWithItemsResponse
+    InvoiceItemCreate, InvoiceItemUpdate, InvoiceItemResponse, InvoiceWithItemsResponse
 )
 import logging
 
@@ -452,7 +452,77 @@ def add_invoice_item(
     ).all()
     new_subtotal = sum(float(i.subtotal) for i in all_items)
     invoice.subtotal = new_subtotal
-    invoice.total = new_subtotal + invoice.discount_total + invoice.tax_total
+    invoice.total = new_subtotal + float(invoice.discount_total) + float(invoice.tax_total)
+    invoice.amount_total = invoice.total  # Keep backwards compatibility
+    invoice.updated_at = datetime.utcnow()
+    session.add(invoice)
+    
+    # Update payment lock since invoice total changed
+    update_order_payment_lock(session, str(invoice.order_id))
+    
+    session.commit()
+    session.refresh(item)
+    
+    return InvoiceItemResponse(
+        id=str(item.id),
+        invoice_id=str(item.invoice_id),
+        study_type_id=str(item.study_type_id) if item.study_type_id else None,
+        description=item.description,
+        quantity=item.quantity,
+        unit_price=float(item.unit_price),
+        subtotal=float(item.subtotal),
+    )
+
+@router.patch("/invoices/{invoice_id}/items/{item_id}", response_model=InvoiceItemResponse)
+def update_invoice_item(
+    invoice_id: str,
+    item_id: str,
+    item_data: InvoiceItemUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update an invoice item (unit_price, quantity, description)"""
+    # Check user role
+    if user.role not in [UserRole.ADMIN, UserRole.BILLING]:
+        raise HTTPException(403, "Only administrators or billing staff can edit invoice items")
+    
+    # Get invoice and verify tenant
+    invoice = session.get(Invoice, invoice_id)
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    
+    if str(invoice.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Invoice does not belong to your tenant")
+    
+    # Get item and verify it belongs to the invoice
+    item = session.get(InvoiceItem, item_id)
+    if not item:
+        raise HTTPException(404, "Invoice item not found")
+    
+    if str(item.invoice_id) != invoice_id:
+        raise HTTPException(400, "Item does not belong to this invoice")
+    
+    # Update fields if provided
+    if item_data.description is not None:
+        item.description = item_data.description
+    if item_data.quantity is not None:
+        item.quantity = item_data.quantity
+    if item_data.unit_price is not None:
+        item.unit_price = item_data.unit_price
+    
+    # Recalculate item subtotal
+    item.subtotal = item.quantity * item.unit_price
+    session.add(item)
+    session.flush()
+    
+    # Recalculate invoice totals
+    all_items = session.exec(
+        select(InvoiceItem).where(InvoiceItem.invoice_id == invoice_id)
+    ).all()
+    new_subtotal = sum(float(i.subtotal) for i in all_items)
+    invoice.subtotal = new_subtotal
+    invoice.total = new_subtotal + float(invoice.discount_total) + float(invoice.tax_total)
     invoice.amount_total = invoice.total  # Keep backwards compatibility
     invoice.updated_at = datetime.utcnow()
     session.add(invoice)
@@ -529,8 +599,11 @@ def create_payment(
     # Update invoice status based on new balance (also updates amount_paid and paid_at)
     update_invoice_status(session, str(invoice.id))
     
-    # Update order payment lock
+    # Update order payment lock (billed_lock = False when balance is 0)
     update_order_payment_lock(session, str(invoice.order_id))
+    # Recompute order status so it can move from CLOSED to RELEASED when payment is cleared
+    from app.api.v1.laboratory import update_order_status
+    update_order_status(str(invoice.order_id), session)
     
     # Create payment event
     from app.models.events import OrderEvent

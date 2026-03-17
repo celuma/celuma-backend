@@ -156,7 +156,9 @@ def create_user(
         tenant_id=ctx.tenant_id,
         email=user_data.email,
         username=user_data.username,
-        full_name=user_data.full_name,
+        full_name=user_data.full_name or "",
+        first_name=user_data.first_name,
+        last_name=user_data.last_name,
         role=UserRole(user_data.role),
         hashed_password=hash_password(user_data.password),
     )

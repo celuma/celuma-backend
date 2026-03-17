@@ -81,6 +81,12 @@ class InvoiceItemCreate(BaseModel):
     quantity: int = 1
     unit_price: float
 
+class InvoiceItemUpdate(BaseModel):
+    """Schema for updating an invoice item"""
+    description: Optional[str] = None
+    quantity: Optional[int] = None
+    unit_price: Optional[float] = None
+
 class InvoiceItemResponse(BaseModel):
     """Schema for invoice item response"""
     id: str

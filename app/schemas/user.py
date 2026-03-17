@@ -1,4 +1,4 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from typing import Optional, List
 from datetime import datetime
 import re
@@ -7,11 +7,19 @@ class UserCreateByAdmin(BaseModel):
     """Schema for admin creating a user"""
     email: str
     username: Optional[str] = None
-    full_name: str
+    first_name: str
+    last_name: str
+    # full_name is derived from first_name + last_name; kept for internal use after validation
+    full_name: Optional[str] = None
     role: str
     password: str
     branch_ids: Optional[List[str]] = []
-    
+
+    @model_validator(mode="after")
+    def build_full_name(self) -> "UserCreateByAdmin":
+        self.full_name = f"{self.first_name} {self.last_name}".strip()
+        return self
+
     @field_validator('username')
     @classmethod
     def validate_username(cls, v: Optional[str]) -> Optional[str]:

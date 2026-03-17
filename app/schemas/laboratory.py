@@ -44,11 +44,11 @@ class OrderCreate(BaseModel):
     tenant_id: str
     branch_id: str
     patient_id: str
-    order_code: str
+    study_type_id: str  # Obligatorio
+    order_code: Optional[str] = None  # Opcional, se genera automáticamente
     requested_by: Optional[str] = None
     notes: Optional[str] = None
     created_by: Optional[str] = None
-    study_type_id: Optional[str] = None
 
 # Alias for backwards compatibility
 LabOrderCreate = OrderCreate
@@ -282,11 +282,11 @@ class OrderUnifiedCreate(BaseModel):
     tenant_id: str
     branch_id: str
     patient_id: str
-    order_code: str
+    study_type_id: str  # Obligatorio
+    order_code: Optional[str] = None  # Opcional, se genera automáticamente
     requested_by: Optional[str] = None
     notes: Optional[str] = None
     created_by: Optional[str] = None
-    study_type_id: Optional[str] = None
     samples: List[UnifiedSampleCreate]
 
 

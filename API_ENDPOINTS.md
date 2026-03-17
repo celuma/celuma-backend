@@ -895,7 +895,7 @@ Headers: `Authorization: Bearer <token>`
   "tenant_id": "tenant-uuid-here",
   "branch_id": "branch-uuid-here",
   "patient_id": "patient-uuid-here",
-  "order_code": "ORD001",
+  "study_type_id": "study-type-uuid-here",
   "requested_by": "Dr. Smith",
   "notes": "Complete blood count requested",
   "created_by": "user-uuid-here"
@@ -903,13 +903,21 @@ Headers: `Authorization: Bearer <token>`
 ```
 
 **Notes:**
-- `created_by` is optional and must be a UUID (user id) if provided.
+- `study_type_id` is **required** (determines the price and invoice generation)
+- `order_code` is **optional** and auto-generated if not provided
+  - Format: `{StudyType.code}-{N}` (e.g., IHQ-1, IHQ-2, BIOPSIA-1)
+  - Sequence is per tenant and per study_type_id
+  - If provided, it must be unique per tenant
+- `created_by` is optional and must be a UUID (user id) if provided
+- Automatically creates an invoice with the price from the active price catalog entry
+- Invoice status starts as PENDING
+- Use `POST /orders/unified` if you want to create an order with samples in one request
 
 **Response:**
 ```json
 {
   "id": "order-uuid",
-  "order_code": "ORD001",
+  "order_code": "IHQ-1",
   "status": "RECEIVED",
   "patient_id": "patient-uuid-here",
   "tenant_id": "tenant-uuid-here",
@@ -1136,7 +1144,7 @@ Returns `orders` array with enriched `branch` and `patient` objects and summary 
   "tenant_id": "tenant-uuid-here",
   "branch_id": "branch-uuid-here",
   "patient_id": "patient-uuid-here",
-  "order_code": "ORD001",
+  "study_type_id": "study-type-uuid-here",
   "requested_by": "Dr. Smith",
   "notes": "Complete blood count requested",
   "created_by": "user-uuid-here",
@@ -1156,12 +1164,22 @@ Returns `orders` array with enriched `branch` and `patient` objects and summary 
 }
 ```
 
+**Notes:**
+- `study_type_id` is **required** (determines the price and invoice generation)
+- `order_code` is **optional** and auto-generated if not provided
+  - Format: `{StudyType.code}-{N}` (e.g., IHQ-1, IHQ-2, BIOPSIA-1)
+  - Sequence is per tenant and per study_type_id
+  - If provided, it must be unique per tenant
+- At least one sample is required in the `samples` array
+- Automatically creates an invoice with the price from the active price catalog entry
+- If any validation fails, the entire transaction is rolled back
+
 **Response:**
 ```json
 {
   "order": {
     "id": "order-uuid",
-    "order_code": "ORD001",
+    "order_code": "IHQ-1",
     "status": "RECEIVED",
     "patient_id": "patient-uuid-here",
     "tenant_id": "tenant-uuid-here",
@@ -1191,8 +1209,8 @@ Returns `orders` array with enriched `branch` and `patient` objects and summary 
 ```
 
 **Errors:**
-- 400 if `order_code` already exists for the branch, a `sample_code` is duplicated in the request, or already exists in the order
-- 404 if tenant, branch, or patient not found
+- 400 if study_type not found, `order_code` already exists for the tenant (if provided), a `sample_code` is duplicated in the request, or already exists in the order
+- 404 if tenant, branch, patient, or study_type not found
 
 ---
 
@@ -2256,6 +2274,73 @@ Headers: `Authorization: Bearer <token>`
   "branch_id": "branch-uuid-here"
 }
 ```
+
+**Notes:**
+- Invoices are automatically created when an order is created (if `study_type_id` is provided)
+- The price is taken from the active price catalog entry for the study type
+
+### POST /api/v1/billing/invoices/{invoice_id}/items
+**Add an item to an invoice**
+
+**Request Body:**
+```json
+{
+  "study_type_id": "study-type-uuid",
+  "description": "Additional service",
+  "quantity": 1,
+  "unit_price": 500.00
+}
+```
+
+**Response:**
+```json
+{
+  "id": "item-uuid",
+  "invoice_id": "invoice-uuid",
+  "study_type_id": "study-type-uuid",
+  "description": "Additional service",
+  "quantity": 1,
+  "unit_price": 500.0,
+  "subtotal": 500.0
+}
+```
+
+**Notes:**
+- Requires ADMIN or BILLING role
+- Automatically recalculates invoice totals
+- Updates order payment lock status
+
+### PATCH /api/v1/billing/invoices/{invoice_id}/items/{item_id}
+**Update an invoice item (price corrections)**
+
+**Request Body:**
+```json
+{
+  "description": "Updated description",
+  "quantity": 2,
+  "unit_price": 600.00
+}
+```
+
+**Response:**
+```json
+{
+  "id": "item-uuid",
+  "invoice_id": "invoice-uuid",
+  "study_type_id": "study-type-uuid",
+  "description": "Updated description",
+  "quantity": 2,
+  "unit_price": 600.0,
+  "subtotal": 1200.0
+}
+```
+
+**Notes:**
+- Requires ADMIN or BILLING role
+- All fields are optional; only provided fields will be updated
+- Automatically recalculates item subtotal and invoice totals
+- Updates order payment lock status
+- Use this endpoint for price corrections or quantity adjustments
 
 ### GET /api/v1/billing/invoices/
 **List all invoices**
