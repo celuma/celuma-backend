@@ -35,6 +35,7 @@ from app.schemas.report import (
     ReportTemplateDetailResponse,
     ReportTemplatesListResponse,
 )
+from app.schemas.laboratory import ReportFullDetailResponse
 import json
 from datetime import datetime
 import logging
@@ -43,12 +44,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reports")
 
-# Import update_order_status to sync order status with report status
-# We do this here to avoid circular imports
+# Deferred imports to avoid circular module-load (laboratory <-> reports)
 def update_order_status_for_report(order_id: str, session: Session) -> None:
     """Wrapper to update order status after report changes"""
     from app.api.v1.laboratory import update_order_status
     update_order_status(order_id, session)
+
+
+def _build_order_full_detail(order_id: str, session: Session, ctx: AuthContext):
+    """Deferred wrapper around laboratory.build_order_full_detail."""
+    from app.api.v1.laboratory import build_order_full_detail
+    return build_order_full_detail(order_id, session, ctx)
 
 
 @router.get("/", response_model=ReportsListResponse)
@@ -120,7 +126,6 @@ def list_reports(
                     ) if patient else None
                 ),
                 title=r.title,
-                diagnosis_text=r.diagnosis_text,
                 published_at=r.published_at,
                 created_at=str(getattr(r, "created_at", "")) if getattr(r, "created_at", None) else None,
                 created_by=str(r.created_by) if r.created_by else None,
@@ -179,7 +184,7 @@ def create_report(
         branch_id=report_data.branch_id,
         order_id=report_data.order_id,
         title=report_data.title,
-        diagnosis_text=report_data.diagnosis_text,
+        template=report_data.template,
         created_by=report_data.created_by,
         published_at=report_data.published_at
     )
@@ -453,7 +458,6 @@ def get_pathologist_worklist(
                     ) if patient else None
                 ),
                 title=r.title,
-                diagnosis_text=r.diagnosis_text,
                 published_at=r.published_at,
                 created_at=str(getattr(r, "created_at", "")) if getattr(r, "created_at", None) else None,
                 created_by=str(r.created_by) if r.created_by else None,
@@ -664,6 +668,40 @@ def delete_template(
         return {"message": "Template deactivated", "id": str(template.id)}
 
 
+def _build_report_detail_response(
+    report: Report,
+    version: ReportVersion | None,
+    session: Session,
+) -> ReportDetailResponse:
+    """Build a ReportDetailResponse, downloading the JSON payload from S3 when available."""
+    report_json = None
+    if version and version.json_storage_id:
+        storage = session.get(StorageObject, version.json_storage_id)
+        if storage:
+            s3 = S3Service()
+            try:
+                text = s3.download_text(storage.object_key)
+                report_json = json.loads(text)
+            except Exception:
+                report_json = None
+
+    return ReportDetailResponse(
+        id=str(report.id),
+        version_no=(version.version_no if version else None),
+        status=report.status,
+        order_id=str(report.order_id),
+        tenant_id=str(report.tenant_id),
+        branch_id=str(report.branch_id),
+        title=report.title,
+        template=report.template,
+        published_at=report.published_at,
+        created_by=(str(report.created_by) if report.created_by else None),
+        signed_by=(str(version.signed_by) if version and version.signed_by else None),
+        signed_at=(version.signed_at if version else None),
+        report=report_json,
+    )
+
+
 @router.get("/{report_id}", response_model=ReportDetailResponse)
 def get_report(
     report_id: str,
@@ -676,37 +714,44 @@ def get_report(
         raise HTTPException(404, "Report not found")
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Report not found")
-    
-    # Load current version JSON, if any
+
     current_version = session.exec(
         select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
     ).first()
 
-    report_json = None
-    if current_version and current_version.json_storage_id:
-        storage = session.get(StorageObject, current_version.json_storage_id)
-        if storage:
-            s3 = S3Service()
-            try:
-                text = s3.download_text(storage.object_key)
-                report_json = json.loads(text)
-            except Exception:
-                report_json = None
+    return _build_report_detail_response(report, current_version, session)
 
-    return ReportDetailResponse(
-        id=str(report.id),
-        version_no=(current_version.version_no if current_version else None),
-        status=report.status,
-        order_id=str(report.order_id),
-        tenant_id=str(report.tenant_id),
-        branch_id=str(report.branch_id),
-        title=report.title,
-        diagnosis_text=report.diagnosis_text,
-        published_at=report.published_at,
-        created_by=(str(report.created_by) if report.created_by else None),
-        signed_by=(str(current_version.signed_by) if current_version and current_version.signed_by else None),
-        signed_at=(current_version.signed_at if current_version else None),
-        report=report_json,
+
+@router.get("/{report_id}/full", response_model=ReportFullDetailResponse)
+def get_report_full(
+    report_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
+    """Return all data needed to render the report editor:
+    order (with assignees, reviewers, labels), patient, samples, and full report detail
+    including the template snapshot and the current version JSON from S3.
+    """
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Report not found")
+
+    # Aggregate order / patient / samples using the shared builder
+    base = _build_order_full_detail(str(report.order_id), session, ctx)
+
+    # Build full report detail with S3 JSON
+    current_version = session.exec(
+        select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
+    ).first()
+    report_detail = _build_report_detail_response(report, current_version, session)
+
+    return ReportFullDetailResponse(
+        order=base.order,
+        patient=base.patient,
+        samples=base.samples,
+        report=report_detail,
     )
 
 @router.get("/{report_id}/versions")
@@ -796,32 +841,7 @@ def get_report_version(
     if not version:
         raise HTTPException(404, "Report version not found")
 
-    report_json = None
-    if version.json_storage_id:
-        storage = session.get(StorageObject, version.json_storage_id)
-        if storage:
-            s3 = S3Service()
-            try:
-                text = s3.download_text(storage.object_key)
-                report_json = json.loads(text)
-            except Exception:
-                report_json = None
-
-    return ReportDetailResponse(
-        id=str(report.id),
-        version_no=version.version_no,
-        status=report.status,
-        order_id=str(report.order_id),
-        tenant_id=str(report.tenant_id),
-        branch_id=str(report.branch_id),
-        title=report.title,
-        diagnosis_text=report.diagnosis_text,
-        published_at=report.published_at,
-        created_by=(str(report.created_by) if report.created_by else None),
-        signed_by=(str(version.signed_by) if version.signed_by else None),
-        signed_at=version.signed_at,
-        report=report_json,
-    )
+    return _build_report_detail_response(report, version, session)
 
 
 @router.post("/{report_id}/versions/{version_no}/pdf")
