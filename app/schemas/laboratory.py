@@ -1,7 +1,7 @@
 from pydantic import BaseModel, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-from app.schemas.report import ReportMetaResponse
+from app.schemas.report import ReportMetaResponse, ReportDetailResponse
 from app.schemas.patient import PatientFullResponse
 
 
@@ -302,6 +302,14 @@ class OrderFullDetailResponse(BaseModel):
     patient: PatientFullResponse
     samples: List[SampleResponse]
     report: Optional[ReportMetaResponse] = None
+
+
+class ReportFullDetailResponse(BaseModel):
+    """Full detail for a report: order, patient, samples, and complete report data."""
+    order: LabOrderDetailResponse
+    patient: PatientFullResponse
+    samples: List[SampleResponse]
+    report: ReportDetailResponse
 
 
 class PatientCaseSummary(BaseModel):

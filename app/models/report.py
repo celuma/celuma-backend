@@ -16,7 +16,7 @@ class Report(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     order_id: UUID = Field(foreign_key="order.id")
     status: ReportStatus = Field(default=ReportStatus.DRAFT)
     title: Optional[str] = Field(max_length=500, default=None)
-    diagnosis_text: Optional[str] = Field(default=None)  # Quick extract; PDF is canonical
+    template: Optional[Dict[str, Any]] = Field(sa_type=JSON, default=None)
     published_at: Optional[datetime] = Field(default=None)
     created_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
     

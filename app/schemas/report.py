@@ -18,7 +18,7 @@ class ReportCreate(BaseModel):
     branch_id: str
     order_id: str
     title: Optional[str] = None
-    diagnosis_text: Optional[str] = None
+    template: Optional[Dict[str, Any]] = None  # Snapshot of the template JSON used for this report
     created_by: Optional[str] = None
     published_at: Optional[datetime] = None
     report: Optional[Dict[str, Any]] = None  # JSON body to be uploaded to S3
@@ -40,12 +40,12 @@ class ReportDetailResponse(BaseModel):
     tenant_id: str
     branch_id: str
     title: Optional[str] = None
-    diagnosis_text: Optional[str] = None
     published_at: Optional[datetime] = None
     created_by: Optional[str] = None
     signed_by: Optional[str] = None
     signed_at: Optional[datetime] = None
     report: Optional[Dict[str, Any]] = None  # reconstructed JSON from S3
+    template: Optional[Dict[str, Any]] = None  # Snapshot of the template used at creation time
 
 class ReportVersionCreate(BaseModel):
     """Schema for creating a report version"""
@@ -103,7 +103,6 @@ class ReportListItem(BaseModel):
     branch: BranchRef
     order: OrderRef
     title: Optional[str] = None
-    diagnosis_text: Optional[str] = None
     published_at: Optional[datetime] = None
     created_at: Optional[str] = None
     created_by: Optional[str] = None
