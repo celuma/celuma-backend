@@ -1664,13 +1664,16 @@ def delete_sample_image(
     return {"message": "Image deleted successfully", "image_id": image_id}
 
 
-@router.get("/orders/{order_id}/full", response_model=OrderFullDetailResponse)
-def get_order_full_detail(
+def build_order_full_detail(
     order_id: str,
-    session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx),
-):
-    """Return complete information for an order: order details, patient details, and samples."""
+    session: Session,
+    ctx: AuthContext,
+) -> OrderFullDetailResponse:
+    """Build a complete OrderFullDetailResponse for the given order.
+
+    Extracted as a standalone function so that the reports router can reuse
+    the same aggregation logic without duplicating it or creating circular imports.
+    """
     order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
@@ -1686,17 +1689,16 @@ def get_order_full_detail(
 
     # Get assignees from Assignment table
     assignee_users = _get_order_assignees(session, order.id, ctx.tenant_id)
-    
+
     # Get reviewers with status from Assignment + ReportReview tables
     reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
-    
+
     # Get labels
     label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
     labels = []
     if label_ids:
         labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
 
-    # Build response objects
     order_resp = OrderDetailResponse(
         id=str(order.id),
         order_code=order.order_code,
@@ -1734,18 +1736,13 @@ def get_order_full_detail(
     # Build sample responses with assignees and labels
     sample_resps = []
     for s in samples:
-        # Get sample assignees
         sample_assignee_users = _get_sample_assignees(session, s.id, ctx.tenant_id)
-        
-        # Get sample labels (own + inherited from order)
+
         sample_label_ids = set(
             session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == s.id)).all()
         )
-        
-        # Combine all label IDs
         all_sample_label_ids = order_label_ids | sample_label_ids
-        
-        # Get label objects with inheritance flag
+
         sample_labels_with_inheritance = []
         if all_sample_label_ids:
             all_sample_labels = session.exec(select(Label).where(Label.id.in_(all_sample_label_ids))).all()
@@ -1758,7 +1755,7 @@ def get_order_full_detail(
                         inherited=(label.id in order_label_ids),
                     )
                 )
-        
+
         sample_resps.append(
             SampleResponse(
                 id=str(s.id),
@@ -1793,6 +1790,16 @@ def get_order_full_detail(
         )
 
     return OrderFullDetailResponse(order=order_resp, patient=patient_resp, samples=sample_resps, report=report_meta)
+
+
+@router.get("/orders/{order_id}/full", response_model=OrderFullDetailResponse)
+def get_order_full_detail(
+    order_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+):
+    """Return complete information for an order: order details, patient details, and samples."""
+    return build_order_full_detail(order_id, session, ctx)
 
 
 @router.get("/patients/{patient_id}/orders", response_model=OrdersListResponse)
