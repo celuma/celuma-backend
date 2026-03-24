@@ -10,6 +10,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
+ARG CELUMA_VERSION=dev
+ENV CELUMA_VERSION=$CELUMA_VERSION
+
 # Make start script executable
 RUN chmod +x start.sh
 

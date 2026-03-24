@@ -53,6 +53,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          build-args: |
+            CELUMA_VERSION=${{ github.sha }}
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
@@ -136,6 +138,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          build-args: |
+            CELUMA_VERSION=${{ github.ref_name }}
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
