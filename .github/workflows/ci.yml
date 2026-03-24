@@ -141,6 +141,7 @@ jobs:
           build-args: |
             CELUMA_VERSION=${{ github.ref_name }}
           push: true
+          no-cache: true
           platforms: linux/amd64,linux/arm64
           tags: |
             ghcr.io/${{ github.repository }}:${{ github.ref_name }}
@@ -155,8 +156,6 @@ jobs:
             org.opencontainers.image.ref=${{ github.ref }}
             org.opencontainers.image.title=Release-${{ github.ref_name }}
             org.opencontainers.image.version=${{ steps.release_version.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Output release image reference
         run: |
