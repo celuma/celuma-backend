@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 import logging
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -255,11 +256,22 @@ app.include_router(dashboard_router, prefix="/api/v1", dependencies=[Depends(cur
 app.include_router(worklist_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(portal_router, prefix="/api/v1")  # Portal has mixed auth requirements
 
+CELUMA_VERSION: str = os.environ.get("CELUMA_VERSION", "dev")
+
+
+def _health_payload() -> dict:
+    return {
+        "status": "healthy",
+        "api_version": "v1",
+        "celuma_version": CELUMA_VERSION,
+    }
+
+
 @app.get("/")
 def root():
     return {
         "message": "Welcome to Celuma API",
-        "version": "1.0.0",
+        "celuma_version": CELUMA_VERSION,
         "features": [
             "Multi-tenant support",
             "Laboratory management",
@@ -267,16 +279,18 @@ def root():
             "Sample tracking",
             "Report generation",
             "Billing system",
-            "Audit logging"
-        ]
+            "Audit logging",
+        ],
     }
+
 
 @app.get("/health")
 def health_check():
     """Health check endpoint for load balancers and monitoring"""
-    return {"status": "healthy", "version": "1.0.0"}
+    return _health_payload()
+
 
 @app.get("/api/v1/health")
 def api_health_check():
-    """API-specific health check"""
-    return {"status": "healthy", "api_version": "v1"}
+    """API health check — canonical endpoint consumed by the SPA"""
+    return _health_payload()
