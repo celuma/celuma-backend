@@ -1,14 +1,17 @@
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field, Relationship
 from .base import BaseModel, TimestampMixin, TenantMixin
-from .enums import UserRole
+
+if TYPE_CHECKING:
+    from .user_role import UserRoleLink
+
 
 class AppUser(BaseModel, TimestampMixin, TenantMixin, table=True):
-    """Application user model with multi-tenant support"""
+    """Application user model with multi-tenant support."""
     __tablename__ = "app_user"
-    
+
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     tenant_id: UUID = Field(foreign_key="tenant.id")
     username: Optional[str] = Field(max_length=50, index=True, nullable=True)
@@ -16,30 +19,31 @@ class AppUser(BaseModel, TimestampMixin, TenantMixin, table=True):
     full_name: str = Field(max_length=255)
     first_name: str = Field(max_length=255)
     last_name: str = Field(max_length=255)
-    role: UserRole
     hashed_password: str = Field(max_length=255)
     is_active: bool = Field(default=True)
     avatar_url: Optional[str] = Field(max_length=500, default=None)
-    
-    # Basic relationships only
+
+    # Basic relationships
     tenant: "Tenant" = Relationship(back_populates="users")
     branches: List["UserBranch"] = Relationship(back_populates="user")
+    user_roles: List["UserRoleLink"] = Relationship(back_populates="user")
+
 
 class UserBranch(BaseModel, table=True):
-    """User-branch association table for multi-branch access"""
+    """User-branch association table for multi-branch access."""
     __tablename__ = "user_branch"
-    
+
     user_id: UUID = Field(foreign_key="app_user.id", primary_key=True)
     branch_id: UUID = Field(foreign_key="branch.id", primary_key=True)
-    
-    # Relationships
+
     user: AppUser = Relationship(back_populates="branches")
     branch: "Branch" = Relationship(back_populates="users")
 
+
 class BlacklistedToken(BaseModel, table=True):
-    """Model for storing blacklisted JWT tokens"""
+    """Model for storing blacklisted JWT tokens."""
     __tablename__ = "blacklisted_token"
-    
+
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     token: str = Field(max_length=1000, index=True, unique=True)
     user_id: UUID = Field(foreign_key="app_user.id")
@@ -47,6 +51,5 @@ class BlacklistedToken(BaseModel, table=True):
     blacklisted_at: datetime = Field(default_factory=datetime.utcnow)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    
-    # Relationships
+
     user: AppUser = Relationship()

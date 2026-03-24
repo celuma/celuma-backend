@@ -1,8 +1,12 @@
 # Import all models to ensure they are registered with SQLModel
 from .base import BaseModel, TimestampMixin, TenantMixin, BranchMixin
-from .enums import UserRole, OrderStatus, SampleType, SampleState, ReportStatus, PaymentStatus, EventType, ReviewStatus, AssignmentItemType
+from .enums import OrderStatus, SampleType, SampleState, ReportStatus, PaymentStatus, EventType, ReviewStatus, AssignmentItemType
 from .tenant import Tenant, Branch
 from .user import AppUser, UserBranch
+from .permission import Permission
+from .role import Role
+from .role_permission import RolePermission
+from .user_role import UserRoleLink
 from .patient import Patient
 from .storage import StorageObject, SampleImageRendition
 from .laboratory import Order, Sample, SampleImage, OrderComment, Label, OrderLabel, SampleLabel, LabOrderLabel
@@ -17,14 +21,12 @@ from .invitation import UserInvitation, PasswordResetToken
 from .assignment import Assignment
 from .report_review import ReportReview
 
-# Export all models for easy access
 __all__ = [
     "BaseModel",
-    "TimestampMixin", 
+    "TimestampMixin",
     "TenantMixin",
     "BranchMixin",
-    "UserRole",
-    "OrderStatus", 
+    "OrderStatus",
     "SampleType",
     "SampleState",
     "ReportStatus",
@@ -35,7 +37,11 @@ __all__ = [
     "Tenant",
     "Branch",
     "AppUser",
-    "UserBranch", 
+    "UserBranch",
+    "Permission",
+    "Role",
+    "RolePermission",
+    "UserRoleLink",
     "Patient",
     "StorageObject",
     "SampleImageRendition",
@@ -61,5 +67,5 @@ __all__ = [
     "UserInvitation",
     "PasswordResetToken",
     "Assignment",
-    "ReportReview"
+    "ReportReview",
 ]

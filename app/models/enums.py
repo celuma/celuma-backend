@@ -1,13 +1,5 @@
 from enum import Enum
 
-class UserRole(str, Enum):
-    ADMIN = "admin"
-    PATHOLOGIST = "pathologist"
-    LAB_TECH = "lab_tech"
-    ASSISTANT = "assistant"
-    BILLING = "billing"
-    VIEWER = "viewer"
-
 class OrderStatus(str, Enum):
     RECEIVED = "RECEIVED"
     PROCESSING = "PROCESSING"
