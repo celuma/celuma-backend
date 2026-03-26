@@ -24,6 +24,7 @@ from app.api.v1.billing import router as billing_router
 from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.portal import router as portal_router
 from app.api.v1.worklist import router as worklist_router
+from app.api.v1.rbac import router as rbac_router
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -255,6 +256,7 @@ app.include_router(billing_router, prefix="/api/v1", dependencies=[Depends(curre
 app.include_router(dashboard_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(worklist_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(portal_router, prefix="/api/v1")  # Portal has mixed auth requirements
+app.include_router(rbac_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 
 CELUMA_VERSION: str = os.environ.get("CELUMA_VERSION", "dev")
 
