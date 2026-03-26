@@ -1,12 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlmodel import select, Session
 from app.core.db import get_session
-from app.api.v1.auth import get_auth_ctx, AuthContext
+from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
+from app.core.rbac import has_permission, get_user_roles
 from app.models.tenant import Tenant
 from app.models.user import AppUser
-from app.models.storage import StorageObject
-from app.models.enums import UserRole
-from app.api.v1.auth import current_user
 from app.schemas.tenant import TenantCreate, TenantResponse, TenantDetailResponse
 from app.services.s3 import S3Service
 from pydantic import BaseModel
@@ -90,7 +88,8 @@ def list_tenant_users(
     if str(tenant.id) != ctx.tenant_id:
         raise HTTPException(404, "Tenant not found")
     
-    users = [{"id": str(u.id), "email": u.email, "full_name": u.full_name, "role": u.role} for u in tenant.users]
+    from app.core.rbac import get_user_roles as _roles
+    users = [{"id": str(u.id), "email": u.email, "full_name": u.full_name, "roles": _roles(u.id, session)} for u in tenant.users]
     return users
 
 
@@ -102,10 +101,9 @@ def update_tenant(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update tenant details (Admin only)"""
-    # Check user role
-    if user.role != UserRole.ADMIN:
-        raise HTTPException(403, "Only administrators can update tenant")
+    """Update tenant details (requires admin:manage_tenant)."""
+    if not has_permission(user.id, "admin:manage_tenant", session):
+        raise HTTPException(403, "Permission required: admin:manage_tenant")
     
     tenant = session.get(Tenant, tenant_id)
     if not tenant:
@@ -151,10 +149,9 @@ def upload_tenant_logo(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Upload tenant logo (Admin only)"""
-    # Check user role
-    if user.role != UserRole.ADMIN:
-        raise HTTPException(403, "Only administrators can upload logo")
+    """Upload tenant logo (requires admin:manage_tenant)."""
+    if not has_permission(user.id, "admin:manage_tenant", session):
+        raise HTTPException(403, "Permission required: admin:manage_tenant")
     
     tenant = session.get(Tenant, tenant_id)
     if not tenant:
@@ -203,10 +200,9 @@ def toggle_tenant_active(
     session: Session = Depends(get_session),
     user: AppUser = Depends(current_user),
 ):
-    """Toggle tenant active status (Super Admin only - normally restricted)"""
-    # For now, only allow if user is admin of the tenant
-    if user.role != UserRole.ADMIN:
-        raise HTTPException(403, "Only administrators can toggle tenant status")
+    """Toggle tenant active status (requires admin:manage_tenant)."""
+    if not has_permission(user.id, "admin:manage_tenant", session):
+        raise HTTPException(403, "Permission required: admin:manage_tenant")
     
     tenant = session.get(Tenant, tenant_id)
     if not tenant:

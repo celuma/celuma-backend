@@ -79,7 +79,9 @@ def get_branch(
         tenant_id=str(branch.tenant_id)
     )
 
-from app.models.enums import UserRole
+from app.core.rbac import get_user_roles, FULL_BRANCH_ACCESS_ROLES, has_any_role
+from app.models.user_role import UserRoleLink
+from app.models.role import Role
 
 @router.get("/{branch_id}/users")
 def list_branch_users(
@@ -87,38 +89,46 @@ def list_branch_users(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
 ):
-    """List all users for a branch (including global admins)"""
+    """List all users for a branch (including users with full-branch-access roles)."""
     branch = session.get(Branch, branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
     if str(branch.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Branch not found")
-    
-    # 1. Get explicitly assigned users
+
     users_dict = {}
+
+    # 1. Explicitly assigned users
     for ub in branch.users:
-        users_dict[ub.user.id] = {
-            "id": str(ub.user.id), 
-            "email": ub.user.email, 
-            "full_name": ub.user.full_name, 
-            "role": ub.user.role
+        u = ub.user
+        users_dict[u.id] = {
+            "id": str(u.id),
+            "email": u.email,
+            "full_name": u.full_name,
+            "roles": get_user_roles(u.id, session),
         }
-        
-    # 2. Add all tenant admins (implicit access)
-    admins = session.exec(
-        select(AppUser).where(
-            AppUser.tenant_id == ctx.tenant_id,
-            AppUser.role == UserRole.ADMIN
-        )
+
+    # 2. Users with full-branch-access roles (admin / superuser) — implicit access
+    full_access_roles = session.exec(
+        select(Role).where(Role.code.in_(FULL_BRANCH_ACCESS_ROLES))
     ).all()
-    
-    for admin in admins:
-        if admin.id not in users_dict:
-            users_dict[admin.id] = {
-                "id": str(admin.id), 
-                "email": admin.email, 
-                "full_name": admin.full_name, 
-                "role": admin.role
-            }
-            
+    full_access_role_ids = {r.id for r in full_access_roles}
+
+    if full_access_role_ids:
+        admin_links = session.exec(
+            select(UserRoleLink).where(UserRoleLink.role_id.in_(full_access_role_ids))
+        ).all()
+        user_ids = {link.user_id for link in admin_links}
+        for uid in user_ids:
+            if uid in users_dict:
+                continue
+            u = session.get(AppUser, uid)
+            if u and str(u.tenant_id) == ctx.tenant_id:
+                users_dict[uid] = {
+                    "id": str(u.id),
+                    "email": u.email,
+                    "full_name": u.full_name,
+                    "roles": get_user_roles(u.id, session),
+                }
+
     return list(users_dict.values())

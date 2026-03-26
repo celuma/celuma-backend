@@ -8,7 +8,8 @@ from app.models.billing import Invoice, Payment, InvoiceItem
 from app.models.laboratory import Order
 from app.models.tenant import Tenant, Branch
 from app.models.user import AppUser
-from app.models.enums import PaymentStatus, UserRole
+from app.models.enums import PaymentStatus
+from app.core.rbac import has_permission
 from app.schemas.billing import (
     InvoiceCreate, InvoiceResponse, InvoiceDetailResponse, 
     PaymentCreate, PaymentResponse,
@@ -418,10 +419,9 @@ def add_invoice_item(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Add an item to an invoice"""
-    # Check user role
-    if user.role not in [UserRole.ADMIN, UserRole.BILLING]:
-        raise HTTPException(403, "Only administrators or billing staff can add invoice items")
+    """Add an item to an invoice (requires billing:edit_items)."""
+    if not has_permission(user.id, "billing:edit_items", session):
+        raise HTTPException(403, "Permission required: billing:edit_items")
     
     invoice = session.get(Invoice, invoice_id)
     if not invoice:
@@ -482,10 +482,9 @@ def update_invoice_item(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update an invoice item (unit_price, quantity, description)"""
-    # Check user role
-    if user.role not in [UserRole.ADMIN, UserRole.BILLING]:
-        raise HTTPException(403, "Only administrators or billing staff can edit invoice items")
+    """Update an invoice item (requires billing:edit_items)."""
+    if not has_permission(user.id, "billing:edit_items", session):
+        raise HTTPException(403, "Permission required: billing:edit_items")
     
     # Get invoice and verify tenant
     invoice = session.get(Invoice, invoice_id)

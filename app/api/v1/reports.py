@@ -10,7 +10,8 @@ from app.models.patient import Patient
 from app.models.storage import StorageObject
 from app.models.user import AppUser
 from app.models.audit import AuditLog
-from app.models.enums import ReportStatus, UserRole, AssignmentItemType, ReviewStatus
+from app.models.enums import ReportStatus, AssignmentItemType, ReviewStatus
+from app.core.rbac import has_permission
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
 from app.services.s3 import S3Service
@@ -1211,8 +1212,8 @@ def approve_report(
         user_review.status = ReviewStatus.APPROVED
         user_review.decision_at = datetime.utcnow()
         session.add(user_review)
-    elif user.role not in [UserRole.PATHOLOGIST, UserRole.ADMIN]:
-        raise HTTPException(403, "Only assigned reviewers, pathologists, or admins can approve reports")
+    elif not has_permission(user.id, "reports:approve", session):
+        raise HTTPException(403, "Permission required: reports:approve")
     
     # Update report status (MVP rule: ≥1 approved = report approved)
     old_status = report.status
@@ -1334,8 +1335,8 @@ def request_changes(
         user_review.status = ReviewStatus.REJECTED
         user_review.decision_at = datetime.utcnow()
         session.add(user_review)
-    elif user.role not in [UserRole.PATHOLOGIST, UserRole.ADMIN]:
-        raise HTTPException(403, "Only assigned reviewers, pathologists, or admins can request changes")
+    elif not has_permission(user.id, "reports:approve", session):
+        raise HTTPException(403, "Permission required: reports:approve")
     
     # Update status back to DRAFT
     old_status = report.status
@@ -1420,10 +1421,9 @@ def sign_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Sign and publish a report (APPROVED → PUBLISHED) - Pathologist or Admin only"""
-    # Check user role
-    if user.role not in [UserRole.PATHOLOGIST, UserRole.ADMIN]:
-        raise HTTPException(403, "Only pathologists or admins can sign reports")
+    """Sign and publish a report (APPROVED → PUBLISHED) — requires reports:sign."""
+    if not has_permission(user.id, "reports:sign", session):
+        raise HTTPException(403, "Permission required: reports:sign")
     
     report = session.get(Report, report_id)
     if not report:
@@ -1529,10 +1529,9 @@ def retract_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Retract a published report (PUBLISHED → RETRACTED) - Pathologist or Admin only"""
-    # Check user role
-    if user.role not in [UserRole.PATHOLOGIST, UserRole.ADMIN]:
-        raise HTTPException(403, "Only pathologists or admins can retract reports")
+    """Retract a published report (PUBLISHED → RETRACTED) — requires reports:retract."""
+    if not has_permission(user.id, "reports:retract", session):
+        raise HTTPException(403, "Permission required: reports:retract")
     
     report = session.get(Report, report_id)
     if not report:
