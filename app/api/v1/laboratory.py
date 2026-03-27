@@ -5,6 +5,7 @@ from sqlmodel import select, Session, and_, func
 from sqlalchemy import cast, String
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
+from app.core.rbac import has_permission
 from app.models.laboratory import Order, Sample, SampleImage, Label, LabOrderLabel, SampleLabel
 from app.models.storage import StorageObject, SampleImageRendition
 from app.models.tenant import Tenant, Branch
@@ -74,6 +75,12 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/laboratory")
+
+
+def _require(user_id, code: str, session: Session) -> None:
+    """Raise 403 if user lacks the specified permission."""
+    if not has_permission(user_id, code, session):
+        raise HTTPException(403, f"Permission required: {code}")
 
 
 def update_order_status(order_id: str, session: Session) -> None:
@@ -166,8 +173,10 @@ def update_order_status(order_id: str, session: Session) -> None:
 def list_orders(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """List all laboratory orders with enriched patient and branch info, plus summary fields."""
+    """List all laboratory orders (requires lab:read)."""
+    _require(user.id, "lab:read", session)
     orders = session.exec(select(Order).where(Order.tenant_id == ctx.tenant_id)).all()
     results: list[OrderListItem] = []
     for o in orders:
@@ -229,8 +238,14 @@ def list_orders(
     return OrdersListResponse(orders=results)
 
 @router.post("/orders/", response_model=OrderResponse)
-def create_order(order_data: OrderCreate, session: Session = Depends(get_session)):
-    """Create a new laboratory order"""
+def create_order(
+    order_data: OrderCreate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Create a new laboratory order (requires lab:create_order)."""
+    _require(user.id, "lab:create_order", session)
     # Verify tenant, branch, and patient exist
     tenant = session.get(Tenant, order_data.tenant_id)
     if not tenant:
@@ -318,8 +333,10 @@ def get_order(
     order_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get order details"""
+    """Get order details (requires lab:read)."""
+    _require(user.id, "lab:read", session)
     order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
@@ -365,7 +382,8 @@ def update_order_notes(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update the notes/description of an order"""
+    """Update the notes/description of an order (requires lab:update_order)."""
+    _require(user.id, "lab:update_order", session)
     order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
@@ -441,8 +459,10 @@ def get_order_comments(
     after: Optional[str] = None,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get paginated comments for an order with cursor pagination"""
+    """Get paginated comments for an order (requires lab:read)."""
+    _require(user.id, "lab:read", session)
     from app.services.cursor_pagination import decode_cursor, encode_cursor
     from app.models.laboratory import OrderComment, OrderCommentMention
     
@@ -577,7 +597,8 @@ def create_order_comment(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Create a new comment on an order"""
+    """Create a new comment on an order (requires lab:manage_comments)."""
+    _require(user.id, "lab:manage_comments", session)
     from app.models.laboratory import OrderComment, OrderCommentMention
     
     # Validate order access
@@ -669,8 +690,10 @@ def search_users_for_mention(
     q: str = "",
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Search users for mention suggestions"""
+    """Search users for mention suggestions (requires lab:read)."""
+    _require(user.id, "lab:read", session)
     # Get all users from the same tenant
     query = select(AppUser).where(AppUser.tenant_id == ctx.tenant_id, AppUser.is_active == True)
     
@@ -703,8 +726,10 @@ def search_users_for_mention(
 def list_samples(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """List all samples with enriched branch and order objects. Keeps tenant_id as id string."""
+    """List all samples (requires lab:read)."""
+    _require(user.id, "lab:read", session)
     samples = session.exec(select(Sample).where(Sample.tenant_id == ctx.tenant_id)).all()
     items: list[SampleListItem] = []
     for s in samples:
@@ -764,8 +789,10 @@ def get_sample_detail(
     sample_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get complete detail for a sample including branch, order, and patient references."""
+    """Get complete detail for a sample (requires lab:read)."""
+    _require(user.id, "lab:read", session)
     s = session.get(Sample, sample_id)
     if not s:
         raise HTTPException(404, "Sample not found")
@@ -843,7 +870,8 @@ def update_sample_state(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update the state of a sample (RECEIVED, PROCESSING, READY, DAMAGED, CANCELLED)"""
+    """Update the state of a sample (requires lab:update_sample)."""
+    _require(user.id, "lab:update_sample", session)
     sample = session.get(Sample, sample_id)
     if not sample:
         raise HTTPException(404, "Sample not found")
@@ -943,7 +971,8 @@ def update_sample_notes(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update the notes/description of a sample"""
+    """Update the notes/description of a sample (requires lab:update_sample)."""
+    _require(user.id, "lab:update_sample", session)
     sample = session.get(Sample, sample_id)
     if not sample:
         raise HTTPException(404, "Sample not found")
@@ -1020,8 +1049,14 @@ def update_sample_notes(
 
 
 @router.post("/samples/", response_model=SampleResponse)
-def create_sample(sample_data: SampleCreate, session: Session = Depends(get_session)):
-    """Create a new sample"""
+def create_sample(
+    sample_data: SampleCreate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Create a new sample (requires lab:create_sample)."""
+    _require(user.id, "lab:create_sample", session)
     # Verify tenant, branch, and order exist
     tenant = session.get(Tenant, sample_data.tenant_id)
     if not tenant:
@@ -1126,14 +1161,22 @@ def create_sample(sample_data: SampleCreate, session: Session = Depends(get_sess
 
 
 @router.post("/orders/unified", response_model=OrderUnifiedResponse)
-def create_order_with_samples(payload: OrderUnifiedCreate, session: Session = Depends(get_session)):
-    """Create a new laboratory order and multiple samples in one operation.
+def create_order_with_samples(
+    payload: OrderUnifiedCreate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Create a new laboratory order and multiple samples in one operation (requires lab:create_order and lab:create_sample).
 
     - Validates tenant, branch, and patient
     - Generates order_code automatically if not provided
     - Ensures `order_code` uniqueness per tenant
     - Creates order and all samples atomically
     """
+    _require(user.id, "lab:create_order", session)
+    _require(user.id, "lab:create_sample", session)
+
     # Validate tenant, branch, and patient
     tenant = session.get(Tenant, payload.tenant_id)
     if not tenant:
@@ -1327,13 +1370,15 @@ def upload_sample_image(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Upload an image (regular or RAW) for a sample, store S3 keys and DB mapping.
+    """Upload an image for a sample (requires lab:upload_images).
 
     Stores:
     - RAW original (if applicable)
     - processed JPEG
     - thumbnail JPEG
     """
+    _require(user.id, "lab:upload_images", session)
+
     sample = session.get(Sample, sample_id)
     if not sample:
         raise HTTPException(404, "Sample not found")
@@ -1536,8 +1581,14 @@ def upload_sample_image(
 
 
 @router.get("/samples/{sample_id}/images", response_model=SampleImagesListResponse)
-def list_sample_images(sample_id: str, session: Session = Depends(get_session)):
-    """List images and their URLs for a sample, similar to file_mapping.json idea."""
+def list_sample_images(
+    sample_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """List images for a sample (requires lab:read)."""
+    _require(user.id, "lab:read", session)
     sample = session.get(Sample, sample_id)
     if not sample:
         raise HTTPException(404, "Sample not found")
@@ -1587,7 +1638,8 @@ def delete_sample_image(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Delete a sample image and its associated storage objects"""
+    """Delete a sample image (requires lab:delete_images)."""
+    _require(user.id, "lab:delete_images", session)
     # Verify sample exists and belongs to tenant
     sample = session.get(Sample, sample_id)
     if not sample:
@@ -1797,8 +1849,10 @@ def get_order_full_detail(
     order_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Return complete information for an order: order details, patient details, and samples."""
+    """Return complete information for an order (requires lab:read)."""
+    _require(user.id, "lab:read", session)
     return build_order_full_detail(order_id, session, ctx)
 
 
@@ -1807,8 +1861,10 @@ def list_patient_orders(
     patient_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """List all orders for a given patient with full enrichment (labels, assignees, etc)."""
+    """List all orders for a given patient (requires lab:read)."""
+    _require(user.id, "lab:read", session)
     patient = session.get(Patient, patient_id)
     if not patient:
         raise HTTPException(404, "Patient not found")
@@ -1890,7 +1946,8 @@ def create_case_event(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Create a new event in the case timeline"""
+    """Create a new event in the case timeline (requires lab:update_order)."""
+    _require(user.id, "lab:update_order", session)
     # Verify order exists and belongs to tenant
     order = session.get(Order, order_id)
     if not order:
@@ -1942,8 +1999,10 @@ def list_case_events(
     order_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get timeline of events for a case (order + all samples + report)"""
+    """Get timeline of events for a case (requires lab:read)."""
+    _require(user.id, "lab:read", session)
     # Verify order exists and belongs to tenant
     order = session.get(Order, order_id)
     if not order:
@@ -1996,8 +2055,10 @@ def list_sample_events(
     sample_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get timeline of events for a specific sample"""
+    """Get timeline of events for a specific sample (requires lab:read)."""
+    _require(user.id, "lab:read", session)
     # Verify sample exists and belongs to tenant
     sample = session.get(Sample, sample_id)
     if not sample:
@@ -2051,8 +2112,10 @@ def list_sample_events(
 def list_labels(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """List all labels for the tenant"""
+    """List all labels for the tenant (requires lab:read)."""
+    _require(user.id, "lab:read", session)
     labels = session.exec(
         select(Label)
         .where(Label.tenant_id == ctx.tenant_id)
@@ -2080,7 +2143,8 @@ def create_label(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Create a new label"""
+    """Create a new label (requires lab:manage_labels)."""
+    _require(user.id, "lab:manage_labels", session)
     # Check if label with same name already exists for this tenant
     existing_label = session.exec(
         select(Label)
@@ -2126,7 +2190,8 @@ def delete_label(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Delete a label (only if not in use)"""
+    """Delete a label (requires lab:manage_labels)."""
+    _require(user.id, "lab:manage_labels", session)
     # Verify label exists and belongs to tenant
     label = session.get(Label, label_id)
     if not label:
@@ -2357,7 +2422,8 @@ def update_order_assignees(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update assignees for an order (uses Assignment table)"""
+    """Update assignees for an order (requires lab:manage_assignees)."""
+    _require(user.id, "lab:manage_assignees", session)
     # Verify order exists and belongs to tenant
     order = session.get(Order, order_id)
     if not order:
@@ -2460,12 +2526,8 @@ def update_order_reviewers(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """
-    Update reviewers for an order.
-    
-    Works directly with report_review table. Reviewers are now completely decoupled from assignments.
-    If a report exists for this order, report_id will be initialized in the review records.
-    """
+    """Update reviewers for an order (requires lab:manage_reviewers)."""
+    _require(user.id, "lab:manage_reviewers", session)
     # Verify order exists and belongs to tenant
     order = session.get(Order, order_id)
     if not order:
@@ -2567,7 +2629,8 @@ def update_order_labels(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update labels for an order"""
+    """Update labels for an order (requires lab:manage_labels)."""
+    _require(user.id, "lab:manage_labels", session)
     # Verify order exists and belongs to tenant
     order = session.get(Order, order_id)
     if not order:
@@ -2681,7 +2744,8 @@ def update_sample_assignees(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update assignees for a sample (uses Assignment table)"""
+    """Update assignees for a sample (requires lab:manage_assignees)."""
+    _require(user.id, "lab:manage_assignees", session)
     # Verify sample exists and belongs to tenant
     sample = session.get(Sample, sample_id)
     if not sample:
@@ -2795,7 +2859,8 @@ def update_sample_labels(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update OWN labels for a sample (not including inherited from order)"""
+    """Update OWN labels for a sample (requires lab:manage_labels)."""
+    _require(user.id, "lab:manage_labels", session)
     # Verify sample exists and belongs to tenant
     sample = session.get(Sample, sample_id)
     if not sample:

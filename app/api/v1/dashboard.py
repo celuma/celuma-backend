@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select, Session, func
 from app.core.db import get_session
-from app.api.v1.auth import get_auth_ctx, AuthContext
+from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
+from app.core.rbac import has_permission
 from app.models.laboratory import Order, Sample
 from app.models.patient import Patient
 from app.models.report import Report
+from app.models.user import AppUser
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -36,8 +38,11 @@ class DashboardResponse(BaseModel):
 def get_dashboard_data(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get dashboard statistics and recent activity for the current tenant"""
+    """Get dashboard statistics and recent activity for the current tenant (requires lab:read)."""
+    if not has_permission(user.id, "lab:read", session):
+        raise HTTPException(403, "Permission required: lab:read")
     
     # Get basic counts
     total_patients = session.exec(

@@ -18,6 +18,7 @@ from datetime import datetime
 
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
+from app.core.rbac import has_permission
 from app.models.user import AppUser
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
@@ -81,11 +82,13 @@ def get_my_worklist(
     page_size: int = Query(20, ge=1, le=100),
 ):
     """
-    Get unified worklist for current user.
-    
+    Get unified worklist for current user (requires lab:read).
+
     Returns both assignments and pending reviews in a unified format,
     sorted by assigned_at descending.
     """
+    if not has_permission(user.id, "lab:read", session):
+        raise HTTPException(403, "Permission required: lab:read")
     items: List[WorklistItemResponse] = []
     
     # 1. Get assignments for current user
@@ -259,12 +262,15 @@ def _build_review_worklist_item(session: Session, review: ReportReview) -> Optio
 def list_assignments(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
     item_type: Optional[str] = Query(None),
     item_id: Optional[str] = Query(None),
     assignee_user_id: Optional[str] = Query(None),
     include_unassigned: bool = Query(False),
 ):
-    """List assignments with filters"""
+    """List assignments with filters (requires lab:read)."""
+    if not has_permission(user.id, "lab:read", session):
+        raise HTTPException(403, "Permission required: lab:read")
     query = select(Assignment).where(Assignment.tenant_id == UUID(ctx.tenant_id))
     
     if item_type:
@@ -308,7 +314,9 @@ def create_assignment(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Create a new assignment"""
+    """Create a new assignment (requires lab:manage_assignees)."""
+    if not has_permission(user.id, "lab:manage_assignees", session):
+        raise HTTPException(403, "Permission required: lab:manage_assignees")
     # Validate assignee belongs to tenant
     assignee = session.get(AppUser, UUID(data.assignee_user_id))
     if not assignee or str(assignee.tenant_id) != ctx.tenant_id:
@@ -383,8 +391,11 @@ def delete_assignment(
     assignment_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Soft delete an assignment (set unassigned_at)"""
+    """Soft delete an assignment (requires lab:manage_assignees)."""
+    if not has_permission(user.id, "lab:manage_assignees", session):
+        raise HTTPException(403, "Permission required: lab:manage_assignees")
     assignment = session.get(Assignment, UUID(assignment_id))
     
     if not assignment:
@@ -409,11 +420,14 @@ def delete_assignment(
 def list_report_reviews(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
     order_id: Optional[str] = Query(None),
     reviewer_user_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
 ):
-    """List report reviews with filters"""
+    """List report reviews with filters (requires lab:read)."""
+    if not has_permission(user.id, "lab:read", session):
+        raise HTTPException(403, "Permission required: lab:read")
     query = select(ReportReview).where(ReportReview.tenant_id == UUID(ctx.tenant_id))
     
     if order_id:
@@ -456,11 +470,13 @@ def make_review_decision(
     user: AppUser = Depends(current_user),
 ):
     """
-    Make a decision on a report review (approve/reject).
-    
+    Make a decision on a report review (requires reports:approve).
+
     Allows changing decisions. Updates report status based on MVP rule: ≥1 approved = report approved.
     Creates timeline events and order comments for the decision.
     """
+    if not has_permission(user.id, "reports:approve", session):
+        raise HTTPException(403, "Permission required: reports:approve")
     review = session.get(ReportReview, UUID(review_id))
     
     if not review:

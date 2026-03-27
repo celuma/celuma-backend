@@ -226,8 +226,11 @@ def update_order_payment_lock(session: Session, order_id: str) -> None:
 def list_invoices(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """List all invoices"""
+    """List all invoices (requires billing:read)."""
+    if not has_permission(user.id, "billing:read", session):
+        raise HTTPException(403, "Permission required: billing:read")
     invoices = session.exec(select(Invoice).where(Invoice.tenant_id == ctx.tenant_id)).all()
     return [{
         "id": str(i.id),
@@ -246,8 +249,17 @@ def list_invoices(
     } for i in invoices]
 
 @router.post("/invoices/", response_model=InvoiceResponse)
-def create_invoice(invoice_data: InvoiceCreate, session: Session = Depends(get_session)):
-    """Create a new invoice"""
+def create_invoice(
+    invoice_data: InvoiceCreate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Create a new invoice (requires billing:create_invoice)."""
+    if not has_permission(user.id, "billing:create_invoice", session):
+        raise HTTPException(403, "Permission required: billing:create_invoice")
+    if str(invoice_data.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Cannot create invoice for a different tenant")
     # Verify tenant, branch, and order exist
     tenant = session.get(Tenant, invoice_data.tenant_id)
     if not tenant:
@@ -312,8 +324,11 @@ def get_invoice(
     invoice_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get invoice details"""
+    """Get invoice details (requires billing:read)."""
+    if not has_permission(user.id, "billing:read", session):
+        raise HTTPException(403, "Permission required: billing:read")
     invoice = session.get(Invoice, invoice_id)
     if not invoice:
         raise HTTPException(404, "Invoice not found")
@@ -344,8 +359,11 @@ def get_invoice_with_items(
     invoice_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get invoice details with items and payments"""
+    """Get invoice details with items and payments (requires billing:read)."""
+    if not has_permission(user.id, "billing:read", session):
+        raise HTTPException(403, "Permission required: billing:read")
     invoice = session.get(Invoice, invoice_id)
     if not invoice:
         raise HTTPException(404, "Invoice not found")
@@ -546,8 +564,11 @@ def update_invoice_item(
 def list_payments(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """List all payments"""
+    """List all payments (requires billing:read)."""
+    if not has_permission(user.id, "billing:read", session):
+        raise HTTPException(403, "Permission required: billing:read")
     payments = session.exec(select(Payment).where(Payment.tenant_id == ctx.tenant_id)).all()
     return [{
         "id": str(p.id),
@@ -563,12 +584,14 @@ def list_payments(
 
 @router.post("/payments/", response_model=PaymentResponse)
 def create_payment(
-    payment_data: PaymentCreate, 
-    session: Session = Depends(get_session), 
+    payment_data: PaymentCreate,
+    session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Create a new payment and update invoice/order status"""
+    """Create a new payment and update invoice/order status (requires billing:register_payment)."""
+    if not has_permission(user.id, "billing:register_payment", session):
+        raise HTTPException(403, "Permission required: billing:register_payment")
     # Verify tenant and invoice exist
     tenant = session.get(Tenant, payment_data.tenant_id)
     if not tenant:
@@ -655,8 +678,11 @@ def get_order_balance(
     order_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get payment balance for an order"""
+    """Get payment balance for an order (requires billing:read)."""
+    if not has_permission(user.id, "billing:read", session):
+        raise HTTPException(403, "Permission required: billing:read")
     order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
@@ -697,8 +723,11 @@ def get_order_invoice(
     order_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get invoice for an order (convenience endpoint)"""
+    """Get invoice for an order (requires billing:read)."""
+    if not has_permission(user.id, "billing:read", session):
+        raise HTTPException(403, "Permission required: billing:read")
     order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")

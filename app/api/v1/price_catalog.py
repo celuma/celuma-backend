@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select, Session
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
+from app.core.rbac import has_permission
 from app.models.price_catalog import PriceCatalog
 from app.models.study_type import StudyType
 from app.models.user import AppUser
@@ -23,9 +24,12 @@ router = APIRouter(prefix="/price-catalog")
 def list_price_catalog(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
     active_only: bool = True,
 ):
-    """List all price catalog entries for the tenant"""
+    """List all price catalog entries (requires lab:read)."""
+    if not has_permission(user.id, "lab:read", session):
+        raise HTTPException(403, "Permission required: lab:read")
     query = select(PriceCatalog).where(PriceCatalog.tenant_id == ctx.tenant_id)
     
     if active_only:
@@ -68,8 +72,11 @@ def get_price_catalog(
     price_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get a specific price catalog entry by ID"""
+    """Get a specific price catalog entry by ID (requires lab:read)."""
+    if not has_permission(user.id, "lab:read", session):
+        raise HTTPException(403, "Permission required: lab:read")
     price = session.get(PriceCatalog, price_id)
     if not price:
         raise HTTPException(404, "Price catalog entry not found")
@@ -108,7 +115,9 @@ def create_price_catalog(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Create a new price catalog entry"""
+    """Create a new price catalog entry (requires admin:manage_catalog)."""
+    if not has_permission(user.id, "admin:manage_catalog", session):
+        raise HTTPException(403, "Permission required: admin:manage_catalog")
     # Validate study_type_id exists and belongs to tenant
     study_type = session.get(StudyType, price_data.study_type_id)
     if not study_type:
@@ -173,7 +182,9 @@ def update_price_catalog(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update an existing price catalog entry"""
+    """Update an existing price catalog entry (requires admin:manage_catalog)."""
+    if not has_permission(user.id, "admin:manage_catalog", session):
+        raise HTTPException(403, "Permission required: admin:manage_catalog")
     price = session.get(PriceCatalog, price_id)
     if not price:
         raise HTTPException(404, "Price catalog entry not found")
@@ -247,7 +258,9 @@ def delete_price_catalog(
     user: AppUser = Depends(current_user),
     hard_delete: bool = False,
 ):
-    """Delete a price catalog entry (soft delete by default)"""
+    """Delete a price catalog entry (requires admin:manage_catalog)."""
+    if not has_permission(user.id, "admin:manage_catalog", session):
+        raise HTTPException(403, "Permission required: admin:manage_catalog")
     price = session.get(PriceCatalog, price_id)
     if not price:
         raise HTTPException(404, "Price catalog entry not found")

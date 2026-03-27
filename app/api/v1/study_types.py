@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select, Session
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
+from app.core.rbac import has_permission
 from app.models.study_type import StudyType
 from app.models.report import ReportTemplate
 from app.models.tenant import Tenant
@@ -25,9 +26,12 @@ router = APIRouter(prefix="/study-types")
 def list_study_types(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
     active_only: bool = True,
 ):
-    """List all study types for the tenant"""
+    """List all study types for the tenant (requires lab:read)."""
+    if not has_permission(user.id, "lab:read", session):
+        raise HTTPException(403, "Permission required: lab:read")
     query = select(StudyType).where(StudyType.tenant_id == ctx.tenant_id)
     
     if active_only:
@@ -66,8 +70,11 @@ def get_study_type(
     study_type_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get a specific study type by ID"""
+    """Get a specific study type by ID (requires lab:read)."""
+    if not has_permission(user.id, "lab:read", session):
+        raise HTTPException(403, "Permission required: lab:read")
     study_type = session.get(StudyType, study_type_id)
     if not study_type:
         raise HTTPException(404, "Study type not found")
@@ -102,7 +109,9 @@ def create_study_type(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Create a new study type"""
+    """Create a new study type (requires admin:manage_catalog)."""
+    if not has_permission(user.id, "admin:manage_catalog", session):
+        raise HTTPException(403, "Permission required: admin:manage_catalog")
     # Check if code already exists for this tenant
     existing = session.exec(
         select(StudyType).where(
@@ -172,7 +181,9 @@ def update_study_type(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update an existing study type"""
+    """Update an existing study type (requires admin:manage_catalog)."""
+    if not has_permission(user.id, "admin:manage_catalog", session):
+        raise HTTPException(403, "Permission required: admin:manage_catalog")
     study_type = session.get(StudyType, study_type_id)
     if not study_type:
         raise HTTPException(404, "Study type not found")
@@ -254,7 +265,9 @@ def delete_study_type(
     user: AppUser = Depends(current_user),
     hard_delete: bool = False,
 ):
-    """Delete a study type (soft delete by default, hard delete optional)"""
+    """Delete a study type (requires admin:manage_catalog)."""
+    if not has_permission(user.id, "admin:manage_catalog", session):
+        raise HTTPException(403, "Permission required: admin:manage_catalog")
     study_type = session.get(StudyType, study_type_id)
     if not study_type:
         raise HTTPException(404, "Study type not found")
