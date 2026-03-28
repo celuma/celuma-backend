@@ -9,6 +9,7 @@ from app.core.rbac import (
     replace_user_roles,
     has_permission,
     user_has_full_branch_access,
+    count_active_users_with_role,
 )
 from app.models.user import AppUser, UserBranch
 from app.models.invitation import UserInvitation
@@ -71,20 +72,6 @@ def _get_user_branch_ids(user: AppUser, session: Session) -> list[str]:
         return [str(bid) for bid in branches]
     return [str(ub.branch_id) for ub in user.branches]
 
-
-def _count_users_with_role(session: Session, tenant_id, role_code: str) -> int:
-    """Count active users in a tenant that hold a given role code."""
-    users = session.exec(
-        select(AppUser).where(
-            AppUser.tenant_id == tenant_id,
-            AppUser.is_active == True,
-        )
-    ).all()
-    count = 0
-    for u in users:
-        if role_code in get_user_roles(u.id, session):
-            count += 1
-    return count
 
 
 def _build_user_detail(u: AppUser, session: Session) -> UserDetailResponse:
@@ -217,8 +204,8 @@ def update_user(
         is_deactivating = user_data.is_active is False
 
         if ("admin" in target_roles or "superuser" in target_roles) and (is_demoting or is_deactivating):
-            admin_count = _count_users_with_role(session, ctx.tenant_id, "admin")
-            superuser_count = _count_users_with_role(session, ctx.tenant_id, "superuser")
+            admin_count = count_active_users_with_role(session, ctx.tenant_id, "admin")
+            superuser_count = count_active_users_with_role(session, ctx.tenant_id, "superuser")
             if admin_count <= 1 and superuser_count <= 1:
                 raise HTTPException(400, "Cannot remove or deactivate the last administrator")
 
@@ -287,7 +274,7 @@ def deactivate_user(
 
     target_roles = set(get_user_roles(target_user.id, session))
     if ("admin" in target_roles or "superuser" in target_roles) and target_user.is_active:
-        admin_count = _count_users_with_role(session, ctx.tenant_id, "admin")
+        admin_count = count_active_users_with_role(session, ctx.tenant_id, "admin")
         if admin_count <= 1:
             raise HTTPException(400, "Cannot deactivate the last administrator")
 
@@ -322,7 +309,7 @@ def toggle_user_active(
 
     target_roles = set(get_user_roles(target_user.id, session))
     if ("admin" in target_roles or "superuser" in target_roles) and target_user.is_active:
-        admin_count = _count_users_with_role(session, ctx.tenant_id, "admin")
+        admin_count = count_active_users_with_role(session, ctx.tenant_id, "admin")
         if admin_count <= 1:
             raise HTTPException(400, "Cannot deactivate the last administrator")
 

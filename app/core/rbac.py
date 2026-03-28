@@ -13,6 +13,7 @@ from app.models.permission import Permission
 from app.models.role import Role
 from app.models.role_permission import RolePermission
 from app.models.user_role import UserRoleLink
+from app.models.user import AppUser
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +74,21 @@ def user_has_full_branch_access(user_id: UUID, session: Session) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Tenant-scoped counting helpers
+# ---------------------------------------------------------------------------
+
+def count_active_users_with_role(session: Session, tenant_id, role_code: str) -> int:
+    """Count active users in a tenant that hold a given role code."""
+    users = session.exec(
+        select(AppUser).where(
+            AppUser.tenant_id == tenant_id,
+            AppUser.is_active == True,  # noqa: E712
+        )
+    ).all()
+    return sum(1 for u in users if role_code in get_user_roles(u.id, session))
+
+
+# ---------------------------------------------------------------------------
 # Role management helpers
 # ---------------------------------------------------------------------------
 
@@ -109,9 +125,12 @@ def remove_role_by_code(user_id: UUID, role_code: str, session: Session) -> None
 
 def replace_user_roles(user_id: UUID, role_codes: List[str], session: Session) -> None:
     """Replace all roles for a user with the given list. Validates all codes exist first."""
-    roles = session.exec(select(Role).where(Role.code.in_(role_codes))).all()
+    # Deduplicate while preserving order to avoid duplicate-key errors on insert
+    unique_codes = list(dict.fromkeys(role_codes))
+
+    roles = session.exec(select(Role).where(Role.code.in_(unique_codes))).all()
     found_codes = {r.code for r in roles}
-    missing = set(role_codes) - found_codes
+    missing = set(unique_codes) - found_codes
     if missing:
         raise ValueError(f"Role(s) not found: {', '.join(sorted(missing))}")
 
@@ -120,6 +139,10 @@ def replace_user_roles(user_id: UUID, role_codes: List[str], session: Session) -
     ).all()
     for link in existing_links:
         session.delete(link)
+
+    # Flush the DELETEs before inserting to avoid unique-constraint violations when
+    # the same (user_id, role_id) pair is being re-added and autoflush triggers mid-loop.
+    session.flush()
 
     for role in roles:
         session.add(UserRoleLink(user_id=user_id, role_id=role.id))

@@ -20,7 +20,9 @@ from app.core.rbac import (
     get_user_permissions,
     get_user_roles,
     replace_user_roles,
+    count_active_users_with_role,
     ROLE_SUPERUSER,
+    ROLE_ADMIN,
 )
 from app.models.permission import Permission
 from app.models.role import Role
@@ -199,6 +201,15 @@ def set_user_roles(
 
     if (superuser_being_added or superuser_being_removed) and ROLE_SUPERUSER not in actor_roles:
         raise HTTPException(403, "Only a superuser can assign or remove the superuser role")
+
+    # Prevent stranding the tenant without any administrator
+    losing_admin = ROLE_ADMIN in target_current_roles and ROLE_ADMIN not in requested_roles
+    losing_superuser = ROLE_SUPERUSER in target_current_roles and ROLE_SUPERUSER not in requested_roles
+    if losing_admin or losing_superuser:
+        admin_count = count_active_users_with_role(session, target.tenant_id, ROLE_ADMIN)
+        superuser_count = count_active_users_with_role(session, target.tenant_id, ROLE_SUPERUSER)
+        if admin_count <= 1 and superuser_count <= 1:
+            raise HTTPException(400, "Cannot remove the last administrator from the tenant")
 
     try:
         replace_user_roles(target.id, body.roles, session)

@@ -17,7 +17,7 @@ from app.models.permission import Permission
 from app.models.role import Role
 from app.models.role_permission import RolePermission
 from app.models.user_role import UserRoleLink
-from app.core.rbac import has_permission, assign_role_by_code, get_user_roles
+from app.core.rbac import has_permission, assign_role_by_code, get_user_roles, replace_user_roles
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +160,98 @@ class TestAssignRoleByCode:
 
         roles = get_user_roles(user_id, session)
         assert roles.count("admin") == 1
+
+
+# ---------------------------------------------------------------------------
+# replace_user_roles regression tests
+# ---------------------------------------------------------------------------
+
+class TestReplaceUserRoles:
+    """Regression tests for the flush-before-insert fix in replace_user_roles."""
+
+    def test_replace_with_same_role_no_integrity_error(self, session: Session):
+        """Replacing roles when the new list contains the current role must not raise UniqueViolation."""
+        user_id = uuid.uuid4()
+        _seed_permission(session, "lab:read", "lab")
+        role = _seed_role(session, "lab_tech", "Lab Tech")
+        session.add(UserRoleLink(user_id=user_id, role_id=role.id))
+        session.commit()
+
+        # Replace with the same role — triggered the UniqueViolation before the fix
+        replace_user_roles(user_id, ["lab_tech"], session)
+        session.commit()
+
+        roles = get_user_roles(user_id, session)
+        assert roles == ["lab_tech"]
+
+    def test_replace_changes_role(self, session: Session):
+        """Replacing one role with a different one results in only the new role assigned."""
+        user_id = uuid.uuid4()
+        _seed_permission(session, "lab:read", "lab")
+        _seed_permission(session, "billing:read", "billing")
+        role_a = _seed_role(session, "lab_tech_r", "Lab Tech")
+        role_b = _seed_role(session, "billing_r", "Billing")
+        session.add(UserRoleLink(user_id=user_id, role_id=role_a.id))
+        session.commit()
+
+        replace_user_roles(user_id, ["billing_r"], session)
+        session.commit()
+
+        roles = get_user_roles(user_id, session)
+        assert roles == ["billing_r"]
+
+    def test_replace_multiple_roles(self, session: Session):
+        """replace_user_roles assigns multiple roles correctly."""
+        user_id = uuid.uuid4()
+        _seed_permission(session, "lab:read", "lab")
+        _seed_permission(session, "reports:read", "reports")
+        role_a = _seed_role(session, "lab_tech_m", "Lab Tech")
+        role_b = _seed_role(session, "viewer_m", "Viewer")
+        session.commit()
+
+        replace_user_roles(user_id, ["lab_tech_m", "viewer_m"], session)
+        session.commit()
+
+        roles = sorted(get_user_roles(user_id, session))
+        assert roles == ["lab_tech_m", "viewer_m"]
+
+    def test_replace_dedupe_duplicate_codes(self, session: Session):
+        """Duplicate role codes in the input must not cause a UniqueViolation on insert."""
+        user_id = uuid.uuid4()
+        _seed_permission(session, "lab:read", "lab")
+        role = _seed_role(session, "lab_tech_d", "Lab Tech")
+        session.commit()
+
+        # Pass the same role code twice — should result in exactly one assignment
+        replace_user_roles(user_id, ["lab_tech_d", "lab_tech_d"], session)
+        session.commit()
+
+        roles = get_user_roles(user_id, session)
+        assert roles.count("lab_tech_d") == 1
+
+    def test_replace_unknown_role_raises(self, session: Session):
+        """replace_user_roles must raise ValueError for unknown role codes."""
+        user_id = uuid.uuid4()
+        with pytest.raises(ValueError, match="Role.s. not found"):
+            replace_user_roles(user_id, ["nonexistent_xyz"], session)
+
+    def test_roundtrip_role_switch(self, session: Session):
+        """Switch role A → B → A without errors, verifying state at each step."""
+        user_id = uuid.uuid4()
+        _seed_permission(session, "lab:read", "lab")
+        _seed_permission(session, "reports:read", "reports")
+        role_a = _seed_role(session, "role_a_rt", "Role A")
+        role_b = _seed_role(session, "role_b_rt", "Role B")
+        session.add(UserRoleLink(user_id=user_id, role_id=role_a.id))
+        session.commit()
+
+        replace_user_roles(user_id, ["role_b_rt"], session)
+        session.commit()
+        assert get_user_roles(user_id, session) == ["role_b_rt"]
+
+        replace_user_roles(user_id, ["role_a_rt"], session)
+        session.commit()
+        assert get_user_roles(user_id, session) == ["role_a_rt"]
 
 
 # ---------------------------------------------------------------------------
