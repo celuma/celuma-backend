@@ -38,7 +38,7 @@ class Invoice(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     discount_total: float = Field(sa_type=Numeric(12, 2), default=0)
     tax_total: float = Field(sa_type=Numeric(12, 2), default=0)
     total: float = Field(sa_type=Numeric(12, 2))  # Total to pay
-    amount_total: float = Field(sa_type=Numeric(12, 2))  # Kept for backwards compatibility
+    amount_total: float = Field(sa_type=Numeric(12, 2))  # Mirror of total; kept for schema consistency
     amount_paid: float = Field(sa_type=Numeric(12, 2), default=0)  # Cache of sum(payments)
     currency: str = Field(default="MXN", max_length=3)
     status: PaymentStatus = Field(default=PaymentStatus.PENDING)

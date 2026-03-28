@@ -16,9 +16,9 @@ from .billing import (
 )
 
 from .laboratory import (
-    LabOrderCreate,
-    LabOrderResponse,
-    LabOrderDetailResponse,
+    OrderCreate,
+    OrderResponse,
+    OrderDetailResponse,
     SampleCreate,
     SampleResponse
 )

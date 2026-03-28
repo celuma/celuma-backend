@@ -118,8 +118,6 @@ class OrderLabel(BaseModel, table=True):
     order_id: UUID = Field(foreign_key="order.id", primary_key=True, ondelete="CASCADE")
     label_id: UUID = Field(foreign_key="label.id", primary_key=True, ondelete="CASCADE")
 
-# Alias for backwards compatibility
-LabOrderLabel = OrderLabel
 
 class SampleLabel(BaseModel, table=True):
     """Junction table for sample-label many-to-many relationship

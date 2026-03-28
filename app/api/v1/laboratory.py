@@ -6,7 +6,7 @@ from sqlalchemy import cast, String
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.core.rbac import has_permission
-from app.models.laboratory import Order, Sample, SampleImage, Label, LabOrderLabel, SampleLabel
+from app.models.laboratory import Order, Sample, SampleImage, Label, OrderLabel, SampleLabel
 from app.models.storage import StorageObject, SampleImageRendition
 from app.models.tenant import Tenant, Branch
 from app.models.patient import Patient
@@ -188,7 +188,7 @@ def list_orders(
         has_invoice = o.invoice_id is not None
 
         # Get labels
-        label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == o.id)).all()
+        label_ids = session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == o.id)).all()
         labels = []
         if label_ids:
             labels_objs = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
@@ -350,7 +350,7 @@ def get_order(
     reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
     
     # Get labels
-    label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
+    label_ids = session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == order_id)).all()
     labels = []
     if label_ids:
         labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
@@ -425,7 +425,7 @@ def update_order_notes(
     reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
     
     # Get labels
-    label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
+    label_ids = session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == order_id)).all()
     labels = []
     if label_ids:
         labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
@@ -808,7 +808,7 @@ def get_sample_detail(
     
     # Get labels (inherited from order + own labels)
     order_label_ids = set(
-        session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == s.order_id)).all()
+        session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == s.order_id)).all()
     )
     sample_label_ids = set(
         session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == sample_id)).all()
@@ -927,7 +927,7 @@ def update_sample_state(
     
     # Get labels (inherited from order + own labels)
     order_label_ids = set(
-        session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == sample.order_id)).all()
+        session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == sample.order_id)).all()
     )
     sample_label_ids = set(
         session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == sample_id)).all()
@@ -1014,7 +1014,7 @@ def update_sample_notes(
     
     # Get labels (inherited from order + own labels)
     order_label_ids = set(
-        session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == sample.order_id)).all()
+        session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == sample.order_id)).all()
     )
     sample_label_ids = set(
         session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == sample_id)).all()
@@ -1128,7 +1128,7 @@ def create_sample(
     
     # Get labels (inherited from order + own labels)
     order_label_ids = set(
-        session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == sample.order_id)).all()
+        session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == sample.order_id)).all()
     )
     sample_label_ids = set(
         session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == sample.id)).all()
@@ -1318,7 +1318,7 @@ def create_order_with_samples(
         
         # Get labels (inherited from order + own labels)
         order_label_ids = set(
-            session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == s.order_id)).all()
+            session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == s.order_id)).all()
         )
         sample_label_ids = set(
             session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == s.id)).all()
@@ -1754,7 +1754,7 @@ def build_order_full_detail(
     reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
 
     # Get labels
-    label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
+    label_ids = session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == order_id)).all()
     labels = []
     if label_ids:
         labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
@@ -1893,7 +1893,7 @@ def list_patient_orders(
         has_invoice = o.invoice_id is not None
 
         # Get labels
-        label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == o.id)).all()
+        label_ids = session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == o.id)).all()
         labels = []
         if label_ids:
             labels_objs = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
@@ -2212,7 +2212,7 @@ def delete_label(
     
     # Check if label is in use
     order_usage = session.exec(
-        select(LabOrderLabel).where(LabOrderLabel.label_id == label_id).limit(1)
+        select(OrderLabel).where(OrderLabel.label_id == label_id).limit(1)
     ).first()
     
     sample_usage = session.exec(
@@ -2502,7 +2502,7 @@ def update_order_assignees(
     reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
     
     # Get labels
-    label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
+    label_ids = session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == order_id)).all()
     labels = []
     if label_ids:
         labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
@@ -2605,7 +2605,7 @@ def update_order_reviewers(
     reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
     
     # Get labels
-    label_ids = session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
+    label_ids = session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == order_id)).all()
     labels = []
     if label_ids:
         labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
@@ -2658,7 +2658,7 @@ def update_order_labels(
     
     # Get current labels
     old_label_ids = set(
-        session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == order_id)).all()
+        session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == order_id)).all()
     )
     new_label_ids_set = set(new_label_ids)
     
@@ -2668,14 +2668,14 @@ def update_order_labels(
     
     # Delete all existing labels
     session.exec(
-        select(LabOrderLabel).where(LabOrderLabel.order_id == order_id)
+        select(OrderLabel).where(OrderLabel.order_id == order_id)
     ).all()
-    for ol in session.exec(select(LabOrderLabel).where(LabOrderLabel.order_id == order_id)).all():
+    for ol in session.exec(select(OrderLabel).where(OrderLabel.order_id == order_id)).all():
         session.delete(ol)
     
     # Add new labels
     for label_id in new_label_ids:
-        order_label = LabOrderLabel(order_id=order.id, label_id=label_id)
+        order_label = OrderLabel(order_id=order.id, label_id=label_id)
         session.add(order_label)
     
     # Generate events if there were changes
@@ -2952,7 +2952,7 @@ def update_sample_labels(
     
     # Get order labels (inherited)
     order_label_ids = set(
-        session.exec(select(LabOrderLabel.label_id).where(LabOrderLabel.order_id == sample.order_id)).all()
+        session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == sample.order_id)).all()
     )
     
     # Get own labels
