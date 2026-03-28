@@ -37,6 +37,7 @@ This document describes the complete database schema for the Celuma laboratory m
 - **Flexible Login**: Users can authenticate using username OR email
 - **Avatar URL**: Optional profile picture URL (max 500 characters)
 - Can be associated with multiple branches through UserBranch
+- Roles are assigned through the RBAC system (see section 8 below) — the `app_user` table does **not** have a `role` column
 
 #### UserInvitation
 - User invitation system for onboarding
@@ -59,22 +60,24 @@ This document describes the complete database schema for the Celuma laboratory m
 
 ### 3. Laboratory Operations
 
-#### LabOrder
+#### Order (formerly LabOrder)
 - Laboratory test orders
 - Tracks order status through workflow (OrderStatus enum)
-- Links patients to samples and reports
+- Links patients to samples, reports, and invoices via direct FK fields
 - Supports billing locks for payment control
-- Supports collaboration with assignees and reviewers
+- Supports collaboration via the `Assignment` and `ReportReview` tables (not column arrays)
 - Fields:
   - `order_code` (string, max 100 chars): Visible order identifier, unique per branch
   - `status` (OrderStatus): Current workflow status
-  - `requested_by` (string, optional): External requesting physician name
+  - `requested_by` (string, optional): External requesting physician name or email
   - `notes` (text, optional): Order notes
   - `billed_lock` (boolean): When true, blocks report PDF access due to pending payments
   - `created_by` (UUID, optional): User who created the order
-  - `assignees` (UUID array, optional): Users assigned to work on the order
-  - `reviewers` (UUID array, optional): Users designated to review the order
-- Automatically updated when invoice balance changes
+  - `report_id` (UUID, optional): Direct FK to linked Report
+  - `invoice_id` (UUID, optional): Direct FK to linked Invoice
+  - `study_type_id` (UUID, optional): FK to associated StudyType
+- Assignees are managed through the `Assignment` table (`item_type = lab_order`)
+- Reviewers are managed through the `ReportReview` table
 - Lock is removed when all invoices for the order are fully paid
 
 #### Sample
@@ -83,7 +86,7 @@ This document describes the complete database schema for the Celuma laboratory m
 - Tracks collection and reception timestamps
 - Can have multiple images with renditions
 - Can have labels for categorization (plus inherits order labels)
-- Supports collaboration with assignees
+- Supports collaboration via the `Assignment` table (not a column array)
 - Fields:
   - `sample_code` (string, max 100 chars): Unique identifier per order
   - `type` (SampleType): Type of sample (SANGRE, BIOPSIA, etc.)
@@ -91,7 +94,7 @@ This document describes the complete database schema for the Celuma laboratory m
   - `collected_at` (timestamp, optional): When sample was collected
   - `received_at` (timestamp, optional): When sample was received at lab
   - `notes` (text, optional): Sample notes
-  - `assignees` (UUID array, optional): Users assigned to work on the sample
+- Assignees are managed through the `Assignment` table (`item_type = sample`)
 
 #### OrderComment
 - Comments and conversation threads on laboratory orders
@@ -185,6 +188,30 @@ This document describes the complete database schema for the Celuma laboratory m
   - `is_active` (boolean, default true)
   - `created_at` (timestamp)
 
+#### Assignment
+- Tracks user assignments to orders, samples, and reports
+- Replaces the legacy `assignees`/`reviewers` UUID array columns
+- Fields:
+  - `item_type` (AssignmentItemType): `lab_order`, `sample`, or `report`
+  - `item_id` (UUID): ID of the assigned item
+  - `assignee_user_id` (UUID): User being assigned
+  - `assigned_by_user_id` (UUID, optional): User who performed the assignment
+  - `assigned_at` (timestamp): When the assignment was created
+  - `unassigned_at` (timestamp, optional): When the assignment was removed
+
+#### ReportReview
+- Tracks individual reviewer decisions per lab order
+- Reviewers can be assigned before a report exists (`report_id` is nullable)
+- MVP rule: ≥1 approved decision promotes the report to APPROVED status
+- Fields:
+  - `order_id` (UUID): Order being reviewed
+  - `report_id` (UUID, optional): Specific report version under review
+  - `reviewer_user_id` (UUID): User performing the review
+  - `assigned_by_user_id` (UUID, optional): User who assigned the reviewer
+  - `assigned_at` (timestamp): When the reviewer was assigned
+  - `decision_at` (timestamp, optional): When the decision was made
+  - `status` (ReviewStatus): `PENDING`, `APPROVED`, or `REJECTED`
+
 ### 5. Storage Management
 
 #### StorageObject
@@ -217,18 +244,73 @@ This document describes the complete database schema for the Celuma laboratory m
 - Supports multiple payment methods
 - Tracks payment amounts and timing
 
-### 7. Audit and Event System
+### 8. RBAC System (Role-Based Access Control)
+
+The RBAC system replaces the legacy `role` column on `app_user`. Roles are now separate entities with granular permissions, allowing custom role creation in the future.
+
+#### Permission
+- Atomic capability granted to users via roles
+- Globally defined (not tenant-scoped)
+- Fields:
+  - `code` (unique string, e.g., `lab:read`, `reports:sign`, `admin:manage_users`)
+  - `domain` (grouping, e.g., `lab`, `reports`, `admin`, `billing`, `portal`, `audit`)
+  - `display_name` (human-readable label)
+  - `description` (optional detail)
+
+#### Role
+- Named collection of permissions, optionally scoped to a tenant
+- System roles (`is_system=true`) are seeded and available to all tenants
+- Tenant-scoped custom roles (`tenant_id != null`) are for future use
+- Fields:
+  - `code` (unique string, e.g., `admin`, `pathologist`, `lab_tech`)
+  - `name` (display name)
+  - `description` (optional)
+  - `is_system` (boolean)
+  - `is_protected` (boolean — system roles cannot be deleted)
+  - `tenant_id` (nullable UUID — null for global system roles)
+
+**Seeded system roles:**
+
+| Code | Name | Key Permissions |
+|------|------|-----------------|
+| `superuser` | Superadministrador | All permissions |
+| `admin` | Administrador | All except `reports:sign` / clinical actions |
+| `pathologist` | Patólogo | Full reports domain + lab read |
+| `lab_tech` | Técnico de Laboratorio | Lab operations, images, samples |
+| `billing` | Facturación | Billing domain + lab read |
+| `assistant` | Asistente | Lab read + create orders/patients/samples |
+| `viewer` | Solo Lectura | Read-only (`lab:read`, `reports:read`, `billing:read`) |
+| `physician` | Médico Solicitante | `portal:physician_access` |
+| `auditor` | Auditor | `audit:read_auditlog`, `audit:read_events` |
+
+#### RolePermission
+- Junction table linking roles to their permissions
+- Composite primary key (`role_id`, `permission_id`)
+
+#### UserRoleLink
+- Junction table assigning roles to users
+- Unique constraint `uq_user_role` on (`user_id`, `role_id`)
+- A user can hold multiple roles simultaneously (role union for permission resolution)
+
+### 9. Audit and Event System
 
 #### AuditLog
 - Complete audit trail for compliance
 - Tracks all entity changes with before/after values
 - Links to users, branches, and specific entities
 
-#### CaseEvent
-- Timeline tracking for case workflow
-- Records all significant case events
+#### OrderEvent
+- Timeline tracking for order and sample workflow
+- Records all significant events for orders and samples
 - Stores event metadata as JSON for flexibility
-- Links to orders, users, and branches for context
+- Links to orders, samples, users, and branches for context
+- Fields:
+  - `order_id` (UUID): The order this event belongs to
+  - `sample_id` (UUID, optional): Specific sample for sample-level events
+  - `event_type` (EventType): Type of event
+  - `description` (string, max 500 chars): Human-readable description
+  - `event_metadata` (JSON, optional): Additional structured event data
+  - `created_by` (UUID, optional): User who triggered the event
 
 ## Data Relationships
 
@@ -246,18 +328,22 @@ Branch (1) ←→ (N) Report
 Branch (1) ←→ (N) Invoice
 
 AppUser (N) ←→ (N) Branch (through UserBranch)
-AppUser (1) ←→ (N) LabOrder (created_by)
+AppUser (N) ←→ (N) Role (through UserRoleLink)
+Role (N) ←→ (N) Permission (through RolePermission)
+AppUser (1) ←→ (N) Order (created_by)
 AppUser (1) ←→ (N) Report (created_by)
 AppUser (1) ←→ (N) ReportVersion (authored_by)
-AppUser (N) ←→ (N) LabOrder (assignees array)
-AppUser (N) ←→ (N) LabOrder (reviewers array)
-AppUser (N) ←→ (N) Sample (assignees array)
+AppUser (1) ←→ (N) Assignment (assignee_user_id)
+AppUser (1) ←→ (N) ReportReview (reviewer_user_id)
 AppUser (1) ←→ (N) OrderComment (created_by)
 
-Patient (1) ←→ (N) LabOrder
-LabOrder (1) ←→ (N) Sample
-LabOrder (1) ←→ (N) Report
-LabOrder (1) ←→ (N) Invoice
+Patient (1) ←→ (N) Order
+Order (1) ←→ (N) Sample
+Order (1) ←→ (1) Report (via order.report_id)
+Order (1) ←→ (1) Invoice (via order.invoice_id)
+Order (1) ←→ (N) Assignment (item_type=lab_order)
+Order (1) ←→ (N) ReportReview
+Sample (1) ←→ (N) Assignment (item_type=sample)
 
 Sample (1) ←→ (N) SampleImage
 SampleImage (1) ←→ (N) SampleImageRendition
@@ -269,11 +355,11 @@ ReportVersion (1) ←→ (1) StorageObject (HTML)
 
 Tenant (1) ←→ (N) ReportTemplate
 
-LabOrder (1) ←→ (N) OrderComment
+Order (1) ←→ (N) OrderComment
 OrderComment (N) ←→ (N) AppUser (through OrderCommentMention)
 
 Tenant (1) ←→ (N) Label
-LabOrder (N) ←→ (N) Label (through LabOrderLabel)
+Order (N) ←→ (N) Label (through OrderLabel)
 Sample (N) ←→ (N) Label (through SampleLabel)
 
 Invoice (1) ←→ (N) Payment
@@ -281,13 +367,10 @@ Invoice (1) ←→ (N) Payment
 
 ## Enums
 
-### UserRole
-- `admin`: System administrator
-- `pathologist`: Medical professional
-- `lab_tech`: Laboratory technician
-- `assistant`: Administrative assistant
-- `billing`: Billing specialist
-- `viewer`: Read-only access
+### User Roles (RBAC — not a DB enum)
+Roles are stored as rows in the `role` table, not as a PostgreSQL enum. See section 8 for the full seeded role catalog. The `app_user` table does not have a `role` column.
+
+**System role codes:** `superuser`, `admin`, `pathologist`, `lab_tech`, `billing`, `assistant`, `viewer`, `physician`, `auditor`
 
 ### OrderStatus
 - `RECEIVED`: Order received
@@ -333,12 +416,25 @@ Sample-specific lifecycle states (independent from OrderStatus):
 - APPROVED → PUBLISHED (pathologist signs)
 - PUBLISHED → RETRACTED (pathologist retracts)
 
+### ReviewStatus
+Status for individual reviewer decisions on a `ReportReview` record:
+- `PENDING`: Reviewer has been assigned but has not yet decided
+- `APPROVED`: Reviewer approved the report
+- `REJECTED`: Reviewer rejected the report (changes requested)
+
+### AssignmentItemType
+Item types that can have assignments in the `Assignment` table:
+- `lab_order`: Assignment applies to a laboratory order
+- `sample`: Assignment applies to a sample
+- `report`: Assignment applies to a report
+
 ### PaymentStatus
 - `PENDING`: Payment pending
 - `PAID`: Payment received
 - `FAILED`: Payment failed
 - `REFUNDED`: Payment refunded
 - `PARTIAL`: Partial payment
+- `VOID`: Payment voided/cancelled
 
 ### EventType
 - **Order Events**:
@@ -437,7 +533,7 @@ The service catalog system enables flexible pricing management:
 
 ### Event Timeline
 Complete case history tracking:
-- **Event Types**: 29 predefined event types for workflow tracking (see EventType enum)
+- **Event Types**: 33 predefined event types for workflow tracking (see EventType enum)
 - **Flexible Metadata**: JSON storage for event-specific data
 - **Audit Trail**: Links to users and timestamps for compliance
 - **Query Optimization**: Indexed for fast timeline reconstruction
@@ -457,13 +553,19 @@ Detailed billing with:
 
 ### Usage Examples
 ```sql
--- User with username
-INSERT INTO app_user (tenant_id, username, email, full_name, role, hashed_password)
-VALUES ('tenant-uuid', 'johndoe', 'john@example.com', 'John Doe', 'admin', 'hashed_pass');
+-- Create user (no role column — roles are assigned via RBAC)
+INSERT INTO app_user (tenant_id, username, email, full_name, hashed_password)
+VALUES ('tenant-uuid', 'johndoe', 'john@example.com', 'John Doe', 'hashed_pass');
 
--- User without username (existing behavior)
-INSERT INTO app_user (tenant_id, email, full_name, role, hashed_password)
-VALUES ('tenant-uuid', 'jane@example.com', 'Jane Smith', 'user', 'hashed_pass');
+-- Assign the 'admin' role via the RBAC junction table
+INSERT INTO user_role_link (user_id, role_id)
+SELECT 'user-uuid', id FROM role WHERE code = 'admin';
+
+-- Query user roles
+SELECT r.code, r.name
+FROM role r
+JOIN user_role_link url ON url.role_id = r.id
+WHERE url.user_id = 'user-uuid';
 ```
 
 ## Future Enhancements

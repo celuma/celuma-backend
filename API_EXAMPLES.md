@@ -231,6 +231,8 @@ if response.status_code == 200:
         print(f"Username: {profile['username']}")
     else:
         print("No username set")
+    print(f"Roles: {profile['roles']}")           # e.g. ["admin", "superuser"]
+    print(f"Permissions: {profile['permissions']}") # e.g. ["admin:manage_users", ...]
 ```
 
 ### Update Profile (PUT)
@@ -1600,6 +1602,124 @@ print(f"✅ Invoice item added: {item['description']}")
 
 **Note:** Invoice items are included in `GET /api/v1/billing/invoices/{invoice_id}/full`. There is no separate endpoint to list items only.
 
+## 🔑 RBAC Management
+
+### List Permission Catalog
+```bash
+curl "http://localhost:8000/api/v1/rbac/permissions" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+perms_resp = requests.get(
+    f"{BASE_URL}/api/v1/rbac/permissions",
+    headers=headers
+)
+perms_resp.raise_for_status()
+for perm in perms_resp.json():
+    print(f"- [{perm['domain']}] {perm['code']}: {perm['display_name']}")
+```
+
+### List System Roles
+```bash
+curl "http://localhost:8000/api/v1/rbac/roles" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+roles_resp = requests.get(
+    f"{BASE_URL}/api/v1/rbac/roles",
+    headers=headers
+)
+roles_resp.raise_for_status()
+for role in roles_resp.json():
+    perms = ", ".join(role['permissions'][:3])
+    print(f"- {role['code']} ({role['name']}): {perms}...")
+```
+
+### Get User Roles and Effective Permissions
+```bash
+curl "http://localhost:8000/api/v1/rbac/users/USER_UUID/roles" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+**Python Example:**
+```python
+user_id = "USER_UUID"
+rbac_resp = requests.get(
+    f"{BASE_URL}/api/v1/rbac/users/{user_id}/roles",
+    headers=headers
+)
+rbac_resp.raise_for_status()
+data = rbac_resp.json()
+print(f"Roles:       {data['roles']}")
+print(f"Permissions: {data['permissions']}")
+```
+
+### Replace User Roles
+```bash
+curl -X PUT "http://localhost:8000/api/v1/rbac/users/USER_UUID/roles" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"roles": ["pathologist", "lab_tech"]}'
+```
+
+**Python Example:**
+```python
+user_id = "USER_UUID"
+
+# Assign a single role
+resp = requests.put(
+    f"{BASE_URL}/api/v1/rbac/users/{user_id}/roles",
+    headers=headers,
+    json={"roles": ["pathologist"]}
+)
+resp.raise_for_status()
+result = resp.json()
+print(f"✅ Roles updated: {result['roles']}")
+print(f"   Effective permissions: {len(result['permissions'])} granted")
+
+# Assign multiple roles
+resp2 = requests.put(
+    f"{BASE_URL}/api/v1/rbac/users/{user_id}/roles",
+    headers=headers,
+    json={"roles": ["lab_tech", "billing"]}
+)
+resp2.raise_for_status()
+print(f"✅ Multi-role: {resp2.json()['roles']}")
+```
+
+**Error cases:**
+```python
+# 400 — empty role list
+resp = requests.put(
+    f"{BASE_URL}/api/v1/rbac/users/{user_id}/roles",
+    headers=headers,
+    json={"roles": []}
+)
+# → {"detail": "At least one role must be assigned"}
+
+# 403 — non-superuser trying to assign superuser role
+resp = requests.put(
+    f"{BASE_URL}/api/v1/rbac/users/{user_id}/roles",
+    headers=headers,
+    json={"roles": ["superuser"]}
+)
+# → {"detail": "Only a superuser can assign or remove the superuser role"}
+
+# 400 — removing the last admin
+resp = requests.put(
+    f"{BASE_URL}/api/v1/rbac/users/{last_admin_id}/roles",
+    headers=headers,
+    json={"roles": ["viewer"]}
+)
+# → {"detail": "Cannot remove the last administrator from the tenant"}
+```
+
+---
+
 ## 👥 User Invitations and Password Reset
 
 User invitations are handled via `/api/v1/users/invitations`. Password reset is handled via `/api/v1/auth/password-reset/*`.
@@ -1751,7 +1871,7 @@ print(f"   Branches: {user['branch_ids']}")
 
 ### List Users
 ```python
-# List all users in tenant
+# List all users in tenant (requires admin:manage_users)
 users_response = requests.get(
     f"{BASE_URL}/api/v1/users/",
     headers=headers,
@@ -1759,18 +1879,18 @@ users_response = requests.get(
 users = users_response.json()["users"]
 print(f"Found {len(users)} users")
 for user in users:
-    print(f"- {user['full_name']} ({user['email']}) - {user['role']}")
+    roles_str = ", ".join(user.get('roles', []))
+    print(f"- {user['full_name']} ({user['email']}) - [{roles_str}]")
 ```
 
-### Update User
+### Update User Profile
 ```python
-# Update user information
+# Update user profile fields (roles NOT managed here — use RBAC endpoint)
 update_data = {
     "full_name": "Updated Name",
-    "role": "pathologist",
     "is_active": True,
-    "password": "NewPassword123!", # Optional: Reset user password
-    "branch_ids": ["branch-uuid-1", "branch-uuid-2"] # Replace existing branches
+    "password": "NewPassword123!",  # Optional: reset user password
+    "branch_ids": ["branch-uuid-1", "branch-uuid-2"]  # Replace existing branches
 }
 
 update_response = requests.put(
@@ -1780,6 +1900,7 @@ update_response = requests.put(
 )
 updated_user = update_response.json()
 print(f"✅ User updated: {updated_user['full_name']}")
+print(f"   Roles: {updated_user['roles']}")
 print(f"   Branches: {updated_user['branch_ids']}")
 ```
 

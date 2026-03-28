@@ -17,19 +17,11 @@ cd celuma-backend
 
 ### 2. Start the System
 ```bash
-# Using Make (recommended)
-make run
-
-# Or manually
 docker-compose up -d
 ```
 
 ### 3. Verify Installation
 ```bash
-# Check status
-make status
-
-# Or manually
 curl http://localhost:8000/api/v1/health
 ```
 
@@ -82,35 +74,27 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 
 ## 🧪 Testing
 
-The project includes a comprehensive testing suite located in the `tests/` directory.
+The project includes a test suite located in the `tests/` directory, using pytest with coverage reporting.
 
 ### Quick Test Commands
 ```bash
-# Run all tests with automatic cleanup
-make test
+# Run unit tests with coverage report
+make test-unit
 
-# Run specific test suites
-make test-flow          # Complete flow tests
-make test-validation    # Validation and error handling
-make test-performance   # Performance tests
-make test-cleanup       # Test data analysis
-
-# Interactive test menu
-make test-interactive
+# Or directly with pytest
+python3 -m pytest --cov=app --cov-branch --cov-report=term-missing
 ```
 
 ### Test Structure
 ```
 tests/
-├── __init__.py                 # Package initialization
-├── test_endpoints.py          # Complete flow tests (JSON updated)
-├── test_validation_errors.py  # Validation tests
-├── test_performance.py        # Performance tests
-├── test_auth_logout.py        # Authentication and logout tests
-├── cleanup_test_data.py       # Data cleanup utilities
-├── cleanup_blacklisted_tokens.py # Token cleanup utilities
-├── run_all_tests.py          # Master test runner with cleanup
-└── TESTING_README.md         # Detailed testing documentation
+├── __init__.py               # Package initialization
+├── conftest.py               # Shared fixtures and configuration
+├── test_models.py            # Database model tests
+├── test_order_comments.py    # Order comment and mention tests
+├── test_rbac_phase2.py       # RBAC system tests
+├── test_schemas.py           # Pydantic schema validation tests
+└── test_security.py          # Authentication and security tests
 ```
 
 ### Running Tests Manually
@@ -118,13 +102,10 @@ tests/
 # From project root
 python run_tests.py
 
-# From tests directory
-cd tests
-python run_all_tests.py          # Complete test suite with cleanup
-python test_endpoints.py         # Endpoint flow tests
-python test_validation_errors.py # Validation tests
-python test_performance.py       # Performance tests
-python test_auth_logout.py       # Authentication tests
+# Or with pytest directly
+python3 -m pytest tests/                   # All tests
+python3 -m pytest tests/test_models.py    # Model tests only
+python3 -m pytest tests/test_rbac_phase2.py # RBAC tests only
 ```
 
 ## 📚 Documentation
@@ -132,7 +113,7 @@ python test_auth_logout.py       # Authentication tests
 - [API Endpoints](API_ENDPOINTS.md) - Complete API reference (JSON updated)
 - [API Examples](API_EXAMPLES.md) - Usage examples with JSON payloads
 - [Database Schema](DATABASE_README.md) - Database design and migrations
-- [Testing Guide](tests/TESTING_README.md) - Comprehensive testing documentation
+- [Testing Guide](#-testing) - Testing setup and available test suites
 - [Logging Guide](LOGGING.md) - Iconography and logging guidelines
 - **[Deployment Guide](DEPLOYMENT_README.md)** - Complete deployment documentation
 
@@ -212,13 +193,11 @@ celuma-backend/
 ### Available Commands
 ```bash
 make help                 # Show all available commands
+make setup                # Create Python virtual environment
 make install              # Install Python dependencies
-make run                  # Start the API server
-make stop                 # Stop the API server
-make logs                 # Show API logs
-make status               # Check system status
-make test                 # Run all tests
-make clean                # Clean up containers and data
+make test-unit            # Run unit tests with coverage report
+make build                # Build Docker image
+make clean                # Clean up Docker images and containers
 ```
 
 ### Available Scripts
@@ -241,6 +220,9 @@ make clean                # Clean up containers and data
   - `GET /api/v1/auth/me` - Get current user profile
   - `PUT /api/v1/auth/me` - Update profile and password
   - `POST /api/v1/auth/logout` - Logout and token blacklisting
+  - `POST /api/v1/auth/password-reset/request` - Request password reset email
+  - `POST /api/v1/auth/password-reset/verify` - Verify reset token validity
+  - `POST /api/v1/auth/password-reset/confirm` - Set new password with token
 - **User Management** (Admin only):
   - `GET/POST/PUT/DELETE /api/v1/users/` - Complete user CRUD operations
   - `POST /api/v1/users/{id}/toggle-active` - Toggle user active status
@@ -320,15 +302,23 @@ make clean                # Clean up containers and data
 - **Dashboard**:
   - `GET /api/v1/dashboard/` - Get dashboard statistics and recent activity
 - **Portal**: 
-  - `POST /api/v1/portal/invite` - Send user invitations
-  - `POST /api/v1/portal/accept-invitation` - Accept invitation and create user
-  - `POST /api/v1/portal/request-password-reset` - Request password reset
-  - `POST /api/v1/portal/reset-password` - Reset password with token
-  - **Physician Portal**:
+  - **Physician Portal** (requires `portal:physician_access` permission):
     - `GET /api/v1/portal/physician/orders` - List physician's requested orders
-    - `GET /api/v1/portal/physician/orders/{id}/report` - Get published report
-  - **Patient Portal** (public):
-    - `GET /api/v1/portal/patient/report` - Get report by access code
+    - `GET /api/v1/portal/physician/orders/{id}/report` - Get published report PDF
+  - **Patient Portal** (public, no auth required):
+    - `GET /api/v1/portal/patient/report` - Get report by patient access code
+- **RBAC**:
+  - `GET /api/v1/rbac/permissions` - List all available permissions
+  - `GET /api/v1/rbac/roles` - List all roles with their permissions
+  - `GET /api/v1/rbac/users/{id}/roles` - Get roles assigned to a user
+  - `PUT /api/v1/rbac/users/{id}/roles` - Update roles assigned to a user
+- **Worklist**:
+  - `GET /api/v1/me/worklist` - Get current user's worklist (assignments + reviews)
+  - `GET /api/v1/assignments` - List assignments for a given item
+  - `POST /api/v1/assignments` - Create a new assignment
+  - `DELETE /api/v1/assignments/{id}` - Remove an assignment
+  - `GET /api/v1/report-reviews` - List report reviews for an order
+  - `POST /api/v1/report-reviews/{id}/decision` - Submit approve/reject decision
 
 ### 🔐 Authentication Features
 - **Flexible Login**: Users can authenticate using either username or email
@@ -410,15 +400,14 @@ MEDIA_PRESIGNED_EXPIRE_SECONDS=3600
 ### Health Checks
 - API health: `GET /api/v1/health`
 - Database connectivity: Built into health endpoint
-- Docker container status: `make status`
 
 ### Logs
 ```bash
-# API logs
-make logs
-
 # Docker logs
 docker logs celuma-backend-api-1
+
+# Or via docker compose
+docker compose logs -f api
 ```
 
 ## 🤝 Contributing
@@ -442,8 +431,8 @@ docker logs celuma-backend-api-1
 ## 🆘 Support
 
 For issues and questions:
-- Check the [documentation](tests/TESTING_README.md)
 - Review [API examples](API_EXAMPLES.md)
+- Check the [API reference](API_ENDPOINTS.md)
 - Open an issue in the repository
 
 ---
