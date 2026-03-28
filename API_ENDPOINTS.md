@@ -116,7 +116,7 @@ Response body:
 
 **Notes:**
 - The operation is atomic. If any step fails, nothing is created.
-- The created user has role "admin" and is linked to the created branch.
+- The created user is automatically assigned both `admin` and `superuser` roles (the first registered user of a tenant becomes the superadmin).
 - `branch.code` must be unique per tenant.
 
 ### POST /api/v1/auth/login
@@ -274,7 +274,15 @@ Response body:
   "email": "user@example.com",
   "username": "johndoe",
   "full_name": "John Doe",
-  "role": "admin",
+  "roles": ["admin", "superuser"],
+  "permissions": [
+    "admin:manage_users",
+    "admin:manage_branches",
+    "admin:manage_catalog",
+    "admin:manage_tenant",
+    "admin:manage_invitations",
+    "lab:read"
+  ],
   "tenant_id": "tenant-uuid-here",
   "branch_ids": [
     "branch-uuid-1",
@@ -285,6 +293,8 @@ Response body:
 
 **Notes:**
 - `username` field will be `null` if the user doesn't have a username set
+- `roles` is an array of role codes assigned to the user
+- `permissions` is the effective union of all permissions from all assigned roles
 - All other user information is always included
 
 ### PUT /api/v1/auth/me
@@ -310,7 +320,8 @@ Response body:
   "email": "new.email@example.com",
   "username": "new-username",
   "full_name": "New Name",
-  "role": "admin",
+  "roles": ["admin"],
+  "permissions": ["admin:manage_users", "lab:read"],
   "tenant_id": "tenant-uuid-here",
   "branch_ids": [
     "branch-uuid-1"
@@ -322,6 +333,7 @@ Response body:
 - To change the password, you must provide both `current_password` and `new_password`. The current password must match the existing one.
 - `username` and `email` must be unique within the tenant.
 - All fields are optional; only the provided fields will be updated.
+- This endpoint does **not** modify roles. Use `PUT /api/v1/rbac/users/{user_id}/roles` to change roles.
 
 ## 👤 User Management
 
@@ -330,7 +342,7 @@ Headers: `Authorization: Bearer <token>`
 **Note:** All user management endpoints require Admin role unless otherwise specified.
 
 ### GET /api/v1/users/
-**List all users in the tenant (Admin only)**
+**List all users in the tenant (requires `admin:manage_users`)**
 
 **Response:**
 ```json
@@ -342,7 +354,7 @@ Headers: `Authorization: Bearer <token>`
       "email": "user@example.com",
       "username": "johndoe",
       "full_name": "John Doe",
-      "role": "lab_tech",
+      "roles": ["lab_tech"],
       "is_active": true,
       "created_at": "2025-01-15T10:00:00Z",
       "branch_ids": [
@@ -354,7 +366,7 @@ Headers: `Authorization: Bearer <token>`
 ```
 
 ### POST /api/v1/users/
-**Create a new user (Admin only)**
+**Create a new user (requires `admin:manage_users`)**
 
 **Request Body:**
 ```json
@@ -378,7 +390,7 @@ Headers: `Authorization: Bearer <token>`
   "email": "newuser@example.com",
   "username": "newuser",
   "full_name": "New User",
-  "role": "lab_tech",
+  "roles": ["lab_tech"],
   "is_active": true,
   "created_at": "2025-01-15T10:00:00Z",
   "branch_ids": [
@@ -391,12 +403,13 @@ Headers: `Authorization: Bearer <token>`
 - Email must be unique within the tenant
 - Username is optional but must be unique if provided
 - Password must meet security requirements
-- Role must be one of: `admin`, `pathologist`, `lab_tech`, `assistant`, `billing`, `viewer`
+- `role` must be one of the system role codes: `admin`, `pathologist`, `lab_tech`, `assistant`, `billing`, `viewer`, `physician`, `auditor` (only a superuser can assign `superuser`)
 - `branch_ids` is optional. If provided, user is assigned to these branches.
-- If role is `admin`, `branch_ids` are ignored as admins have implicit access to all branches.
+- If role is `admin` or `superuser`, `branch_ids` are ignored — these roles have implicit access to all branches.
+- The response `roles` field is an array. Use `PUT /api/v1/rbac/users/{id}/roles` to assign multiple roles after creation.
 
 ### PUT /api/v1/users/{user_id}
-**Update a user (Admin only)**
+**Update a user profile (requires `admin:manage_users`)**
 
 **Request Body:**
 ```json
@@ -404,7 +417,6 @@ Headers: `Authorization: Bearer <token>`
   "email": "updated@example.com",
   "username": "updateduser",
   "full_name": "Updated Name",
-  "role": "pathologist",
   "is_active": true,
   "password": "NewSecurePassword123!",
   "branch_ids": [
@@ -422,7 +434,7 @@ Headers: `Authorization: Bearer <token>`
   "email": "updated@example.com",
   "username": "updateduser",
   "full_name": "Updated Name",
-  "role": "pathologist",
+  "roles": ["pathologist"],
   "is_active": true,
   "created_at": "2025-01-15T10:00:00Z",
   "branch_ids": [
@@ -437,7 +449,7 @@ Headers: `Authorization: Bearer <token>`
 - Admins can set a new `password` for the user (to reset it)
 - User cannot update their own account via this endpoint (use PUT /api/v1/auth/me)
 - `branch_ids` replaces the existing branch assignments. Send empty list to remove all.
-- If user is `admin` (or updated to `admin`), they will have implicit access to all branches.
+- **Roles are NOT managed through this endpoint.** Use `PUT /api/v1/rbac/users/{id}/roles` for role changes.
 - **Safety:** Cannot deactivate or remove the last active administrator of the tenant.
 
 ### DELETE /api/v1/users/{user_id}
@@ -570,6 +582,97 @@ Headers: `Authorization: Bearer <token>`
 - Admins can upload avatars for any user
 - Only image files are accepted (JPEG, PNG, WEBP)
 - Avatar is stored in S3 and URL is saved to user profile
+
+## 🔑 RBAC Management
+
+Headers: `Authorization: Bearer <token>`
+
+Endpoints for querying the permission catalog and managing user roles.
+
+### GET /api/v1/rbac/permissions
+**List full permission catalog (any authenticated user)**
+
+**Response:**
+```json
+[
+  { "code": "lab:read",          "domain": "lab",     "display_name": "Lectura de laboratorio",  "description": "..." },
+  { "code": "reports:sign",      "domain": "reports", "display_name": "Firma de reportes",       "description": "..." },
+  { "code": "admin:manage_users","domain": "admin",   "display_name": "Gestión de usuarios",     "description": "..." }
+]
+```
+
+### GET /api/v1/rbac/roles
+**List system roles with their permissions (any authenticated user)**
+
+**Response:**
+```json
+[
+  {
+    "code": "admin",
+    "name": "Administrador",
+    "description": "...",
+    "is_system": true,
+    "is_protected": true,
+    "permissions": ["admin:manage_users", "admin:manage_branches", "lab:read", "..."]
+  },
+  {
+    "code": "pathologist",
+    "name": "Patólogo",
+    "description": "...",
+    "is_system": true,
+    "is_protected": true,
+    "permissions": ["lab:read", "reports:read", "reports:create", "reports:sign", "..."]
+  }
+]
+```
+
+**Notes:**
+- Returns all global system roles plus any tenant-scoped custom roles for the authenticated tenant
+- The `superuser` role is included; client UIs should hide it from assignment unless the actor is a superuser
+
+### GET /api/v1/rbac/users/{user_id}/roles
+**Get roles and effective permissions for a user**
+
+**Notes:**
+- Any user may query their own profile (`user_id == actor.id`)
+- Querying another user requires `admin:manage_users`
+
+**Response:**
+```json
+{
+  "user_id": "user-uuid",
+  "roles": ["admin", "superuser"],
+  "permissions": ["admin:manage_users", "admin:manage_branches", "lab:read", "..."]
+}
+```
+
+### PUT /api/v1/rbac/users/{user_id}/roles
+**Replace all roles assigned to a user (requires `admin:manage_users`)**
+
+**Request Body:**
+```json
+{
+  "roles": ["pathologist", "lab_tech"]
+}
+```
+
+**Response:**
+```json
+{
+  "user_id": "user-uuid",
+  "roles": ["pathologist", "lab_tech"],
+  "permissions": ["lab:read", "reports:read", "reports:create", "reports:sign", "..."]
+}
+```
+
+**Notes:**
+- Completely replaces the user's current role set
+- At least one role must be provided (empty array → 400)
+- Only a superuser can assign or remove the `superuser` role (non-superuser → 403)
+- Cannot remove the last active admin/superuser of the tenant (→ 400)
+- Returns the updated effective permissions after replacement
+
+---
 
 ## 🏢 Tenant Management
 
@@ -3387,10 +3490,10 @@ All entities include these common fields:
 
 ### Status Enums
 - **Order Status**: `RECEIVED`, `PROCESSING`, `DIAGNOSIS`, `REVIEW`, `RELEASED`, `CLOSED`, `CANCELLED`
-- **Sample State**: uses Order Status values for lifecycle: `RECEIVED`, `PROCESSING`, `DIAGNOSIS`, `REVIEW`, `RELEASED`, `CLOSED`, `CANCELLED`
+- **Sample State**: `RECEIVED`, `PROCESSING`, `READY`, `DAMAGED`, `CANCELLED`
 - **Report Status**: `DRAFT`, `IN_REVIEW`, `APPROVED`, `PUBLISHED`, `RETRACTED`
 - **Invoice Status**: `PENDING`, `PAID`, `FAILED`, `REFUNDED`, `PARTIAL`
-- **User Role**: `admin`, `pathologist`, `lab_tech`, `assistant`, `billing`, `viewer`
+- **User Roles (RBAC)**: Stored as rows in the `role` table — see `GET /api/v1/rbac/roles` for the full catalog. System role codes: `superuser`, `admin`, `pathologist`, `lab_tech`, `billing`, `assistant`, `viewer`, `physician`, `auditor`
 
 ## 🔐 Authentication
 

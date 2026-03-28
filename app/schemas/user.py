@@ -63,7 +63,7 @@ class UserDetailResponse(BaseModel):
     email: str
     username: Optional[str] = None
     full_name: str
-    role: str
+    roles: List[str] = []
     is_active: bool
     created_at: datetime
     branch_ids: List[str] = []

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select, Session
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
+from app.core.rbac import has_permission
 from app.models.report_section import ReportSection
 from app.models.user import AppUser
 from app.schemas.report_section import (
@@ -22,8 +23,11 @@ router = APIRouter(prefix="/report-sections")
 def list_report_sections(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """List all report sections for the tenant"""
+    """List all report sections (requires reports:read)."""
+    if not has_permission(user.id, "reports:read", session):
+        raise HTTPException(403, "Permission required: reports:read")
     query = select(ReportSection).where(ReportSection.tenant_id == ctx.tenant_id)
     
     report_sections = session.exec(query).all()
@@ -50,8 +54,11 @@ def get_report_section(
     report_section_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get a specific report section by ID"""
+    """Get a specific report section by ID (requires reports:read)."""
+    if not has_permission(user.id, "reports:read", session):
+        raise HTTPException(403, "Permission required: reports:read")
     report_section = session.get(ReportSection, report_section_id)
     if not report_section:
         raise HTTPException(404, "Report section not found")
@@ -77,7 +84,9 @@ def create_report_section(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Create a new report section"""
+    """Create a new report section (requires reports:manage_templates)."""
+    if not has_permission(user.id, "reports:manage_templates", session):
+        raise HTTPException(403, "Permission required: reports:manage_templates")
     report_section = ReportSection(
         tenant_id=ctx.tenant_id,
         created_by=user.id,
@@ -118,7 +127,9 @@ def update_report_section(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update an existing report section"""
+    """Update an existing report section (requires reports:manage_templates)."""
+    if not has_permission(user.id, "reports:manage_templates", session):
+        raise HTTPException(403, "Permission required: reports:manage_templates")
     report_section = session.get(ReportSection, report_section_id)
     if not report_section:
         raise HTTPException(404, "Report section not found")
@@ -165,7 +176,9 @@ def delete_report_section(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Delete a report section (hard delete)"""
+    """Delete a report section (requires reports:manage_templates)."""
+    if not has_permission(user.id, "reports:manage_templates", session):
+        raise HTTPException(403, "Permission required: reports:manage_templates")
     report_section = session.get(ReportSection, report_section_id)
     if not report_section:
         raise HTTPException(404, "Report section not found")

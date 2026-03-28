@@ -229,6 +229,8 @@ class SampleResponse(BaseModel):
     order_id: str
     tenant_id: str
     branch_id: str
+    collected_at: Optional[datetime] = None
+    received_at: Optional[datetime] = None
     assignees: Optional[List[UserRef]] = None
     labels: Optional[List[LabelWithInheritance]] = None
 

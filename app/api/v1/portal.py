@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import select, Session
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
+from app.core.rbac import has_permission
 from app.models.laboratory import Order
 from app.models.patient import Patient
 from app.models.report import Report, ReportVersion
@@ -40,7 +41,9 @@ def list_physician_orders(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """List orders for the authenticated physician"""
+    """List orders for the authenticated physician (requires portal:physician_access)."""
+    if not has_permission(user.id, "portal:physician_access", session):
+        raise HTTPException(403, "Permission required: portal:physician_access")
     # Get orders where user's email matches requested_by
     orders = session.exec(
         select(Order).where(
@@ -81,7 +84,9 @@ def get_physician_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Get report for a specific order (physician must be the requesting physician)"""
+    """Get report for a specific order (requires portal:physician_access)."""
+    if not has_permission(user.id, "portal:physician_access", session):
+        raise HTTPException(403, "Permission required: portal:physician_access")
     order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")

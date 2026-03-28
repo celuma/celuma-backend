@@ -7,9 +7,14 @@ from app.core.db import get_session
 from app.models.user import AppUser, BlacklistedToken, UserBranch
 from app.models.tenant import Tenant, Branch
 from app.models.invitation import PasswordResetToken
-from app.models.enums import UserRole
 from app.core.security import hash_password, verify_password, create_jwt, decode_jwt
 from app.core.config import settings
+from app.core.rbac import (
+    get_user_permissions,
+    get_user_roles,
+    assign_role_by_code,
+    user_has_full_branch_access,
+)
 from app.services.email import EmailService
 from datetime import timedelta
 import secrets
@@ -74,26 +79,31 @@ def register(user_data: UserRegister, session: Session = Depends(get_session)):
     
     first_name, last_name = split_full_name(user_data.full_name)
     u = AppUser(
-        email=user_data.email, 
+        email=user_data.email,
         username=user_data.username,
         full_name=user_data.full_name,
         first_name=first_name,
         last_name=last_name,
-        role=user_data.role, 
-        tenant_id=user_data.tenant_id, 
-        hashed_password=hash_password(user_data.password)
+        tenant_id=user_data.tenant_id,
+        hashed_password=hash_password(user_data.password),
     )
     session.add(u)
+    session.flush()
+    # Assign the requested role (validated against catalog)
+    try:
+        assign_role_by_code(u.id, user_data.role, session)
+    except ValueError:
+        raise HTTPException(400, f"Unknown role: {user_data.role}")
     session.commit()
     session.refresh(u)
     logger.info("User registered successfully", extra={"event": "auth.register.success", "user_id": str(u.id), "email": u.email, "tenant_id": str(u.tenant_id)})
     return UserResponse(
-        id=str(u.id), 
-        email=u.email, 
+        id=str(u.id),
+        email=u.email,
         username=u.username,
-        full_name=u.full_name, 
-        role=u.role,
-        branch_ids=[]
+        full_name=u.full_name,
+        roles=get_user_roles(u.id, session),
+        branch_ids=[],
     )
 
 def current_user(request: Request, token=Depends(scheme), session: Session = Depends(get_session)):
@@ -253,31 +263,32 @@ def logout(token: str = Depends(scheme), session: Session = Depends(get_session)
 
 @router.get("/me", response_model=UserProfile)
 def me(request: Request, user: AppUser = Depends(current_user), session: Session = Depends(get_session)):
-    """Get current user profile"""
+    """Get current user profile with effective roles and permissions."""
     request_id = getattr(request.state, "request_id", "unknown")[:8]
     logger.info(f"🔍 [{request_id}] GET /auth/me called for user ID: {user.id}")
-    logger.info(f"👤 [{request_id}] User details: email={user.email}, username={user.username}, role={user.role}")
-    
-    branch_ids = []
-    if user.role == UserRole.ADMIN:
-        # Admins have implicit access to all branches in the tenant
+
+    roles = get_user_roles(user.id, session)
+    permissions = sorted(get_user_permissions(user.id, session))
+
+    if user_has_full_branch_access(user.id, session):
         branches = session.exec(select(Branch.id).where(Branch.tenant_id == user.tenant_id)).all()
         branch_ids = [str(bid) for bid in branches]
     else:
         branch_ids = [str(ub.branch_id) for ub in user.branches]
 
+    logger.info(f"👤 [{request_id}] User details: email={user.email}, roles={roles}")
     profile = UserProfile(
-        id=str(user.id), 
-        email=user.email, 
+        id=str(user.id),
+        email=user.email,
         username=user.username,
-        full_name=user.full_name, 
-        role=user.role, 
+        full_name=user.full_name,
+        roles=roles,
+        permissions=permissions,
         tenant_id=str(user.tenant_id),
         branch_ids=branch_ids,
-        avatar_url=user.avatar_url
+        avatar_url=user.avatar_url,
     )
-    
-    logger.info(f"📤 [{request_id}] Returning profile: {profile.dict()}")
+    logger.info(f"📤 [{request_id}] Returning profile for {user.email}")
     return profile
 
 @router.put("/me", response_model=UserProfile)
@@ -334,8 +345,10 @@ def update_me(
     session.commit()
     session.refresh(user)
 
-    branch_ids = []
-    if user.role == UserRole.ADMIN:
+    roles = get_user_roles(user.id, session)
+    permissions = sorted(get_user_permissions(user.id, session))
+
+    if user_has_full_branch_access(user.id, session):
         branches = session.exec(select(Branch.id).where(Branch.tenant_id == user.tenant_id)).all()
         branch_ids = [str(bid) for bid in branches]
     else:
@@ -346,13 +359,13 @@ def update_me(
         email=user.email,
         username=user.username,
         full_name=user.full_name,
-        role=user.role,
+        roles=roles,
+        permissions=permissions,
         tenant_id=str(user.tenant_id),
         branch_ids=branch_ids,
         avatar_url=user.avatar_url,
     )
-    
-    logger.info(f"✅ [{request_id}] Profile updated successfully: {updated_profile.dict()}")
+    logger.info(f"✅ [{request_id}] Profile updated successfully for {user.email}")
     return updated_profile
 
 
@@ -432,11 +445,13 @@ def unified_registration(payload: RegistrationRequest, session: Session = Depend
                 full_name=payload.admin_user.full_name,
                 first_name=first_name,
                 last_name=last_name,
-                role=UserRole.ADMIN,
                 hashed_password=hash_password(payload.admin_user.password),
             )
             session.add(user)
             session.flush()
+            # Assign the admin role (and superuser role) via RBAC
+            assign_role_by_code(user.id, "admin", session)
+            assign_role_by_code(user.id, "superuser", session)
             logger.info("Admin user created", extra={"event": "auth.register_unified.user_created", "user_id": str(user.id), "tenant_id": str(tenant.id)})
 
             # 4) Associate user with branch

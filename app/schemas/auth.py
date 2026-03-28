@@ -36,7 +36,7 @@ class UserResponse(BaseModel):
     email: str
     username: Optional[str] = None
     full_name: str
-    role: str
+    roles: List[str] = []
     branch_ids: List[str] = []
 
 class LoginResponse(BaseModel):
@@ -66,7 +66,8 @@ class UserProfile(BaseModel):
     email: str
     username: Optional[str] = None
     full_name: str
-    role: str
+    roles: List[str] = []
+    permissions: List[str] = []
     tenant_id: str
     branch_ids: List[str] = []
     avatar_url: Optional[str] = None

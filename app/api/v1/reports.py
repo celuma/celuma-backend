@@ -10,7 +10,8 @@ from app.models.patient import Patient
 from app.models.storage import StorageObject
 from app.models.user import AppUser
 from app.models.audit import AuditLog
-from app.models.enums import ReportStatus, UserRole, AssignmentItemType, ReviewStatus
+from app.models.enums import ReportStatus, AssignmentItemType, ReviewStatus
+from app.core.rbac import has_permission
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
 from app.services.s3 import S3Service
@@ -44,6 +45,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reports")
 
+
+def _require(user_id, code: str, session: Session) -> None:
+    """Raise 403 if user lacks the specified permission."""
+    if not has_permission(user_id, code, session):
+        raise HTTPException(403, f"Permission required: {code}")
+
+
 # Deferred imports to avoid circular module-load (laboratory <-> reports)
 def update_order_status_for_report(order_id: str, session: Session) -> None:
     """Wrapper to update order status after report changes"""
@@ -61,8 +69,10 @@ def _build_order_full_detail(order_id: str, session: Session, ctx: AuthContext):
 def list_reports(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """List all reports with enriched branch, order, and patient info"""
+    """List all reports (requires reports:read)."""
+    _require(user.id, "reports:read", session)
     reports = session.exec(select(Report).where(Report.tenant_id == ctx.tenant_id)).all()
     results: list[ReportListItem] = []
     
@@ -141,11 +151,13 @@ def list_reports(
 
 @router.post("/", response_model=ReportResponse)
 def create_report(
-    report_data: ReportCreate, 
+    report_data: ReportCreate,
     session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx)
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Create a new report"""
+    """Create a new report (requires reports:create)."""
+    _require(user.id, "reports:create", session)
     # Verify that the report's tenant_id matches the authenticated user's tenant_id
     if report_data.tenant_id != ctx.tenant_id:
         raise HTTPException(403, "Cannot create reports for a different tenant")
@@ -287,21 +299,24 @@ def create_report(
 
 @router.post("/{report_id}/new_version", response_model=ReportVersionResponse)
 def create_report_new_version(
-    report_id: str, 
-    report_data: ReportCreate, 
+    report_id: str,
+    report_data: ReportCreate,
     session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx)
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Create a new report version for an existing report.
+    """Create a new report version for an existing report (requires reports:edit).
 
     - Increments version_no based on current version
     - Marks old current version as not current
     - Uploads provided JSON body to S3 and links it
     """
+    _require(user.id, "reports:edit", session)
+
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
-    
+
     # Verify report belongs to the authenticated user's tenant
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
@@ -400,9 +415,8 @@ def get_pathologist_worklist(
     user: AppUser = Depends(current_user),
     branch_id: str = None,
 ):
-    """Get worklist of reports in review for pathologist"""
-    # This endpoint is primarily for pathologists, but we allow all users to see what's in review
-    # in case they need to check status
+    """Get worklist of reports in review (requires reports:read)."""
+    _require(user.id, "reports:read", session)
     
     # Build query for reports in IN_REVIEW status
     query = select(Report).where(
@@ -479,9 +493,11 @@ def get_pathologist_worklist(
 def list_templates(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
     active_only: bool = True,
 ):
-    """List all report templates for the tenant"""
+    """List all report templates (requires reports:read)."""
+    _require(user.id, "reports:read", session)
     query = select(ReportTemplate).where(ReportTemplate.tenant_id == ctx.tenant_id)
     
     if active_only:
@@ -509,8 +525,10 @@ def get_template(
     template_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get a specific report template by ID"""
+    """Get a specific report template by ID (requires reports:read)."""
+    _require(user.id, "reports:read", session)
     template = session.get(ReportTemplate, template_id)
     if not template:
         raise HTTPException(404, "Template not found")
@@ -537,7 +555,8 @@ def create_template(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Create a new report template"""
+    """Create a new report template (requires reports:manage_templates)."""
+    _require(user.id, "reports:manage_templates", session)
     template = ReportTemplate(
         tenant_id=ctx.tenant_id,
         name=template_data.name,
@@ -578,7 +597,8 @@ def update_template(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update an existing report template"""
+    """Update an existing report template (requires reports:manage_templates)."""
+    _require(user.id, "reports:manage_templates", session)
     template = session.get(ReportTemplate, template_id)
     if not template:
         raise HTTPException(404, "Template not found")
@@ -627,7 +647,8 @@ def delete_template(
     user: AppUser = Depends(current_user),
     hard_delete: bool = False,
 ):
-    """Delete a report template (soft delete by default, hard delete optional)"""
+    """Delete a report template (requires reports:manage_templates)."""
+    _require(user.id, "reports:manage_templates", session)
     template = session.get(ReportTemplate, template_id)
     if not template:
         raise HTTPException(404, "Template not found")
@@ -707,8 +728,10 @@ def get_report(
     report_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get report details"""
+    """Get report details (requires reports:read)."""
+    _require(user.id, "reports:read", session)
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
@@ -727,11 +750,14 @@ def get_report_full(
     report_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Return all data needed to render the report editor:
+    """Return all data needed to render the report editor (requires reports:read).
     order (with assignees, reviewers, labels), patient, samples, and full report detail
     including the template snapshot and the current version JSON from S3.
     """
+    _require(user.id, "reports:read", session)
+
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
@@ -759,8 +785,10 @@ def list_report_versions(
     report_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """List all versions for a report"""
+    """List all versions for a report (requires reports:read)."""
+    _require(user.id, "reports:read", session)
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
@@ -779,8 +807,10 @@ def get_pdf_of_latest_version(
     report_id: str,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Return a presigned URL to download the PDF for the newest report version."""
+    """Return a presigned URL to download the PDF for the newest report version (requires reports:read)."""
+    _require(user.id, "reports:read", session)
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
@@ -824,8 +854,10 @@ def get_report_version(
     version_no: int,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Get specific report version details (same shape as current detail)."""
+    """Get specific report version details (requires reports:read)."""
+    _require(user.id, "reports:read", session)
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
@@ -850,18 +882,21 @@ def upload_pdf_to_specific_version(
     version_no: int,
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx)
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Upload a PDF to a specific report version.
+    """Upload a PDF to a specific report version (requires reports:edit).
 
     - Validates report and version exist
     - Uploads PDF to S3 under a deterministic key
     - Creates a StorageObject and links it to ReportVersion.pdf_storage_id
     """
+    _require(user.id, "reports:edit", session)
+
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
-    
+
     # Verify report belongs to the authenticated user's tenant
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
@@ -925,18 +960,21 @@ def upload_pdf_to_latest_version(
     report_id: str,
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx)
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Upload a PDF to the newest version of a report.
+    """Upload a PDF to the newest version of a report (requires reports:edit).
 
     - Selects the version with the highest version_no
     - If the report has no versions, returns 404
     - Uploads PDF, creates StorageObject, and updates pdf_storage_id
     """
+    _require(user.id, "reports:edit", session)
+
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
-    
+
     # Verify report belongs to the authenticated user's tenant
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
@@ -995,12 +1033,14 @@ def upload_pdf_to_latest_version(
 
 @router.get("/{report_id}/versions/{version_no}/pdf")
 def get_pdf_of_specific_version(
-    report_id: str, 
-    version_no: int, 
+    report_id: str,
+    version_no: int,
     session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx)
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
 ):
-    """Return a presigned URL to download the PDF for a specific report version."""
+    """Return a presigned URL to download the PDF for a specific report version (requires reports:read)."""
+    _require(user.id, "reports:read", session)
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
@@ -1076,7 +1116,8 @@ def submit_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Submit a report for review (DRAFT → IN_REVIEW)"""
+    """Submit a report for review — DRAFT → IN_REVIEW (requires reports:submit)."""
+    _require(user.id, "reports:submit", session)
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
@@ -1211,8 +1252,8 @@ def approve_report(
         user_review.status = ReviewStatus.APPROVED
         user_review.decision_at = datetime.utcnow()
         session.add(user_review)
-    elif user.role not in [UserRole.PATHOLOGIST, UserRole.ADMIN]:
-        raise HTTPException(403, "Only assigned reviewers, pathologists, or admins can approve reports")
+    elif not has_permission(user.id, "reports:approve", session):
+        raise HTTPException(403, "Permission required: reports:approve")
     
     # Update report status (MVP rule: ≥1 approved = report approved)
     old_status = report.status
@@ -1334,8 +1375,8 @@ def request_changes(
         user_review.status = ReviewStatus.REJECTED
         user_review.decision_at = datetime.utcnow()
         session.add(user_review)
-    elif user.role not in [UserRole.PATHOLOGIST, UserRole.ADMIN]:
-        raise HTTPException(403, "Only assigned reviewers, pathologists, or admins can request changes")
+    elif not has_permission(user.id, "reports:approve", session):
+        raise HTTPException(403, "Permission required: reports:approve")
     
     # Update status back to DRAFT
     old_status = report.status
@@ -1420,10 +1461,9 @@ def sign_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Sign and publish a report (APPROVED → PUBLISHED) - Pathologist or Admin only"""
-    # Check user role
-    if user.role not in [UserRole.PATHOLOGIST, UserRole.ADMIN]:
-        raise HTTPException(403, "Only pathologists or admins can sign reports")
+    """Sign and publish a report (APPROVED → PUBLISHED) — requires reports:sign."""
+    if not has_permission(user.id, "reports:sign", session):
+        raise HTTPException(403, "Permission required: reports:sign")
     
     report = session.get(Report, report_id)
     if not report:
@@ -1529,10 +1569,9 @@ def retract_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Retract a published report (PUBLISHED → RETRACTED) - Pathologist or Admin only"""
-    # Check user role
-    if user.role not in [UserRole.PATHOLOGIST, UserRole.ADMIN]:
-        raise HTTPException(403, "Only pathologists or admins can retract reports")
+    """Retract a published report (PUBLISHED → RETRACTED) — requires reports:retract."""
+    if not has_permission(user.id, "reports:retract", session):
+        raise HTTPException(403, "Permission required: reports:retract")
     
     report = session.get(Report, report_id)
     if not report:
