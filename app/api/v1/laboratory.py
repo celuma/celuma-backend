@@ -958,6 +958,8 @@ def update_sample_state(
         order_id=str(sample.order_id),
         tenant_id=str(sample.tenant_id),
         branch_id=str(sample.branch_id),
+        collected_at=sample.collected_at,
+        received_at=sample.received_at,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         labels=labels_with_inheritance if labels_with_inheritance else None,
     )
@@ -1043,6 +1045,8 @@ def update_sample_notes(
         order_id=str(sample.order_id),
         tenant_id=str(sample.tenant_id),
         branch_id=str(sample.branch_id),
+        collected_at=sample.collected_at,
+        received_at=sample.received_at,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         labels=labels_with_inheritance if labels_with_inheritance else None,
     )
@@ -1155,6 +1159,8 @@ def create_sample(
         order_id=str(sample.order_id),
         tenant_id=str(sample.tenant_id),
         branch_id=str(sample.branch_id),
+        collected_at=sample.collected_at,
+        received_at=sample.received_at,
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         labels=labels_with_inheritance if labels_with_inheritance else None,
     )
@@ -1344,6 +1350,8 @@ def create_order_with_samples(
                 order_id=str(s.order_id),
                 tenant_id=str(s.tenant_id),
                 branch_id=str(s.branch_id),
+                collected_at=s.collected_at,
+                received_at=s.received_at,
                 assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
                 labels=labels_with_inheritance if labels_with_inheritance else None,
             )
@@ -1817,6 +1825,8 @@ def build_order_full_detail(
                 order_id=str(s.order_id),
                 tenant_id=str(s.tenant_id),
                 branch_id=str(s.branch_id),
+                collected_at=s.collected_at,
+                received_at=s.received_at,
                 assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in sample_assignee_users] if sample_assignee_users else None,
                 labels=sample_labels_with_inheritance if sample_labels_with_inheritance else None,
             )
