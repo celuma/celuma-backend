@@ -87,7 +87,7 @@ def create_invoice_for_order(session: Session, order: Order) -> Invoice:
         discount_total=0.0,
         tax_total=0.0,
         total=unit_price,
-        amount_total=unit_price,  # Keep for backwards compatibility
+        amount_total=unit_price,
         amount_paid=0.0,
         currency="MXN",
         status=PaymentStatus.PENDING,
@@ -293,7 +293,7 @@ def create_invoice(
         discount_total=invoice_data.discount_total,
         tax_total=invoice_data.tax_total,
         total=invoice_data.total,
-        amount_total=invoice_data.total,  # Keep for backwards compatibility
+        amount_total=invoice_data.total,
         amount_paid=0.0,
         currency=invoice_data.currency,
         issued_at=invoice_data.issued_at if invoice_data.issued_at is not None else None
@@ -471,7 +471,7 @@ def add_invoice_item(
     new_subtotal = sum(float(i.subtotal) for i in all_items)
     invoice.subtotal = new_subtotal
     invoice.total = new_subtotal + float(invoice.discount_total) + float(invoice.tax_total)
-    invoice.amount_total = invoice.total  # Keep backwards compatibility
+    invoice.amount_total = invoice.total
     invoice.updated_at = datetime.utcnow()
     session.add(invoice)
     
@@ -540,7 +540,7 @@ def update_invoice_item(
     new_subtotal = sum(float(i.subtotal) for i in all_items)
     invoice.subtotal = new_subtotal
     invoice.total = new_subtotal + float(invoice.discount_total) + float(invoice.tax_total)
-    invoice.amount_total = invoice.total  # Keep backwards compatibility
+    invoice.amount_total = invoice.total
     invoice.updated_at = datetime.utcnow()
     session.add(invoice)
     

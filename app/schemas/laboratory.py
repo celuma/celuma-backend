@@ -44,14 +44,12 @@ class OrderCreate(BaseModel):
     tenant_id: str
     branch_id: str
     patient_id: str
-    study_type_id: str  # Obligatorio
-    order_code: Optional[str] = None  # Opcional, se genera automáticamente
+    study_type_id: str
+    order_code: Optional[str] = None
     requested_by: Optional[str] = None
     notes: Optional[str] = None
     created_by: Optional[str] = None
 
-# Alias for backwards compatibility
-LabOrderCreate = OrderCreate
 
 class OrderResponse(BaseModel):
     """Schema for order response"""
@@ -62,8 +60,6 @@ class OrderResponse(BaseModel):
     tenant_id: str
     branch_id: str
 
-# Alias for backwards compatibility
-LabOrderResponse = OrderResponse
 
 class OrderDetailResponse(BaseModel):
     """Schema for detailed order response"""
@@ -82,9 +78,6 @@ class OrderDetailResponse(BaseModel):
     assignees: Optional[List[UserRef]] = None
     reviewers: Optional[List[ReviewerWithStatus]] = None
     labels: Optional[List[LabelResponse]] = None
-
-# Alias for backwards compatibility
-LabOrderDetailResponse = OrderDetailResponse
 
 
 class OrderNotesUpdate(BaseModel):
@@ -294,13 +287,13 @@ class OrderUnifiedCreate(BaseModel):
 
 class OrderUnifiedResponse(BaseModel):
     """Response for unified create, returning order and samples created."""
-    order: LabOrderResponse
+    order: OrderResponse
     samples: List[SampleResponse]
 
 
 class OrderFullDetailResponse(BaseModel):
     """Complete detail for a lab order: order, patient, and samples."""
-    order: LabOrderDetailResponse
+    order: OrderDetailResponse
     patient: PatientFullResponse
     samples: List[SampleResponse]
     report: Optional[ReportMetaResponse] = None
@@ -308,7 +301,7 @@ class OrderFullDetailResponse(BaseModel):
 
 class ReportFullDetailResponse(BaseModel):
     """Full detail for a report: order, patient, samples, and complete report data."""
-    order: LabOrderDetailResponse
+    order: OrderDetailResponse
     patient: PatientFullResponse
     samples: List[SampleResponse]
     report: ReportDetailResponse
@@ -326,7 +319,7 @@ class PatientCaseSummary(BaseModel):
 
 class PatientCaseDetail(BaseModel):
     """Detailed case info: order + samples + report meta (if any)."""
-    order: LabOrderDetailResponse
+    order: OrderDetailResponse
     samples: List[SampleResponse]
     report: Optional[ReportMetaResponse] = None
 

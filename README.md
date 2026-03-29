@@ -143,10 +143,13 @@ python3 -m pytest tests/test_rbac_phase2.py # RBAC tests only
 
 ## 🗄️ Database Management
 
+The project uses a **single baseline migration** (`v1_0_0`) that creates the complete schema.
+New features are added as additional Alembic revisions on top of this baseline.
+
 ### Automatic Migrations
-The system automatically handles database migrations on startup:
-- **Development**: `docker-compose up --build` runs migrations automatically
-- **GHCR**: `docker-compose.ghcr.yml` includes initialization service
+Migrations run automatically on startup:
+- **Development**: `docker compose up --build` runs `alembic upgrade head` via `init_db.sh`
+- **GHCR**: `docker-compose.ghcr.yml` includes the same initialization service
 - **Remote DB**: All deployment options include automatic migration execution
 
 ### Manual Migration Management
@@ -154,14 +157,21 @@ The system automatically handles database migrations on startup:
 # Check current migration status
 alembic current
 
-# Create new migration (after model changes)
-alembic revision --autogenerate -m "Description of changes"
+# Create a new migration after model changes
+alembic revision --autogenerate -m "short description"
 
-# Apply migrations manually
+# Apply all pending migrations
 alembic upgrade head
+```
 
-# Rollback to previous migration
-alembic downgrade -1
+> **Note:** `v1_0_0` is the baseline — `alembic downgrade` is not supported. To reset a local
+> database, drop and recreate it, then run `alembic upgrade head`.
+
+### Reset local database
+```bash
+# Drop and recreate (all data will be lost)
+docker compose exec db psql -U postgres -c "DROP DATABASE celumadb; CREATE DATABASE celumadb;"
+docker compose run --rm db-init
 ```
 
 ### Database Cleanup
