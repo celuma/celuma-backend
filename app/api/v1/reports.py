@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlmodel import select, Session, and_
 from sqlalchemy import cast, String
+from sqlalchemy.orm.attributes import flag_modified
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.models.report import Report, ReportVersion, ReportTemplate
@@ -613,6 +614,7 @@ def update_template(
         template.description = template_data.description
     if template_data.template_json is not None:
         template.template_json = template_data.template_json
+        flag_modified(template, "template_json")
     if template_data.is_active is not None:
         template.is_active = template_data.is_active
     
