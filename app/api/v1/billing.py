@@ -142,7 +142,12 @@ def create_invoice_for_order(session: Session, order: Order) -> Invoice:
             "total": unit_price,
         },
     )
-    
+
+    # Set billed_lock so the order cannot be released before payment
+    update_order_payment_lock(session, str(order.id))
+    from app.api.v1.laboratory import update_order_status
+    update_order_status(str(order.id), session)
+
     return invoice
 
 
@@ -300,6 +305,20 @@ def create_invoice(
     )
     
     session.add(invoice)
+    session.flush()  # Get invoice.id before updating locks
+
+    # Recalculate payment lock and order status so a manually created invoice
+    # also blocks the order from being released before payment.
+    update_order_payment_lock(session, str(invoice_data.order_id))
+    try:
+        from app.api.v1.laboratory import update_order_status
+        update_order_status(str(invoice_data.order_id), session)
+    except Exception as e:
+        logger.warning(
+            f"Could not update order status after manual invoice creation: {e}",
+            extra={"event": "order.status_update_skipped", "order_id": str(invoice_data.order_id)},
+        )
+
     session.commit()
     session.refresh(invoice)
     
