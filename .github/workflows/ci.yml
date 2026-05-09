@@ -84,6 +84,38 @@ jobs:
           echo "- ${{ steps.login-ecr.outputs.registry }}/celuma-stg/celuma-backend:stg-${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "- ${{ steps.login-ecr.outputs.registry }}/celuma-stg/celuma-backend:stg-latest" >> $GITHUB_STEP_SUMMARY
 
+  deploy-stg:
+    needs: docker-build-main
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      id-token: write   # OIDC for AWS
+      contents: read
+
+    steps:
+      - name: Configure AWS (OIDC, deploy role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::385511156241:role/GitHubActionsECSDeployRole
+          aws-region: mx-central-1
+
+      - name: Force new ECS deployment (stg)
+        run: |
+          aws ecs update-service \
+            --cluster celuma-stg \
+            --service celuma-stg-backend \
+            --force-new-deployment \
+            --no-cli-pager > /dev/null
+          echo "Triggered rolling deploy for celuma-stg-backend"
+
+      - name: Wait for service stability
+        run: |
+          aws ecs wait services-stable \
+            --cluster celuma-stg \
+            --services celuma-stg-backend
+          echo "### ✅ Backend deployed to stg (${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
+
   docker-release:
     runs-on: ubuntu-latest
     if: >
@@ -172,3 +204,37 @@ jobs:
           echo "- ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:${{ steps.release_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:latest" >> $GITHUB_STEP_SUMMARY
+
+  deploy-prod:
+    needs: docker-release
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      id-token: write   # OIDC for AWS
+      contents: read
+
+    steps:
+      - name: Configure AWS (OIDC, deploy role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::385511156241:role/GitHubActionsECSDeployRole
+          aws-region: mx-central-1
+
+      - name: Force new ECS deployment (prod)
+        run: |
+          aws ecs update-service \
+            --cluster celuma-prod \
+            --service celuma-prod-backend \
+            --force-new-deployment \
+            --no-cli-pager > /dev/null
+          echo "Triggered rolling deploy for celuma-prod-backend"
+
+      - name: Wait for service stability
+        run: |
+          aws ecs wait services-stable \
+            --cluster celuma-prod \
+            --services celuma-prod-backend
+          echo "### ✅ Backend deployed to prod (${{ github.ref_name }})" >> $GITHUB_STEP_SUMMARY
