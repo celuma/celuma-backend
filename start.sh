@@ -4,6 +4,22 @@ set -e  # Exit on any error
 
 echo "Starting Celuma Backend..."
 
+# If DATABASE_URL is not provided (e.g. on ECS, where the cluster credentials
+# arrive split across DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME), build it
+# from those parts. Local docker-compose still works because it sets
+# DATABASE_URL directly.
+if [ -z "${DATABASE_URL}" ]; then
+    if [ -n "${DB_HOST}" ] && [ -n "${DB_USER}" ] && [ -n "${DB_PASSWORD}" ]; then
+        DB_PORT="${DB_PORT:-5432}"
+        DB_NAME="${DB_NAME:-celumadb}"
+        export DATABASE_URL="postgresql+psycopg2://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+        echo "DATABASE_URL composed from DB_* environment variables"
+    else
+        echo "ERROR: DATABASE_URL is not set and DB_* variables are incomplete"
+        exit 1
+    fi
+fi
+
 # Function to check database connection
 check_db() {
     echo "Checking database connection..."
