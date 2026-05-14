@@ -609,8 +609,15 @@ def _signature_object_key(user: AppUser) -> str:
     """S3 key layout for a reviewer's signature PNG.
 
     Path is tenant-scoped so signatures are isolated per tenant in the bucket.
+    The filename includes a unix-timestamp suffix so each upload writes to a
+    new object key. This sidesteps CloudFront's default behavior of ignoring
+    query-string cache-busters: by changing the URL itself, the previous
+    cached object becomes irrelevant and the CDN immediately serves the new
+    version. The previous object is removed from S3 and from `storage_object`
+    by `_delete_existing_signature`, so no orphan files accumulate.
     """
-    return f"users/{user.tenant_id}/{user.id}/signature/sign.png"
+    import time
+    return f"users/{user.tenant_id}/{user.id}/signature/sign_{int(time.time())}.png"
 
 
 def _require_reviewer(user: AppUser, session: Session) -> None:
@@ -688,7 +695,11 @@ def upload_my_signature(
     session.commit()
     session.refresh(user)
 
-    url = s3.generate_presigned_url(key)
+    # Use the public CDN URL (same pattern as avatars/sample images) so the
+    # browser <img> can load it through CloudFront. The S3 key itself already
+    # includes a unique suffix per upload (see `_signature_object_key`), so a
+    # query-string cache-buster is not needed.
+    url = s3.object_public_url(key)
     logger.info(
         f"Signature uploaded for user {user.email}",
         extra={"event": "user.signature_uploaded", "user_id": str(user.id)},
@@ -713,7 +724,11 @@ def get_my_signature(
         raise HTTPException(404, "Signature object not found")
 
     s3 = S3Service()
-    url = s3.generate_presigned_url(storage.object_key)
+    # Match avatar/sample-image pattern: serve through the public base URL
+    # (CloudFront) so browsers can fetch it directly via <img>. The object
+    # key stored in the DB is unique per upload (see `_signature_object_key`),
+    # so CloudFront is guaranteed to fetch the latest version.
+    url = s3.object_public_url(storage.object_key)
     return SignatureResponse(url=url, has_signature=True)
 
 
