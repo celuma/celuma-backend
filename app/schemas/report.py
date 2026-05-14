@@ -2,6 +2,19 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
+
+class SignatureMetadata(BaseModel):
+    """Metadata that controls the digital signature block of a report.
+
+    Persisted inside the JSON body stored in the bucket (alongside `base` and
+    `sections`), not in columns of the `report` table. Templates carry the
+    defaults; reports can override them until publication.
+    """
+    show_signature_section: bool = False
+    require_digital_signature: bool = False
+    signature_url: Optional[str] = None
+
+
 # Import ReviewerWithStatus from worklist schema
 class ReviewerWithStatus(BaseModel):
     """User with review status"""

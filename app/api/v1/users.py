@@ -8,22 +8,29 @@ from app.core.rbac import (
     assign_role_by_code,
     replace_user_roles,
     has_permission,
+    has_any_role,
     user_has_full_branch_access,
     count_active_users_with_role,
+    ROLE_REVIEWER,
 )
 from app.models.user import AppUser, UserBranch
 from app.models.invitation import UserInvitation
 from app.models.tenant import Tenant, Branch
 from app.models.role import Role
 from app.models.user_role import UserRoleLink
+from app.models.storage import StorageObject
 from app.core.security import hash_password
 from app.core.config import settings
 from app.services.email import EmailService
+from app.services.s3 import S3Service
 from app.schemas.user import (
     UserCreateByAdmin,
     UserUpdateByAdmin,
     UserDetailResponse,
     UsersListResponse,
+    SignatureResponse,
+    ReviewerItem,
+    ReviewersListResponse,
 )
 from datetime import datetime, timedelta
 from typing import Optional
@@ -113,6 +120,55 @@ def list_users(
     ).all()
 
     return UsersListResponse(users=[_build_user_detail(u, session) for u in users])
+
+
+@router.get("/reviewers", response_model=ReviewersListResponse)
+def list_reviewers(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """List active users in the tenant that hold the 'reviewer' role.
+
+    Used by the reviewer selector in the orders UI and by the reviewer
+    management screen under settings. Available to anyone able to manage
+    reviewers or users.
+    """
+    if not (
+        has_permission(user.id, "lab:manage_reviewers", session)
+        or has_permission(user.id, "admin:manage_users", session)
+    ):
+        raise HTTPException(403, "Permission required: lab:manage_reviewers or admin:manage_users")
+
+    rows = session.exec(
+        select(AppUser)
+        .join(UserRoleLink, UserRoleLink.user_id == AppUser.id)
+        .join(Role, Role.id == UserRoleLink.role_id)
+        .where(
+            AppUser.tenant_id == ctx.tenant_id,
+            AppUser.is_active == True,  # noqa: E712
+            Role.code == ROLE_REVIEWER,
+        )
+    ).all()
+
+    seen: set[str] = set()
+    reviewers: list[ReviewerItem] = []
+    for u in rows:
+        uid = str(u.id)
+        if uid in seen:
+            continue
+        seen.add(uid)
+        reviewers.append(
+            ReviewerItem(
+                id=uid,
+                full_name=u.full_name,
+                email=u.email,
+                has_signature=u.signature_storage_id is not None,
+                avatar_url=u.avatar_url,
+            )
+        )
+
+    return ReviewersListResponse(reviewers=reviewers)
 
 
 @router.post("/", response_model=UserDetailResponse)
@@ -540,3 +596,145 @@ def upload_user_avatar(
         extra={"event": "user.avatar_uploaded", "user_id": str(target_user.id)},
     )
     return {"message": "Avatar uploaded successfully", "avatar_url": target_user.avatar_url}
+
+
+# ---------------------------------------------------------------------------
+# Digital Signature (only available to users with role 'reviewer')
+# ---------------------------------------------------------------------------
+
+_SIGNATURE_MAX_BYTES = 2 * 1024 * 1024  # 2 MB
+
+
+def _signature_object_key(user: AppUser) -> str:
+    """S3 key layout for a reviewer's signature PNG.
+
+    Path is tenant-scoped so signatures are isolated per tenant in the bucket.
+    """
+    return f"users/{user.tenant_id}/{user.id}/signature/sign.png"
+
+
+def _require_reviewer(user: AppUser, session: Session) -> None:
+    if not has_any_role(user.id, {ROLE_REVIEWER}, session):
+        raise HTTPException(403, "Only users with the 'reviewer' role can manage a digital signature")
+
+
+def _delete_existing_signature(user: AppUser, session: Session, s3: S3Service) -> None:
+    """Best-effort removal of the user's previous signature in S3 and storage_object."""
+    if user.signature_storage_id is None:
+        return
+    storage = session.get(StorageObject, user.signature_storage_id)
+    if storage is not None:
+        try:
+            s3.delete_object(storage.object_key)
+        except Exception as exc:  # noqa: BLE001 — keep DB consistent even if S3 fails
+            logger.warning(
+                "Failed to delete previous signature object from S3",
+                extra={
+                    "event": "user.signature_s3_delete_failed",
+                    "user_id": str(user.id),
+                    "object_key": storage.object_key,
+                    "error": str(exc),
+                },
+            )
+        session.delete(storage)
+    user.signature_storage_id = None
+
+
+@router.post("/me/signature", response_model=SignatureResponse)
+def upload_my_signature(
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    user: AppUser = Depends(current_user),
+):
+    """Upload (or replace) the authenticated user's digital signature PNG.
+
+    Only users with the 'reviewer' role are allowed to manage a signature.
+    """
+    _require_reviewer(user, session)
+
+    content_type = (file.content_type or "").lower()
+    if "png" not in content_type:
+        raise HTTPException(400, "Only PNG files are allowed for digital signatures")
+
+    file_bytes = file.file.read()
+    if not file_bytes:
+        raise HTTPException(400, "Uploaded file is empty")
+    if len(file_bytes) > _SIGNATURE_MAX_BYTES:
+        raise HTTPException(400, "Signature file size must be less than 2MB")
+
+    s3 = S3Service()
+    _delete_existing_signature(user, session, s3)
+    session.flush()
+
+    key = _signature_object_key(user)
+    info = s3.upload_bytes(file_bytes, key=key, content_type="image/png")
+
+    storage = StorageObject(
+        provider="aws",
+        region=s3.region,
+        bucket=info.bucket,
+        object_key=info.key,
+        version_id=info.version_id,
+        etag=info.etag,
+        content_type="image/png",
+        size_bytes=info.size_bytes,
+        created_by=user.id,
+    )
+    session.add(storage)
+    session.flush()
+
+    user.signature_storage_id = storage.id
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    url = s3.generate_presigned_url(key)
+    logger.info(
+        f"Signature uploaded for user {user.email}",
+        extra={"event": "user.signature_uploaded", "user_id": str(user.id)},
+    )
+    return SignatureResponse(url=url, has_signature=True)
+
+
+@router.get("/me/signature", response_model=SignatureResponse)
+def get_my_signature(
+    session: Session = Depends(get_session),
+    user: AppUser = Depends(current_user),
+):
+    """Return a presigned URL for the authenticated user's signature.
+
+    Available to any authenticated user (so they can preview their own signature
+    even if they currently lack the reviewer role for some other reason).
+    """
+    if user.signature_storage_id is None:
+        raise HTTPException(404, "No signature uploaded for this user")
+    storage = session.get(StorageObject, user.signature_storage_id)
+    if storage is None:
+        raise HTTPException(404, "Signature object not found")
+
+    s3 = S3Service()
+    url = s3.generate_presigned_url(storage.object_key)
+    return SignatureResponse(url=url, has_signature=True)
+
+
+@router.delete("/me/signature", status_code=204)
+def delete_my_signature(
+    session: Session = Depends(get_session),
+    user: AppUser = Depends(current_user),
+):
+    """Delete the authenticated user's signature from S3 and storage_object."""
+    _require_reviewer(user, session)
+
+    if user.signature_storage_id is None:
+        return None
+
+    s3 = S3Service()
+    _delete_existing_signature(user, session, s3)
+    session.add(user)
+    session.commit()
+
+    logger.info(
+        f"Signature deleted for user {user.email}",
+        extra={"event": "user.signature_deleted", "user_id": str(user.id)},
+    )
+    return None

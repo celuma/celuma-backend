@@ -22,6 +22,7 @@ from app.models.user import AppUser
 ROLE_SUPERUSER = "superuser"
 ROLE_ADMIN = "admin"
 ROLE_PATHOLOGIST = "pathologist"
+ROLE_REVIEWER = "reviewer"
 ROLE_LAB_TECH = "lab_tech"
 ROLE_ASSISTANT = "assistant"
 ROLE_BILLING = "billing"

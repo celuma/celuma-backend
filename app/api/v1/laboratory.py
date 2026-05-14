@@ -5,7 +5,7 @@ from sqlmodel import select, Session, and_, func
 from sqlalchemy import cast, String
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
-from app.core.rbac import has_permission
+from app.core.rbac import has_permission, get_user_roles, ROLE_REVIEWER
 from app.models.laboratory import Order, Sample, SampleImage, Label, OrderLabel, SampleLabel
 from app.models.storage import StorageObject, SampleImageRendition
 from app.models.tenant import Tenant, Branch
@@ -2546,14 +2546,19 @@ def update_order_reviewers(
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Order does not belong to your tenant")
     
-    # Validate all reviewer IDs belong to tenant
+    # Validate all reviewer IDs belong to tenant and have the 'reviewer' role
     new_reviewers = set()
     for rid in data.reviewer_ids:
         reviewer_user = session.get(AppUser, UUID(rid))
         if not reviewer_user or str(reviewer_user.tenant_id) != ctx.tenant_id:
             raise HTTPException(400, f"User {rid} not found or not in tenant")
+        if ROLE_REVIEWER not in get_user_roles(reviewer_user.id, session):
+            raise HTTPException(
+                422,
+                f"User {rid} does not have the '{ROLE_REVIEWER}' role and cannot be assigned as reviewer",
+            )
         new_reviewers.add(UUID(rid))
-    
+
     # Sync reviewers directly in report_review table
     added, removed = _sync_report_reviewers(
         session=session,

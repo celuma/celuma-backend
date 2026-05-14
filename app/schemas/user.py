@@ -72,3 +72,23 @@ class UserDetailResponse(BaseModel):
 class UsersListResponse(BaseModel):
     """Schema for users list response"""
     users: List[UserDetailResponse]
+
+
+class SignatureResponse(BaseModel):
+    """Response for current user's digital signature."""
+    url: str
+    has_signature: bool
+
+
+class ReviewerItem(BaseModel):
+    """User entry tailored for the reviewer selector / management screens."""
+    id: str
+    full_name: str
+    email: str
+    has_signature: bool
+    avatar_url: Optional[str] = None
+
+
+class ReviewersListResponse(BaseModel):
+    """Response schema for the list of users with the reviewer role."""
+    reviewers: List[ReviewerItem]
