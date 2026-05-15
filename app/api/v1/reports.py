@@ -1532,7 +1532,13 @@ def sign_report(
                         422,
                         "Cannot sign: signer's signature storage object is missing",
                     )
-                signature_url = s3.generate_presigned_url(sig_storage.object_key)
+                # Use the public CDN URL (same pattern as avatars, sample images
+                # and /users/me/signature). Presigned S3 URLs would fail in the
+                # browser when the bucket is fronted by CloudFront with public
+                # access blocked at the S3 level. The signature object key is
+                # already unique per upload (timestamp-suffixed), so no cache
+                # buster query string is needed.
+                signature_url = s3.object_public_url(sig_storage.object_key)
                 report_doc["signatureMetadata"] = {
                     **metadata_dict,
                     "show_signature_section": True,
