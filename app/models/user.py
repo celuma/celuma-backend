@@ -22,6 +22,9 @@ class AppUser(BaseModel, TimestampMixin, TenantMixin, table=True):
     hashed_password: str = Field(max_length=255)
     is_active: bool = Field(default=True)
     avatar_url: Optional[str] = Field(max_length=500, default=None)
+    signature_storage_id: Optional[UUID] = Field(
+        default=None, foreign_key="storage_object.id"
+    )
 
     # Basic relationships
     tenant: "Tenant" = Relationship(back_populates="users")

@@ -12,7 +12,7 @@ from app.models.storage import StorageObject
 from app.models.user import AppUser
 from app.models.audit import AuditLog
 from app.models.enums import ReportStatus, AssignmentItemType, ReviewStatus
-from app.core.rbac import has_permission
+from app.core.rbac import has_permission, has_any_role, ROLE_REVIEWER
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
 from app.services.s3 import S3Service
@@ -36,6 +36,7 @@ from app.schemas.report import (
     ReportTemplateResponse,
     ReportTemplateDetailResponse,
     ReportTemplatesListResponse,
+    SignatureMetadata,
 )
 from app.schemas.laboratory import ReportFullDetailResponse
 import json
@@ -1463,10 +1464,12 @@ def sign_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Sign and publish a report (APPROVED → PUBLISHED) — requires reports:sign."""
+    """Sign and publish a report (APPROVED → PUBLISHED) — requires reports:sign + 'reviewer' role."""
     if not has_permission(user.id, "reports:sign", session):
         raise HTTPException(403, "Permission required: reports:sign")
-    
+    if not has_any_role(user.id, {ROLE_REVIEWER}, session):
+        raise HTTPException(403, f"Only users with the '{ROLE_REVIEWER}' role can sign reports")
+
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
@@ -1487,7 +1490,73 @@ def sign_report(
     
     if not current_version:
         raise HTTPException(404, "No current version found for this report")
-    
+
+    # If the persisted JSON requires a digital signature, embed the signer's
+    # PNG (presigned URL) into the document under signatureMetadata before
+    # finalising the signature.
+    if current_version.json_storage_id is not None:
+        json_storage = session.get(StorageObject, current_version.json_storage_id)
+        if json_storage is not None:
+            s3 = S3Service()
+            try:
+                raw_json = s3.download_text(json_storage.object_key)
+                report_doc = json.loads(raw_json)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Failed to load report JSON from S3 while signing",
+                    extra={
+                        "event": "report.sign_json_load_failed",
+                        "report_id": report_id,
+                        "object_key": json_storage.object_key,
+                        "error": str(exc),
+                    },
+                )
+                raise HTTPException(500, "Failed to load report content for signing")
+
+            metadata_dict = report_doc.get("signatureMetadata") or {}
+            try:
+                signature_meta = SignatureMetadata.model_validate(metadata_dict)
+            except Exception:
+                # Tolerate legacy or malformed metadata: fall back to defaults.
+                signature_meta = SignatureMetadata()
+
+            if signature_meta.require_digital_signature:
+                if user.signature_storage_id is None:
+                    raise HTTPException(
+                        422,
+                        "Cannot sign: the report requires a digital signature image but the signer has no signature uploaded",
+                    )
+                sig_storage = session.get(StorageObject, user.signature_storage_id)
+                if sig_storage is None:
+                    raise HTTPException(
+                        422,
+                        "Cannot sign: signer's signature storage object is missing",
+                    )
+                # Use the public CDN URL (same pattern as avatars, sample images
+                # and /users/me/signature). Presigned S3 URLs would fail in the
+                # browser when the bucket is fronted by CloudFront with public
+                # access blocked at the S3 level. The signature object key is
+                # already unique per upload (timestamp-suffixed), so no cache
+                # buster query string is needed.
+                signature_url = s3.object_public_url(sig_storage.object_key)
+                report_doc["signatureMetadata"] = {
+                    **metadata_dict,
+                    "show_signature_section": True,
+                    "require_digital_signature": True,
+                    "signature_url": signature_url,
+                }
+
+                updated_bytes = json.dumps(report_doc, ensure_ascii=False).encode("utf-8")
+                info = s3.upload_bytes(
+                    updated_bytes,
+                    key=json_storage.object_key,
+                    content_type="application/json",
+                )
+                json_storage.etag = info.etag
+                json_storage.size_bytes = info.size_bytes
+                json_storage.version_id = info.version_id
+                session.add(json_storage)
+
     # Update version with signature
     current_version.signed_by = user.id
     current_version.signed_at = datetime.utcnow()

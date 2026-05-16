@@ -113,4 +113,8 @@ class S3Service:
     def download_text(self, key: str, encoding: str = "utf-8") -> str:
         return self.download_bytes(key).decode(encoding)
 
+    def delete_object(self, key: str) -> None:
+        """Delete an object from the configured bucket. No-op if it does not exist."""
+        self._client.delete_object(Bucket=self.bucket, Key=key)
+
 

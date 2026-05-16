@@ -62,14 +62,19 @@ if [ $attempt -gt $max_attempts ]; then
     exit 1
 fi
 
-# Run migrations
-echo "Running database migrations..."
-if alembic upgrade head; then
-    echo "Migrations completed successfully!"
+# Run migrations (only if not already at head)
+echo "Checking migration status..."
+if alembic current 2>/dev/null | grep -q "(head)"; then
+    echo "Database is already up to date, skipping migrations."
 else
-    echo "ERROR: Migrations failed!"
-    echo "You can run migrations manually with: alembic upgrade head"
-    echo "Continuing anyway..."
+    echo "Running database migrations..."
+    if alembic upgrade head; then
+        echo "Migrations completed successfully!"
+    else
+        echo "ERROR: Migrations failed!"
+        echo "You can run migrations manually with: alembic upgrade head"
+        exit 1
+    fi
 fi
 
 # Start the application
