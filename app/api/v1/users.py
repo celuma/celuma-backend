@@ -613,8 +613,8 @@ def _signature_object_key(user: AppUser) -> str:
     new object key. This sidesteps CloudFront's default behavior of ignoring
     query-string cache-busters: by changing the URL itself, the previous
     cached object becomes irrelevant and the CDN immediately serves the new
-    version. The previous object is removed from S3 and from `storage_object`
-    by `_delete_existing_signature`, so no orphan files accumulate.
+    version. DB rows are replaced on upload via `_delete_existing_signature`;
+    PNG objects intentionally remain in S3 so historically embedded CDN URLs keep working.
     """
     import time
     return f"users/{user.tenant_id}/{user.id}/signature/sign_{int(time.time())}.png"
@@ -625,24 +625,20 @@ def _require_reviewer(user: AppUser, session: Session) -> None:
         raise HTTPException(403, "Only users with the 'reviewer' role can manage a digital signature")
 
 
-def _delete_existing_signature(user: AppUser, session: Session, s3: S3Service) -> None:
-    """Best-effort removal of the user's previous signature in S3 and storage_object."""
+def _delete_existing_signature(user: AppUser, session: Session, _s3: S3Service) -> None:
+    """Detach the user's current signature StorageObject row and FK.
+
+    Does not delete the PNG from S3: report JSON snapshots embed ``signature_url``
+    pointing at those keys; deleting the object would break already-signed reports.
+    Older PNGs under ``users/<tenant>/<user>/signature/`` may accumulate unless a bucket
+    lifecycle rule is configured.
+
+    `_s3` is kept so callers stay unchanged even though soft-delete skips ``delete_object``.
+    """
     if user.signature_storage_id is None:
         return
     storage = session.get(StorageObject, user.signature_storage_id)
     if storage is not None:
-        try:
-            s3.delete_object(storage.object_key)
-        except Exception as exc:  # noqa: BLE001 — keep DB consistent even if S3 fails
-            logger.warning(
-                "Failed to delete previous signature object from S3",
-                extra={
-                    "event": "user.signature_s3_delete_failed",
-                    "user_id": str(user.id),
-                    "object_key": storage.object_key,
-                    "error": str(exc),
-                },
-            )
         session.delete(storage)
     user.signature_storage_id = None
 
@@ -737,7 +733,10 @@ def delete_my_signature(
     session: Session = Depends(get_session),
     user: AppUser = Depends(current_user),
 ):
-    """Delete the authenticated user's signature from S3 and storage_object."""
+    """Drop the user's current signature FK and DB StorageObject row only.
+
+    The PNG stays in S3 so previously signed reports retain a valid ``signature_url``.
+    """
     _require_reviewer(user, session)
 
     if user.signature_storage_id is None:
