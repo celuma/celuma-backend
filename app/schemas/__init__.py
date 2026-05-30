@@ -29,6 +29,14 @@ from .patient import (
     PatientDetailResponse
 )
 
+from .requesting_physician import (
+    RequestingPhysicianCreate,
+    RequestingPhysicianUpdate,
+    RequestingPhysicianResponse,
+    RequestingPhysicianDetailResponse,
+    RequestingPhysicianRef
+)
+
 from .tenant import (
     TenantCreate,
     TenantResponse,

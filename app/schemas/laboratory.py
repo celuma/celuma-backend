@@ -21,6 +21,16 @@ class ReviewerWithStatus(UserRef):
     review_id: Optional[str] = None
 
 
+class RequestingPhysicianRef(BaseModel):
+    """Minimal requesting physician reference for lists and details."""
+    id: str
+    full_name: str
+    physician_code: str
+    specialty: Optional[str] = None
+    institution: Optional[str] = None
+    email: Optional[str] = None
+
+
 # --- Label Schemas (defined early) ---
 
 class LabelResponse(BaseModel):
@@ -44,6 +54,7 @@ class OrderCreate(BaseModel):
     tenant_id: str
     branch_id: str
     patient_id: str
+    requesting_physician_id: Optional[str] = None
     study_type_id: str
     order_code: Optional[str] = None
     requested_by: Optional[str] = None
@@ -67,9 +78,11 @@ class OrderDetailResponse(BaseModel):
     order_code: str
     status: str
     patient_id: str
+    requesting_physician_id: Optional[str] = None
     tenant_id: str
     branch_id: str
     requested_by: Optional[str] = None
+    requesting_physician: Optional[RequestingPhysicianRef] = None
     notes: Optional[str] = None
     billed_lock: Optional[bool] = None
     report_id: Optional[str] = None
@@ -277,6 +290,7 @@ class OrderUnifiedCreate(BaseModel):
     tenant_id: str
     branch_id: str
     patient_id: str
+    requesting_physician_id: Optional[str] = None
     study_type_id: str  # Obligatorio
     order_code: Optional[str] = None  # Opcional, se genera automáticamente
     requested_by: Optional[str] = None
@@ -375,6 +389,7 @@ class OrderSlim(BaseModel):
     order_code: str
     status: str
     requested_by: Optional[str] = None
+    requesting_physician: Optional[RequestingPhysicianRef] = None
     patient: Optional[PatientRef] = None
 
 
@@ -386,6 +401,7 @@ class OrderListItem(BaseModel):
     tenant_id: str
     branch: BranchRef
     patient: PatientRef
+    requesting_physician: Optional[RequestingPhysicianRef] = None
     requested_by: Optional[str] = None
     notes: Optional[str] = None
     created_at: Optional[str] = None

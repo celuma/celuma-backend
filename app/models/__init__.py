@@ -8,6 +8,7 @@ from .role import Role
 from .role_permission import RolePermission
 from .user_role import UserRoleLink
 from .patient import Patient
+from .requesting_physician import RequestingPhysician
 from .storage import StorageObject, SampleImageRendition
 from .laboratory import Order, Sample, SampleImage, OrderComment, Label, OrderLabel, SampleLabel
 from .report import Report, ReportVersion, ReportTemplate
@@ -43,6 +44,7 @@ __all__ = [
     "RolePermission",
     "UserRoleLink",
     "Patient",
+    "RequestingPhysician",
     "StorageObject",
     "SampleImageRendition",
     "Order",
