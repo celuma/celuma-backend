@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlmodel import select, Session
+from sqlmodel import select, Session, func
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.core.rbac import has_permission
@@ -9,6 +9,27 @@ from app.models.user import AppUser
 from app.schemas.patient import PatientCreate, PatientResponse, PatientDetailResponse, PatientFullResponse
 
 router = APIRouter(prefix="/patients")
+
+
+def _generate_patient_code(session: Session, tenant_id: str) -> str:
+    count = session.exec(
+        select(func.count(Patient.id)).where(
+            Patient.tenant_id == tenant_id,
+        )
+    ).first() or 0
+    next_sequence = int(count) + 1
+
+    while True:
+        code = f"P-{next_sequence:04d}"
+        existing = session.exec(
+            select(Patient).where(
+                Patient.tenant_id == tenant_id,
+                Patient.patient_code == code,
+            )
+        ).first()
+        if not existing:
+            return code
+        next_sequence += 1
 
 
 @router.get("/", response_model=list[PatientFullResponse])
@@ -58,9 +79,11 @@ def create_patient(
     if not branch:
         raise HTTPException(404, "Branch not found")
 
+    patient_code = patient_data.patient_code or _generate_patient_code(session, patient_data.tenant_id)
+
     existing_patient = session.exec(
         select(Patient).where(
-            Patient.patient_code == patient_data.patient_code,
+            Patient.patient_code == patient_code,
             Patient.tenant_id == patient_data.tenant_id,
         )
     ).first()
@@ -70,7 +93,7 @@ def create_patient(
     patient = Patient(
         tenant_id=patient_data.tenant_id,
         branch_id=patient_data.branch_id,
-        patient_code=patient_data.patient_code,
+        patient_code=patient_code,
         first_name=patient_data.first_name,
         last_name=patient_data.last_name,
         dob=patient_data.dob,
