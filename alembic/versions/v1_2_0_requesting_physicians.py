@@ -1,4 +1,4 @@
-"""v1.2.0 - Requesting physicians catalog
+"""v1.2.0 - Requesting physicians catalog and optional order patient
 
 Revision ID: v1_2_0
 Revises: v1_1_0
@@ -58,9 +58,23 @@ def upgrade() -> None:
         remote_cols=["id"],
     )
     op.create_index("ix_order_requesting_physician_id", "order", ["requesting_physician_id"])
+    op.alter_column(
+        "order",
+        "patient_id",
+        existing_type=postgresql.UUID(as_uuid=True),
+        existing_nullable=False,
+        nullable=True,
+    )
 
 
 def downgrade() -> None:
+    op.alter_column(
+        "order",
+        "patient_id",
+        existing_type=postgresql.UUID(as_uuid=True),
+        existing_nullable=True,
+        nullable=False,
+    )
     op.drop_index("ix_order_requesting_physician_id", table_name="order")
     op.drop_constraint("lab_order_requesting_physician_id_fkey", "order", type_="foreignkey")
     op.drop_column("order", "requesting_physician_id")

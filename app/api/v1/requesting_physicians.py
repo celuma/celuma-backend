@@ -155,7 +155,7 @@ def list_requesting_physician_orders(
 
     for order in orders:
         branch = session.get(Branch, order.branch_id)
-        patient = session.get(Patient, order.patient_id)
+        patient = session.get(Patient, order.patient_id) if order.patient_id else None
         sample_count = len(session.exec(select(Sample).where(Sample.order_id == order.id)).all())
         has_report = order.report_id is not None
         has_invoice = order.invoice_id is not None
@@ -201,10 +201,10 @@ def list_requesting_physician_orders(
                     code=branch.code if branch else None,
                 ),
                 patient=PatientRef(
-                    id=str(order.patient_id),
-                    full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
-                    patient_code=patient.patient_code if patient else "",
-                ),
+                    id=str(patient.id),
+                    full_name=f"{patient.first_name} {patient.last_name}",
+                    patient_code=patient.patient_code,
+                ) if patient else None,
                 requesting_physician=_to_ref(physician),
                 requested_by=order.requested_by,
                 notes=order.notes,

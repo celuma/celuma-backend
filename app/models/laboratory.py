@@ -17,7 +17,7 @@ class Order(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     tenant_id: UUID = Field(foreign_key="tenant.id")
     branch_id: UUID = Field(foreign_key="branch.id")
-    patient_id: UUID = Field(foreign_key="patient.id")
+    patient_id: Optional[UUID] = Field(foreign_key="patient.id", default=None)
     requesting_physician_id: Optional[UUID] = Field(foreign_key="requesting_physician.id", default=None)
     order_code: str = Field(max_length=100)  # Visible in UI, unique per branch
     status: OrderStatus = Field(default=OrderStatus.RECEIVED)
