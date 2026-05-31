@@ -20,7 +20,7 @@ def _generate_patient_code(session: Session, tenant_id: str) -> str:
     next_sequence = int(count) + 1
 
     while True:
-        code = f"P-{next_sequence:04d}"
+        code = f"P-{next_sequence}"
         existing = session.exec(
             select(Patient).where(
                 Patient.tenant_id == tenant_id,

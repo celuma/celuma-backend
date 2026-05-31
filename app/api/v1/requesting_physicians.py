@@ -89,7 +89,7 @@ def _generate_physician_code(session: Session, tenant_id: str) -> str:
     next_sequence = int(count) + 1
 
     while True:
-        code = f"MS-{next_sequence:04d}"
+        code = f"MS-{next_sequence}"
         existing = session.exec(
             select(RequestingPhysician).where(
                 RequestingPhysician.tenant_id == tenant_id,
