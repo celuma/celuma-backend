@@ -916,12 +916,13 @@ Headers: `Authorization: Bearer <token>`
 ### POST /api/v1/patients/
 **Create a new patient**
 
+`patient_code` is optional. When omitted, the server auto-generates a unique code per tenant in the format `P-1`, `P-2`, etc.
+
 **Request Body:**
 ```json
 {
   "tenant_id": "tenant-uuid-here",
   "branch_id": "branch-uuid-here",
-  "patient_code": "P001",
   "first_name": "John",
   "last_name": "Doe",
   "dob": "1990-01-01",
@@ -931,11 +932,13 @@ Headers: `Authorization: Bearer <token>`
 }
 ```
 
+Optional field: `patient_code` (string, max 100 chars). If provided, it must be unique within the tenant.
+
 **Response:**
 ```json
 {
   "id": "patient-uuid",
-  "patient_code": "P001",
+  "patient_code": "P-1",
   "first_name": "John",
   "last_name": "Doe",
   "tenant_id": "tenant-uuid-here",

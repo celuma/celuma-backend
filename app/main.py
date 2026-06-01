@@ -15,6 +15,7 @@ from app.api.v1.auth import current_user
 from app.api.v1.tenants import router as tenants_router
 from app.api.v1.branches import router as branches_router
 from app.api.v1.patients import router as patients_router
+from app.api.v1.requesting_physicians import router as requesting_physicians_router
 from app.api.v1.laboratory import router as laboratory_router
 from app.api.v1.reports import router as reports_router
 from app.api.v1.report_sections import router as report_sections_router
@@ -249,6 +250,7 @@ app.include_router(auth_router, prefix="/api/v1")
 app.include_router(tenants_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(branches_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(patients_router, prefix="/api/v1", dependencies=[Depends(current_user)])
+app.include_router(requesting_physicians_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(laboratory_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(reports_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(report_sections_router, prefix="/api/v1", dependencies=[Depends(current_user)])

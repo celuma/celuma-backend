@@ -83,6 +83,17 @@ class TestPatientSchemas:
         assert patient.patient_code == patient_data["patient_code"]
         assert patient.first_name == patient_data["first_name"]
         assert patient.last_name == patient_data["last_name"]
+
+    def test_patient_create_without_code(self):
+        """Test creating patient without explicit patient_code"""
+        patient_data = {
+            "tenant_id": "test-tenant-id",
+            "branch_id": "test-branch-id",
+            "first_name": "John",
+            "last_name": "Doe",
+        }
+        patient = PatientCreate(**patient_data)
+        assert patient.patient_code is None
     
     def test_patient_response_serialization(self):
         """Test patient response serialization"""

@@ -21,6 +21,16 @@ class ReviewerWithStatus(UserRef):
     review_id: Optional[str] = None
 
 
+class RequestingPhysicianRef(BaseModel):
+    """Minimal requesting physician reference for lists and details."""
+    id: str
+    full_name: str
+    physician_code: str
+    specialty: Optional[str] = None
+    institution: Optional[str] = None
+    email: Optional[str] = None
+
+
 # --- Label Schemas (defined early) ---
 
 class LabelResponse(BaseModel):
@@ -43,7 +53,8 @@ class OrderCreate(BaseModel):
     """Schema for creating an order"""
     tenant_id: str
     branch_id: str
-    patient_id: str
+    patient_id: Optional[str] = None
+    requesting_physician_id: Optional[str] = None
     study_type_id: str
     order_code: Optional[str] = None
     requested_by: Optional[str] = None
@@ -56,7 +67,7 @@ class OrderResponse(BaseModel):
     id: str
     order_code: str
     status: str
-    patient_id: str
+    patient_id: Optional[str] = None
     tenant_id: str
     branch_id: str
 
@@ -66,10 +77,12 @@ class OrderDetailResponse(BaseModel):
     id: str
     order_code: str
     status: str
-    patient_id: str
+    patient_id: Optional[str] = None
+    requesting_physician_id: Optional[str] = None
     tenant_id: str
     branch_id: str
     requested_by: Optional[str] = None
+    requesting_physician: Optional[RequestingPhysicianRef] = None
     notes: Optional[str] = None
     billed_lock: Optional[bool] = None
     report_id: Optional[str] = None
@@ -276,7 +289,8 @@ class OrderUnifiedCreate(BaseModel):
     """Unified create: create lab order and one or more samples in one operation."""
     tenant_id: str
     branch_id: str
-    patient_id: str
+    patient_id: Optional[str] = None
+    requesting_physician_id: Optional[str] = None
     study_type_id: str  # Obligatorio
     order_code: Optional[str] = None  # Opcional, se genera automáticamente
     requested_by: Optional[str] = None
@@ -292,17 +306,17 @@ class OrderUnifiedResponse(BaseModel):
 
 
 class OrderFullDetailResponse(BaseModel):
-    """Complete detail for a lab order: order, patient, and samples."""
+    """Complete detail for a lab order: order, optional patient, and samples."""
     order: OrderDetailResponse
-    patient: PatientFullResponse
+    patient: Optional[PatientFullResponse] = None
     samples: List[SampleResponse]
     report: Optional[ReportMetaResponse] = None
 
 
 class ReportFullDetailResponse(BaseModel):
-    """Full detail for a report: order, patient, samples, and complete report data."""
+    """Full detail for a report: order, optional patient, samples, and complete report data."""
     order: OrderDetailResponse
-    patient: PatientFullResponse
+    patient: Optional[PatientFullResponse] = None
     samples: List[SampleResponse]
     report: ReportDetailResponse
 
@@ -338,7 +352,7 @@ class PatientOrderSummary(BaseModel):
     status: str
     tenant_id: str
     branch_id: str
-    patient_id: str
+    patient_id: Optional[str] = None
     requested_by: Optional[str] = None
     notes: Optional[str] = None
     created_at: Optional[str] = None
@@ -375,6 +389,7 @@ class OrderSlim(BaseModel):
     order_code: str
     status: str
     requested_by: Optional[str] = None
+    requesting_physician: Optional[RequestingPhysicianRef] = None
     patient: Optional[PatientRef] = None
 
 
@@ -385,7 +400,8 @@ class OrderListItem(BaseModel):
     status: str
     tenant_id: str
     branch: BranchRef
-    patient: PatientRef
+    patient: Optional[PatientRef] = None
+    requesting_physician: Optional[RequestingPhysicianRef] = None
     requested_by: Optional[str] = None
     notes: Optional[str] = None
     created_at: Optional[str] = None

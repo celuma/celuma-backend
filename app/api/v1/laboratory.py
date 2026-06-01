@@ -10,6 +10,7 @@ from app.models.laboratory import Order, Sample, SampleImage, Label, OrderLabel,
 from app.models.storage import StorageObject, SampleImageRendition
 from app.models.tenant import Tenant, Branch
 from app.models.patient import Patient
+from app.models.requesting_physician import RequestingPhysician
 from app.models.report import Report, ReportVersion
 from app.models.user import AppUser
 from app.models.events import OrderEvent
@@ -47,6 +48,7 @@ from app.schemas.laboratory import (
     OrderListItem,
     BranchRef,
     PatientRef,
+    RequestingPhysicianRef,
     SamplesListResponse,
     SampleListItem,
     SampleDetailResponse,
@@ -81,6 +83,78 @@ def _require(user_id, code: str, session: Session) -> None:
     """Raise 403 if user lacks the specified permission."""
     if not has_permission(user_id, code, session):
         raise HTTPException(403, f"Permission required: {code}")
+
+
+def _requesting_physician_ref(physician: Optional[RequestingPhysician]) -> Optional[RequestingPhysicianRef]:
+    if not physician:
+        return None
+    return RequestingPhysicianRef(
+        id=str(physician.id),
+        full_name=physician.full_name or f"{physician.first_name} {physician.last_name}".strip(),
+        physician_code=physician.physician_code,
+        specialty=physician.specialty,
+        institution=physician.institution,
+        email=physician.email,
+    )
+
+
+def _patient_ref(patient: Optional[Patient]) -> Optional[PatientRef]:
+    if not patient:
+        return None
+    return PatientRef(
+        id=str(patient.id),
+        full_name=f"{patient.first_name} {patient.last_name}",
+        patient_code=patient.patient_code,
+    )
+
+
+def _patient_full_response(patient: Optional[Patient]) -> Optional[PatientFullResponse]:
+    if not patient:
+        return None
+    return PatientFullResponse(
+        id=str(patient.id),
+        tenant_id=str(patient.tenant_id),
+        branch_id=str(patient.branch_id),
+        patient_code=patient.patient_code,
+        first_name=patient.first_name,
+        last_name=patient.last_name,
+        dob=getattr(patient, "dob", None),
+        sex=getattr(patient, "sex", None),
+        phone=getattr(patient, "phone", None),
+        email=getattr(patient, "email", None),
+    )
+
+
+def _validate_requesting_physician(
+    session: Session,
+    physician_id: Optional[str],
+    tenant_id: str,
+) -> Optional[RequestingPhysician]:
+    if not physician_id:
+        return None
+    physician = session.get(RequestingPhysician, physician_id)
+    if not physician:
+        raise HTTPException(404, "Requesting physician not found")
+    if str(physician.tenant_id) != str(tenant_id):
+        raise HTTPException(403, "Requesting physician does not belong to this tenant")
+    if not physician.is_active:
+        raise HTTPException(400, "Requesting physician is inactive")
+    return physician
+
+
+def _validate_patient(
+    session: Session,
+    patient_id: Optional[str],
+    tenant_id: str,
+) -> Optional[Patient]:
+    if not patient_id:
+        return None
+    patient = session.get(Patient, patient_id)
+    if not patient:
+        raise HTTPException(404, "Patient not found")
+    if str(patient.tenant_id) != str(tenant_id):
+        raise HTTPException(403, "Patient does not belong to this tenant")
+    return patient
 
 
 def update_order_status(order_id: str, session: Session) -> None:
@@ -182,7 +256,8 @@ def list_orders(
     for o in orders:
         # Resolve related names
         branch = session.get(Branch, o.branch_id)
-        patient = session.get(Patient, o.patient_id)
+        patient = session.get(Patient, o.patient_id) if o.patient_id else None
+        requesting_physician = session.get(RequestingPhysician, o.requesting_physician_id) if o.requesting_physician_id else None
         sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
         has_report = o.report_id is not None
         has_invoice = o.invoice_id is not None
@@ -216,11 +291,8 @@ def list_orders(
                 status=o.status,
                 tenant_id=str(o.tenant_id),
                 branch=BranchRef(id=str(o.branch_id), name=branch.name if branch else "", code=branch.code if branch else None),
-                patient=PatientRef(
-                    id=str(o.patient_id),
-                    full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
-                    patient_code=patient.patient_code if patient else "",
-                ),
+                patient=_patient_ref(patient),
+                requesting_physician=_requesting_physician_ref(requesting_physician),
                 requested_by=o.requested_by,
                 notes=o.notes,
                 created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
@@ -246,7 +318,7 @@ def create_order(
 ):
     """Create a new laboratory order (requires lab:create_order)."""
     _require(user.id, "lab:create_order", session)
-    # Verify tenant, branch, and patient exist
+    # Verify tenant, branch, patient and requesting physician exist
     tenant = session.get(Tenant, order_data.tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
@@ -255,9 +327,14 @@ def create_order(
     if not branch:
         raise HTTPException(404, "Branch not found")
     
-    patient = session.get(Patient, order_data.patient_id)
-    if not patient:
-        raise HTTPException(404, "Patient not found")
+    if not order_data.patient_id and not order_data.requesting_physician_id:
+        raise HTTPException(400, "Patient or requesting physician is required")
+    patient = _validate_patient(session, order_data.patient_id, order_data.tenant_id)
+    requesting_physician = _validate_requesting_physician(
+        session,
+        order_data.requesting_physician_id,
+        order_data.tenant_id,
+    )
     
     # Verify study_type (now required)
     from app.models.study_type import StudyType
@@ -296,8 +373,12 @@ def create_order(
         tenant_id=order_data.tenant_id,
         branch_id=order_data.branch_id,
         patient_id=order_data.patient_id,
+        requesting_physician_id=order_data.requesting_physician_id,
         order_code=order_code,
-        requested_by=order_data.requested_by,
+        requested_by=order_data.requested_by or (
+            requesting_physician.full_name or f"{requesting_physician.first_name} {requesting_physician.last_name}".strip()
+            if requesting_physician else None
+        ),
         notes=order_data.notes,
         created_by=order_data.created_by,
         study_type_id=order_data.study_type_id
@@ -323,7 +404,7 @@ def create_order(
         id=str(order.id),
         order_code=order.order_code,
         status=order.status,
-        patient_id=str(order.patient_id),
+        patient_id=str(order.patient_id) if order.patient_id else None,
         tenant_id=str(order.tenant_id),
         branch_id=str(order.branch_id)
     )
@@ -342,6 +423,7 @@ def get_order(
         raise HTTPException(404, "Order not found")
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Order not found")
+    requesting_physician = session.get(RequestingPhysician, order.requesting_physician_id) if order.requesting_physician_id else None
     
     # Get assignees from Assignment table
     assignee_users = _get_order_assignees(session, order.id, ctx.tenant_id)
@@ -359,10 +441,12 @@ def get_order(
         id=str(order.id),
         order_code=order.order_code,
         status=order.status,
-        patient_id=str(order.patient_id),
+        patient_id=str(order.patient_id) if order.patient_id else None,
+        requesting_physician_id=str(order.requesting_physician_id) if order.requesting_physician_id else None,
         tenant_id=str(order.tenant_id),
         branch_id=str(order.branch_id),
         requested_by=order.requested_by,
+        requesting_physician=_requesting_physician_ref(requesting_physician),
         notes=order.notes,
         billed_lock=order.billed_lock,
         report_id=str(order.report_id) if order.report_id else None,
@@ -434,10 +518,12 @@ def update_order_notes(
         id=str(order.id),
         order_code=order.order_code,
         status=order.status,
-        patient_id=str(order.patient_id),
+        patient_id=str(order.patient_id) if order.patient_id else None,
+        requesting_physician_id=str(order.requesting_physician_id) if order.requesting_physician_id else None,
         tenant_id=str(order.tenant_id),
         branch_id=str(order.branch_id),
         requested_by=order.requested_by,
+        requesting_physician=_requesting_physician_ref(session.get(RequestingPhysician, order.requesting_physician_id) if order.requesting_physician_id else None),
         notes=order.notes,
         billed_lock=order.billed_lock,
         report_id=str(order.report_id) if order.report_id else None,
@@ -735,7 +821,7 @@ def list_samples(
     for s in samples:
         branch = session.get(Branch, s.branch_id)
         order = session.get(Order, s.order_id)
-        patient = session.get(Patient, order.patient_id) if order else None
+        patient = session.get(Patient, order.patient_id) if order and order.patient_id else None
         
         # Get only own labels (not inherited from order)
         sample_label_ids = session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == s.id)).all()
@@ -801,7 +887,7 @@ def get_sample_detail(
 
     branch = session.get(Branch, s.branch_id)
     order = session.get(Order, s.order_id)
-    patient = session.get(Patient, order.patient_id) if order else None
+    patient = session.get(Patient, order.patient_id) if order and order.patient_id else None
 
     # Get assignees from Assignment table
     assignee_users = _get_sample_assignees(session, s.id, ctx.tenant_id)
@@ -1183,16 +1269,21 @@ def create_order_with_samples(
     _require(user.id, "lab:create_order", session)
     _require(user.id, "lab:create_sample", session)
 
-    # Validate tenant, branch, and patient
+    # Validate tenant, branch, patient and requesting physician
     tenant = session.get(Tenant, payload.tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
     branch = session.get(Branch, payload.branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
-    patient = session.get(Patient, payload.patient_id)
-    if not patient:
-        raise HTTPException(404, "Patient not found")
+    if not payload.patient_id and not payload.requesting_physician_id:
+        raise HTTPException(400, "Patient or requesting physician is required")
+    patient = _validate_patient(session, payload.patient_id, payload.tenant_id)
+    requesting_physician = _validate_requesting_physician(
+        session,
+        payload.requesting_physician_id,
+        payload.tenant_id,
+    )
 
     # Verify study_type (now required)
     from app.models.study_type import StudyType
@@ -1231,8 +1322,12 @@ def create_order_with_samples(
         tenant_id=payload.tenant_id,
         branch_id=payload.branch_id,
         patient_id=payload.patient_id,
+        requesting_physician_id=payload.requesting_physician_id,
         order_code=order_code,
-        requested_by=payload.requested_by,
+        requested_by=payload.requested_by or (
+            requesting_physician.full_name or f"{requesting_physician.first_name} {requesting_physician.last_name}".strip()
+            if requesting_physician else None
+        ),
         notes=payload.notes,
         created_by=payload.created_by,
         study_type_id=payload.study_type_id,
@@ -1362,7 +1457,7 @@ def create_order_with_samples(
             id=str(order.id),
             order_code=order.order_code,
             status=order.status,
-            patient_id=str(order.patient_id),
+            patient_id=str(order.patient_id) if order.patient_id else None,
             tenant_id=str(order.tenant_id),
             branch_id=str(order.branch_id),
         ),
@@ -1740,9 +1835,8 @@ def build_order_full_detail(
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Order not found")
 
-    patient = session.get(Patient, order.patient_id)
-    if not patient:
-        raise HTTPException(404, "Patient not found")
+    patient = session.get(Patient, order.patient_id) if order.patient_id else None
+    requesting_physician = session.get(RequestingPhysician, order.requesting_physician_id) if order.requesting_physician_id else None
 
     # Fetch samples for this order
     samples = session.exec(select(Sample).where(Sample.order_id == order.id)).all()
@@ -1763,10 +1857,12 @@ def build_order_full_detail(
         id=str(order.id),
         order_code=order.order_code,
         status=order.status,
-        patient_id=str(order.patient_id),
+        patient_id=str(order.patient_id) if order.patient_id else None,
+        requesting_physician_id=str(order.requesting_physician_id) if order.requesting_physician_id else None,
         tenant_id=str(order.tenant_id),
         branch_id=str(order.branch_id),
         requested_by=order.requested_by,
+        requesting_physician=_requesting_physician_ref(requesting_physician),
         notes=order.notes,
         billed_lock=order.billed_lock,
         report_id=str(order.report_id) if order.report_id else None,
@@ -1777,18 +1873,7 @@ def build_order_full_detail(
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
     )
 
-    patient_resp = PatientFullResponse(
-        id=str(patient.id),
-        tenant_id=str(patient.tenant_id),
-        branch_id=str(patient.branch_id),
-        patient_code=patient.patient_code,
-        first_name=patient.first_name,
-        last_name=patient.last_name,
-        dob=getattr(patient, "dob", None),
-        sex=getattr(patient, "sex", None),
-        phone=getattr(patient, "phone", None),
-        email=getattr(patient, "email", None),
-    )
+    patient_resp = _patient_full_response(patient)
 
     # Get order label IDs for inheritance check
     order_label_ids = set(label_ids)
@@ -1888,6 +1973,7 @@ def list_patient_orders(
     for o in orders:
         # Resolve related entities
         branch = session.get(Branch, o.branch_id)
+        requesting_physician = session.get(RequestingPhysician, o.requesting_physician_id) if o.requesting_physician_id else None
         sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
         has_report = o.report_id is not None
         has_invoice = o.invoice_id is not None
@@ -1926,6 +2012,7 @@ def list_patient_orders(
                     full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
                     patient_code=patient.patient_code if patient else "",
                 ),
+                requesting_physician=_requesting_physician_ref(requesting_physician),
                 requested_by=o.requested_by,
                 notes=o.notes,
                 created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
@@ -2511,7 +2598,7 @@ def update_order_assignees(
         id=str(order.id),
         order_code=order.order_code,
         status=order.status,
-        patient_id=str(order.patient_id),
+        patient_id=str(order.patient_id) if order.patient_id else None,
         tenant_id=str(order.tenant_id),
         branch_id=str(order.branch_id),
         requested_by=order.requested_by,
@@ -2619,7 +2706,7 @@ def update_order_reviewers(
         id=str(order.id),
         order_code=order.order_code,
         status=order.status,
-        patient_id=str(order.patient_id),
+        patient_id=str(order.patient_id) if order.patient_id else None,
         tenant_id=str(order.tenant_id),
         branch_id=str(order.branch_id),
         requested_by=order.requested_by,
@@ -2734,7 +2821,7 @@ def update_order_labels(
         id=str(order.id),
         order_code=order.order_code,
         status=order.status,
-        patient_id=str(order.patient_id),
+        patient_id=str(order.patient_id) if order.patient_id else None,
         tenant_id=str(order.tenant_id),
         branch_id=str(order.branch_id),
         requested_by=order.requested_by,
