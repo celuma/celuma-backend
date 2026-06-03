@@ -7,7 +7,7 @@ from app.models.tenant import Branch, Tenant
 from app.models.user import AppUser
 from app.models.user_role import UserRoleLink
 from app.models.role import Role
-from app.schemas.tenant import BranchCreate, BranchResponse, BranchDetailResponse
+from app.schemas.tenant import BranchCreate, BranchUpdate, BranchResponse, BranchDetailResponse
 
 router = APIRouter(prefix="/branches")
 
@@ -23,7 +23,7 @@ def list_branches(
         raise HTTPException(403, "Permission required: lab:read")
 
     branches = session.exec(select(Branch).where(Branch.tenant_id == ctx.tenant_id)).all()
-    return [{"id": str(b.id), "name": b.name, "code": b.code, "tenant_id": str(b.tenant_id)} for b in branches]
+    return [{"id": str(b.id), "name": b.name, "code": b.code, "tenant_id": str(b.tenant_id), "is_active": b.is_active} for b in branches]
 
 
 @router.post("/", response_model=BranchResponse)
@@ -149,3 +149,72 @@ def list_branch_users(
                 }
 
     return list(users_dict.values())
+
+
+@router.put("/{branch_id}", response_model=BranchDetailResponse)
+def update_branch(
+    branch_id: str,
+    branch_data: BranchUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update a branch (requires admin:manage_branches)."""
+    if not has_permission(user.id, "admin:manage_branches", session):
+        raise HTTPException(403, "Permission required: admin:manage_branches")
+
+    branch = session.get(Branch, branch_id)
+    if not branch:
+        raise HTTPException(404, "Branch not found")
+    if str(branch.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Branch not found")
+
+    if branch_data.code is not None:
+        existing = session.exec(
+            select(Branch).where(
+                Branch.tenant_id == branch.tenant_id,
+                Branch.code == branch_data.code,
+                Branch.id != branch.id,
+            )
+        ).first()
+        if existing:
+            raise HTTPException(400, "Branch code already exists for this tenant")
+        branch.code = branch_data.code
+
+    if branch_data.name is not None:
+        branch.name = branch_data.name
+    if branch_data.timezone is not None:
+        branch.timezone = branch_data.timezone
+    if branch_data.address_line1 is not None:
+        branch.address_line1 = branch_data.address_line1
+    if branch_data.address_line2 is not None:
+        branch.address_line2 = branch_data.address_line2
+    if branch_data.city is not None:
+        branch.city = branch_data.city
+    if branch_data.state is not None:
+        branch.state = branch_data.state
+    if branch_data.postal_code is not None:
+        branch.postal_code = branch_data.postal_code
+    if branch_data.country is not None:
+        branch.country = branch_data.country
+    if branch_data.is_active is not None:
+        branch.is_active = branch_data.is_active
+
+    session.add(branch)
+    session.commit()
+    session.refresh(branch)
+
+    return BranchDetailResponse(
+        id=str(branch.id),
+        code=branch.code,
+        name=branch.name,
+        timezone=branch.timezone,
+        address_line1=branch.address_line1,
+        address_line2=branch.address_line2,
+        city=branch.city,
+        state=branch.state,
+        postal_code=branch.postal_code,
+        country=branch.country,
+        is_active=branch.is_active,
+        tenant_id=str(branch.tenant_id),
+    )
