@@ -6,7 +6,7 @@ from app.core.rbac import has_permission
 from app.models.patient import Patient
 from app.models.tenant import Tenant, Branch
 from app.models.user import AppUser
-from app.schemas.patient import PatientCreate, PatientResponse, PatientDetailResponse, PatientFullResponse
+from app.schemas.patient import PatientCreate, PatientUpdate, PatientResponse, PatientDetailResponse, PatientFullResponse
 
 router = APIRouter(prefix="/patients")
 
@@ -71,6 +71,9 @@ def create_patient(
     if not has_permission(user.id, "lab:create_patient", session):
         raise HTTPException(403, "Permission required: lab:create_patient")
 
+    if patient_data.tenant_id != ctx.tenant_id:
+        raise HTTPException(403, "Cannot create patient for a different tenant")
+
     tenant = session.get(Tenant, patient_data.tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
@@ -78,6 +81,8 @@ def create_patient(
     branch = session.get(Branch, patient_data.branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
+    if str(branch.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Branch does not belong to the current tenant")
 
     patient_code = patient_data.patient_code or _generate_patient_code(session, patient_data.tenant_id)
 
@@ -131,6 +136,66 @@ def get_patient(
         raise HTTPException(404, "Patient not found")
     if str(patient.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Patient not found")
+
+    return PatientDetailResponse(
+        id=str(patient.id),
+        patient_code=patient.patient_code,
+        first_name=patient.first_name,
+        last_name=patient.last_name,
+        dob=patient.dob,
+        sex=patient.sex,
+        phone=patient.phone,
+        email=patient.email,
+        tenant_id=str(patient.tenant_id),
+        branch_id=str(patient.branch_id),
+    )
+
+
+@router.put("/{patient_id}", response_model=PatientDetailResponse)
+def update_patient(
+    patient_id: str,
+    patient_data: PatientUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Update a patient (requires lab:create_patient)."""
+    if not has_permission(user.id, "lab:create_patient", session):
+        raise HTTPException(403, "Permission required: lab:create_patient")
+
+    patient = session.get(Patient, patient_id)
+    if not patient:
+        raise HTTPException(404, "Patient not found")
+    if str(patient.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Patient not found")
+
+    if patient_data.branch_id is not None:
+        branch = session.get(Branch, patient_data.branch_id)
+        if not branch:
+            raise HTTPException(404, "Branch not found")
+        if str(branch.tenant_id) != ctx.tenant_id:
+            raise HTTPException(403, "Branch does not belong to the current tenant")
+        patient.branch_id = patient_data.branch_id
+
+    if patient_data.first_name is not None:
+        patient.first_name = patient_data.first_name
+    if patient_data.last_name is not None:
+        patient.last_name = patient_data.last_name
+    if patient_data.first_name is not None or patient_data.last_name is not None:
+        patient.full_name = f"{patient.first_name} {patient.last_name}".strip()
+    if patient_data.dob is not None:
+        patient.dob = patient_data.dob
+    if patient_data.sex is not None:
+        patient.sex = patient_data.sex
+    if patient_data.phone is not None:
+        patient.phone = patient_data.phone
+    # Allow explicitly clearing email by sending empty string; None means "not provided"
+    if patient_data.email is not None:
+        patient.email = str(patient_data.email)
+
+    session.add(patient)
+    session.commit()
+    session.refresh(patient)
 
     return PatientDetailResponse(
         id=str(patient.id),

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, EmailStr
 from typing import Optional
 from datetime import date
 
@@ -12,7 +12,7 @@ class PatientCreate(BaseModel):
     dob: Optional[date] = None
     sex: Optional[str] = None
     phone: Optional[str] = None
-    email: Optional[str] = None
+    email: Optional[EmailStr] = None
 
     @field_validator("patient_code")
     @classmethod
@@ -25,6 +25,17 @@ class PatientCreate(BaseModel):
         if len(value) > 100:
             raise ValueError("Patient code cannot exceed 100 characters")
         return value.upper()
+
+
+class PatientUpdate(BaseModel):
+    """Schema for updating a patient"""
+    branch_id: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    dob: Optional[date] = None
+    sex: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
 
 class PatientResponse(BaseModel):
     """Schema for patient response"""

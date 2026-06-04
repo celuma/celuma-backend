@@ -1,4 +1,4 @@
-"""v1.2.0 - Requesting physicians catalog and optional order patient
+"""v1.2.0 - Requesting physicians catalog, optional order patient, and pathologist image permissions
 
 Revision ID: v1_2_0
 Revises: v1_1_0
@@ -66,8 +66,42 @@ def upgrade() -> None:
         nullable=True,
     )
 
+    # ------------------------------------------------------------------
+    # DML: grant lab:upload_images and lab:delete_images to pathologist
+    # ------------------------------------------------------------------
+    op.execute(
+        """
+        INSERT INTO public.role_permission (role_id, permission_id)
+        SELECT r.id, p.id
+        FROM public.role r
+        CROSS JOIN public.permission p
+        WHERE r.code = 'pathologist'
+          AND p.code IN ('lab:upload_images', 'lab:delete_images')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM public.role_permission existing
+              WHERE existing.role_id = r.id
+                AND existing.permission_id = p.id
+          )
+        """
+    )
+
 
 def downgrade() -> None:
+    # ------------------------------------------------------------------
+    # DML: revoke lab:upload_images and lab:delete_images from pathologist
+    # ------------------------------------------------------------------
+    op.execute(
+        """
+        DELETE FROM public.role_permission rp
+        USING public.role r, public.permission p
+        WHERE rp.role_id = r.id
+          AND rp.permission_id = p.id
+          AND r.code = 'pathologist'
+          AND p.code IN ('lab:upload_images', 'lab:delete_images')
+        """
+    )
+
     op.alter_column(
         "order",
         "patient_id",
