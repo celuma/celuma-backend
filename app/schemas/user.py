@@ -37,12 +37,15 @@ class UserUpdateByAdmin(BaseModel):
     """Schema for admin updating a user"""
     email: Optional[str] = None
     username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    # full_name still accepted for backward compatibility; first/last take precedence.
     full_name: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
     password: Optional[str] = None
     branch_ids: Optional[List[str]] = None
-    
+
     @field_validator('username')
     @classmethod
     def validate_username(cls, v: Optional[str]) -> Optional[str]:
@@ -62,6 +65,8 @@ class UserDetailResponse(BaseModel):
     tenant_id: str
     email: str
     username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
     full_name: str
     roles: List[str] = []
     is_active: bool
