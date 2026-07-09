@@ -87,6 +87,8 @@ def _build_user_detail(u: AppUser, session: Session) -> UserDetailResponse:
         tenant_id=str(u.tenant_id),
         email=u.email,
         username=u.username,
+        first_name=u.first_name,
+        last_name=u.last_name,
         full_name=u.full_name,
         roles=get_user_roles(u.id, session),
         is_active=u.is_active,
@@ -269,7 +271,18 @@ def update_user(
         target_user.email = user_data.email
     if user_data.username is not None:
         target_user.username = user_data.username
-    if user_data.full_name is not None:
+    # Name: first/last are the source of truth; full_name is derived from them.
+    # full_name is still honored on its own for backward compatibility.
+    name_changed = False
+    if user_data.first_name is not None:
+        target_user.first_name = user_data.first_name
+        name_changed = True
+    if user_data.last_name is not None:
+        target_user.last_name = user_data.last_name
+        name_changed = True
+    if name_changed:
+        target_user.full_name = f"{target_user.first_name or ''} {target_user.last_name or ''}".strip()
+    elif user_data.full_name is not None:
         target_user.full_name = user_data.full_name
     if user_data.is_active is not None:
         target_user.is_active = user_data.is_active
