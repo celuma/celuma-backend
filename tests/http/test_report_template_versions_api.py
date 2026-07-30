@@ -127,7 +127,7 @@ class TestCreateVersion:
         tenant = create_tenant(session)
         user = create_user(session, tenant, email="admin@t1.example")
         template = _create_template(session, tenant)
-        logo = create_storage_object(session)
+        logo = create_storage_object(session, tenant=tenant)
 
         payload = valid_rendering_snapshot()
         payload["presentation"]["header"]["logo_storage_id"] = str(logo.id)
@@ -137,6 +137,43 @@ class TestCreateVersion:
             headers=auth_headers(user),
         )
         assert resp.status_code == 200, resp.text
+
+    def test_unowned_logo_reference_is_rejected(self, client, session):
+        """A StorageObject with no tenant_id (untagged — e.g. predates this
+        scoping, or belongs to an unrelated flow) must not be usable as a
+        report-template logo, same as a cross-tenant one (Historia C1)."""
+        tenant = create_tenant(session)
+        user = create_user(session, tenant, email="admin@t1.example")
+        template = _create_template(session, tenant)
+        logo = create_storage_object(session)  # no tenant -> tenant_id stays NULL
+
+        payload = valid_rendering_snapshot()
+        payload["presentation"]["header"]["logo_storage_id"] = str(logo.id)
+        resp = client.post(
+            f"/api/v1/reports/templates/{template.id}/versions",
+            json={"configuration": payload},
+            headers=auth_headers(user),
+        )
+        assert resp.status_code == 400
+
+    def test_cross_tenant_logo_reference_is_rejected(self, client, session):
+        """A StorageObject owned by a different tenant must be rejected at
+        publish time — this is the exact gap Bloque B left open (existence-only
+        check) and Bloque C closes. See report-resource-resolution-contract.md."""
+        tenant_a = create_tenant(session, name="Tenant A")
+        tenant_b = create_tenant(session, name="Tenant B")
+        user_a = create_user(session, tenant_a, email="admin@a.example")
+        template_a = _create_template(session, tenant_a)
+        logo_b = create_storage_object(session, tenant=tenant_b)
+
+        payload = valid_rendering_snapshot()
+        payload["presentation"]["header"]["logo_storage_id"] = str(logo_b.id)
+        resp = client.post(
+            f"/api/v1/reports/templates/{template_a.id}/versions",
+            json={"configuration": payload},
+            headers=auth_headers(user_a),
+        )
+        assert resp.status_code == 400
 
 
 class TestNoUpdateEndpoint:

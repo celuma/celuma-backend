@@ -38,6 +38,7 @@ from app.schemas.report import (
     ReportTemplateDetailResponse,
     ReportTemplatesListResponse,
     SignatureMetadata,
+    ReportResolvedResources,
 )
 from app.schemas.report_template_version import (
     ReportTemplateVersionCreate,
@@ -469,6 +470,71 @@ def create_report(
     )
 
 
+def _carry_forward_v2_metadata(
+    current_version: ReportVersion | None,
+    report_body: dict | None,
+    session: Session,
+) -> tuple[dict | None, int | None, str | None, str | None]:
+    """Céluma 1.3 Fase 2, Bloque C, Historia C9.
+
+    `create_report_new_version` only ever changes clinical content — it must
+    never let a content-only save silently degrade a V2 report to legacy.
+    Before this fix, neither `ReportVersion.schema_version`/
+    `template_version_id` nor the JSON body's `rendering_snapshot` were
+    carried forward onto a new content version, so saving an edit through
+    the editor (whose `buildEnvelope()` rebuilds `report` from the template
+    definition) would silently strip the snapshot and every later read would
+    resolve the report as legacy. See versioned-renderer-v2-contract.md,
+    "Continuidad del snapshot entre versiones de contenido", and
+    phase-2-block-c-architecture-decision.md.
+
+    Always re-attaches the FROZEN snapshot already stored on the current
+    version — this never re-resolves or re-validates against a live
+    ReportTemplateVersion (that would violate "no reconsultar la plantilla
+    administrativa"), and never trusts a `rendering_snapshot` the client may
+    have sent, only ever the one already persisted for this report.
+    """
+    if current_version is None or current_version.schema_version != 2:
+        return report_body, None, None, None
+
+    carried_metadata = (
+        current_version.schema_version,
+        str(current_version.template_version_id) if current_version.template_version_id else None,
+        current_version.generated_by_renderer_version,
+    )
+
+    if report_body is None:
+        return None, *carried_metadata
+
+    frozen_snapshot = None
+    if current_version.json_storage_id:
+        storage = session.get(StorageObject, current_version.json_storage_id)
+        if storage:
+            s3 = S3Service()
+            try:
+                existing = json.loads(s3.download_text(storage.object_key))
+                frozen_snapshot = existing.get("rendering_snapshot")
+            except Exception:
+                logger.warning(
+                    "Could not re-download the current V2 rendering_snapshot while "
+                    "creating a new content version; the new version's JSON body will "
+                    "be uploaded without it",
+                    extra={
+                        "event": "report.new_version_v2_snapshot_carry_forward_failed",
+                        "report_version_id": str(current_version.id),
+                    },
+                )
+                frozen_snapshot = None
+
+    if frozen_snapshot is None:
+        return report_body, *carried_metadata
+
+    carried_body = dict(report_body)
+    carried_body["schema_version"] = 2
+    carried_body["rendering_snapshot"] = frozen_snapshot
+    return carried_body, *carried_metadata
+
+
 @router.post("/{report_id}/new_version", response_model=ReportVersionResponse)
 def create_report_new_version(
     report_id: str,
@@ -508,11 +574,15 @@ def create_report_new_version(
     ).first()
     next_version_no = (current_version.version_no + 1) if current_version else 1
 
+    carried_report_body, carried_schema_version, carried_template_version_id, carried_renderer_version = (
+        _carry_forward_v2_metadata(current_version, report_data.report, session)
+    )
+
     json_storage_id = None
-    if report_data.report is not None:
+    if carried_report_body is not None:
         s3 = S3Service()
         key = f"reports/{report.tenant_id}/{report.branch_id}/{report.id}/versions/{next_version_no}/report.json"
-        data_bytes = json.dumps(report_data.report, ensure_ascii=False).encode("utf-8")
+        data_bytes = json.dumps(carried_report_body, ensure_ascii=False).encode("utf-8")
         info = s3.upload_bytes(data_bytes, key=key, content_type="application/json")
 
         storage = StorageObject(
@@ -544,6 +614,9 @@ def create_report_new_version(
         html_storage_id=None,
         authored_by=report_data.created_by,
         is_current=True,
+        schema_version=carried_schema_version,
+        template_version_id=carried_template_version_id,
+        generated_by_renderer_version=carried_renderer_version,
     )
     session.add(new_version)
     
@@ -587,6 +660,11 @@ def create_report_new_version(
         version_no=new_version.version_no,
         report_id=str(new_version.report_id),
         is_current=new_version.is_current,
+        schema_version=new_version.schema_version,
+        template_version_id=(
+            str(new_version.template_version_id) if new_version.template_version_id else None
+        ),
+        generated_by_renderer_version=new_version.generated_by_renderer_version,
     )
 
 @router.get("/worklist", response_model=ReportsListResponse)
@@ -1003,6 +1081,18 @@ def create_template_version(
         logo_object = session.get(StorageObject, logo_storage_id)
         if not logo_object:
             raise HTTPException(400, "logo_storage_id does not reference an existing object")
+        # Céluma 1.3 Fase 2, Bloque C, Historia C1: a logo referenced by a
+        # published template version must be explicitly owned by the same
+        # tenant that publishes it. `StorageObject.tenant_id` is nullable
+        # (most objects predate this scoping and are tenant-scoped
+        # indirectly through a parent entity instead), so an unscoped
+        # object is rejected here too — it was never tagged as belonging to
+        # this tenant, so it cannot be trusted as this tenant's logo. See
+        # report-resource-resolution-contract.md.
+        if str(logo_object.tenant_id) != str(template.tenant_id):
+            raise HTTPException(
+                400, "logo_storage_id does not reference an object owned by this tenant"
+            )
 
     last_version = session.exec(
         select(ReportTemplateVersion)
@@ -1146,6 +1236,51 @@ def archive_template_version(
     return _template_version_response(version)
 
 
+def _resolve_report_resources(
+    report: Report,
+    report_json: dict | None,
+    session: Session,
+) -> ReportResolvedResources | None:
+    """Céluma 1.3 Fase 2, Bloque C, Historia C1.
+
+    Resolves ephemeral, request-scoped resources referenced by a V2 report's
+    `rendering_snapshot` (currently: `presentation.header.logo_storage_id`)
+    into a downloadable URL. Never mutates `report_json` and never persists
+    anything — recomputed on every read. See
+    report-resource-resolution-contract.md for the full contract, including
+    why an unresolved/cross-tenant/missing logo falls back to `None` instead
+    of raising.
+    """
+    if not isinstance(report_json, dict):
+        return None
+    snapshot = report_json.get("rendering_snapshot")
+    if not isinstance(snapshot, dict):
+        return None
+    presentation = snapshot.get("presentation")
+    header = presentation.get("header") if isinstance(presentation, dict) else None
+    logo_storage_id = header.get("logo_storage_id") if isinstance(header, dict) else None
+    if not logo_storage_id:
+        return None
+
+    try:
+        logo_object = session.get(StorageObject, logo_storage_id)
+    except (ValueError, TypeError):
+        logo_object = None
+    if not logo_object:
+        return None
+    # Defense in depth: the object was already validated as belonging to
+    # this tenant when the ReportTemplateVersion that produced this
+    # snapshot was published (create_template_version). Re-checking here
+    # means a future bug in that check, or a historical row inserted before
+    # this validation existed, can never leak a cross-tenant logo through a
+    # report read.
+    if str(logo_object.tenant_id) != str(report.tenant_id):
+        return None
+
+    s3 = S3Service()
+    return ReportResolvedResources(header_logo_url=s3.object_public_url(logo_object.object_key))
+
+
 def _build_report_detail_response(
     report: Report,
     version: ReportVersion | None,
@@ -1186,6 +1321,7 @@ def _build_report_detail_response(
         generated_by_renderer_version=(
             version.generated_by_renderer_version if version else None
         ),
+        resolved_resources=_resolve_report_resources(report, report_json, session),
     )
 
 

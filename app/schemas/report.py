@@ -3,6 +3,8 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 
+
+
 class SignatureMetadata(BaseModel):
     """Metadata that controls the digital signature block of a report.
 
@@ -43,6 +45,19 @@ class ReportCreate(BaseModel):
     # phase-2-block-b-architecture-decision.md.
     template_version_id: Optional[str] = None
 
+class ReportResolvedResources(BaseModel):
+    """Céluma 1.3 Fase 2, Bloque C, Historia C1.
+
+    Ephemeral resources resolved server-side from a V2 report's
+    `rendering_snapshot` (e.g. `presentation.header.logo_storage_id` -> a
+    downloadable URL). Never persisted — recomputed on every read — and
+    never written back into the snapshot stored in S3. Absent/empty for
+    legacy reports and for V2 reports with nothing to resolve (e.g. no
+    logo configured). See report-resource-resolution-contract.md.
+    """
+    header_logo_url: Optional[str] = None
+
+
 class ReportResponse(BaseModel):
     """Schema for report response"""
     id: str
@@ -71,6 +86,11 @@ class ReportDetailResponse(BaseModel):
     schema_version: Optional[int] = None
     template_version_id: Optional[str] = None
     generated_by_renderer_version: Optional[str] = None
+    # Céluma 1.3 Fase 2, Bloque C: ephemeral, request-scoped resources
+    # resolved from `report.rendering_snapshot` (never part of the snapshot
+    # itself). None for legacy reports and for V2 reports with nothing to
+    # resolve.
+    resolved_resources: Optional["ReportResolvedResources"] = None
 
 class ReportVersionCreate(BaseModel):
     """Schema for creating a report version"""

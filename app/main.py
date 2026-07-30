@@ -53,9 +53,35 @@ app.add_middleware(
 )
 
 # Add CORS middleware (more secure in production)
+#
+# Céluma 1.3 Fase 2, Bloque C, Historia C11: `allow_origins` previously
+# included a literal "*" alongside explicit origins, together with
+# `allow_credentials=True`. Starlette's CORSMiddleware treats ANY "*" in the
+# list (not just an exact `["*"]`) as allow_all_origins=True, and in that
+# mode its *actual*-response headers (as opposed to preflight) always send
+# `Access-Control-Allow-Origin: *` — which is invalid combined with
+# `Access-Control-Allow-Credentials: true` per the Fetch/CORS spec. Browsers
+# silently reject that combination, so every credentialed cross-origin
+# request (`credentials: "include"`, used by login.tsx and elsewhere)
+# failed with "Failed to fetch" for any origin actually reached the backend
+# directly instead of through Vite's dev-only proxy — e.g. `vite preview`
+# (used to validate the static production build) on port 4173, or any real
+# deployment where the frontend and backend are on different origins. This
+# went unnoticed until this block because the dev server (5173) proxies
+# `/api/*` server-side, so the browser never saw it as cross-origin at all.
+# Fixed by listing only explicit origins — no bare "*" — so
+# Access-Control-Allow-Origin correctly echoes the literal requesting origin.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "*"],  # In production, specify exact origins
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        # `vite preview` (static production build validation) serves on 4173
+        # and does not go through the dev-only proxy, so it needs its own
+        # explicit CORS entry like the dev server already has.
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+    ],  # In production, list the exact deployed frontend origin(s) here too.
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],

@@ -88,7 +88,9 @@ def create_order(session: Session, tenant: Tenant, branch: Branch, *, order_code
     return order
 
 
-def create_storage_object(session: Session, *, key: str = "logos/test.png") -> StorageObject:
+def create_storage_object(
+    session: Session, *, key: str = "logos/test.png", tenant: Optional[Tenant] = None
+) -> StorageObject:
     obj = StorageObject(
         provider="aws",
         region="mx-test-1",
@@ -96,6 +98,7 @@ def create_storage_object(session: Session, *, key: str = "logos/test.png") -> S
         object_key=key,
         content_type="image/png",
         size_bytes=1234,
+        tenant_id=(tenant.id if tenant is not None else None),
     )
     session.add(obj)
     session.commit()
