@@ -41,7 +41,19 @@ class ReportVersion(BaseModel, TimestampMixin, table=True):
     is_current: bool = Field(default=False)
     signed_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
     signed_at: Optional[datetime] = Field(default=None)
-    
+
+    # Céluma 1.3 Fase 2, Bloque B: V2 report metadata. Nullable/additive —
+    # existing (legacy) rows are never backfilled. See
+    # report-schema-versioning.md and phase-2-block-b-architecture-decision.md.
+    # `rendering_snapshot` itself is NOT a column here: it is embedded in the
+    # JSON body already stored via `json_storage_id`, to avoid two sources of
+    # truth for the same document (see B4 decision).
+    schema_version: Optional[int] = Field(default=None)
+    template_version_id: Optional[UUID] = Field(
+        foreign_key="report_template_version.id", default=None
+    )
+    generated_by_renderer_version: Optional[str] = Field(max_length=100, default=None)
+
     # Basic relationships only
     report: Report = Relationship(back_populates="versions")
 

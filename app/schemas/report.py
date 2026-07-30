@@ -35,6 +35,13 @@ class ReportCreate(BaseModel):
     created_by: Optional[str] = None
     published_at: Optional[datetime] = None
     report: Optional[Dict[str, Any]] = None  # JSON body to be uploaded to S3
+    # Céluma 1.3 Fase 2, Bloque B: caller may select a published
+    # ReportTemplateVersion to create a V2 report. Only takes effect when
+    # the tenant has reports_v2_enabled=true; the backend resolves,
+    # validates, and freezes the definitive rendering snapshot server-side
+    # — this id is a selection, never a trusted snapshot. See
+    # phase-2-block-b-architecture-decision.md.
+    template_version_id: Optional[str] = None
 
 class ReportResponse(BaseModel):
     """Schema for report response"""
@@ -59,6 +66,11 @@ class ReportDetailResponse(BaseModel):
     signed_at: Optional[datetime] = None
     report: Optional[Dict[str, Any]] = None  # reconstructed JSON from S3
     template: Optional[Dict[str, Any]] = None  # Snapshot of the template used at creation time
+    # Céluma 1.3 Fase 2, Bloque B: V2 metadata, sourced from ReportVersion.
+    # All null for legacy reports (schema_version absent/1).
+    schema_version: Optional[int] = None
+    template_version_id: Optional[str] = None
+    generated_by_renderer_version: Optional[str] = None
 
 class ReportVersionCreate(BaseModel):
     """Schema for creating a report version"""
@@ -76,6 +88,9 @@ class ReportVersionResponse(BaseModel):
     version_no: int
     report_id: str
     is_current: bool
+    schema_version: Optional[int] = None
+    template_version_id: Optional[str] = None
+    generated_by_renderer_version: Optional[str] = None
 
 
 class ReportMetaResponse(BaseModel):

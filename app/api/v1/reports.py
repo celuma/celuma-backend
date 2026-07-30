@@ -5,6 +5,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.models.report import Report, ReportVersion, ReportTemplate
+from app.models.report_template_version import ReportTemplateVersion, ReportTemplateVersionStatus
 from app.models.laboratory import Order
 from app.models.tenant import Tenant, Branch
 from app.models.patient import Patient
@@ -38,7 +39,15 @@ from app.schemas.report import (
     ReportTemplatesListResponse,
     SignatureMetadata,
 )
+from app.schemas.report_template_version import (
+    ReportTemplateVersionCreate,
+    ReportTemplateVersionResponse,
+    ReportTemplateVersionDetailResponse,
+    ReportTemplateVersionsListResponse,
+    ReportRenderingSnapshotV2,
+)
 from app.schemas.laboratory import ReportFullDetailResponse
+from pydantic import ValidationError as PydanticValidationError
 import json
 from datetime import datetime
 import logging
@@ -46,6 +55,19 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reports")
+
+# Céluma 1.3 Fase 2, Bloque B: identifies which backend logic produced a V2
+# report's rendering snapshot (there is no VersionedReportRendererV2 yet —
+# this only audits the *persistence* path, see
+# phase-2-block-b-architecture-decision.md).
+SNAPSHOT_BUILDER_VERSION = "block-b/1.0.0"
+
+# Statuses in which a report's content/template/branding must never change
+# again through the normal creation/versioning/PDF-upload flow (Historia B9).
+# RETRACTED is included deliberately: retraction ends the normal editing
+# lifecycle and this block does not implement a formal amendment flow — see
+# block-c-dependencies.md.
+_IMMUTABLE_REPORT_STATUSES = (ReportStatus.PUBLISHED, ReportStatus.RETRACTED)
 
 
 def _require(user_id, code: str, session: Session) -> None:
@@ -151,6 +173,58 @@ def list_reports(
     
     return ReportsListResponse(reports=results)
 
+def _compensate_failed_v2_report_creation(report_id, session: Session) -> None:
+    """Best-effort compensation when a V2 report's S3/version write fails
+    after its `Report` row was already committed (Historia B8).
+
+    This is NOT a distributed transaction: there is a real (narrow) window
+    where a process crash between the two commits below could still leave an
+    orphaned `Report`. That residual risk is documented in
+    phase-2-block-b-architecture-decision.md rather than solved with a
+    saga/outbox mechanism, which would be out of scope for this block.
+    """
+    report = session.get(Report, report_id)
+    if not report:
+        return
+    order_id = report.order_id
+
+    order = session.get(Order, order_id)
+    if order and order.report_id == report.id:
+        order.report_id = None
+        session.add(order)
+
+    from app.models.report_review import ReportReview
+
+    reviews = session.exec(
+        select(ReportReview).where(ReportReview.report_id == report_id)
+    ).all()
+    for review in reviews:
+        review.report_id = None
+        session.add(review)
+
+    from app.models.events import OrderEvent
+    from app.models.enums import EventType
+
+    events = session.exec(
+        select(OrderEvent).where(
+            OrderEvent.order_id == order_id,
+            OrderEvent.event_type == EventType.REPORT_CREATED,
+        )
+    ).all()
+    for event in events:
+        metadata = event.event_metadata or {}
+        if metadata.get("report_id") == str(report_id):
+            session.delete(event)
+
+    session.delete(report)
+    session.flush()
+
+    if order:
+        update_order_status_for_report(str(order_id), session)
+
+    session.commit()
+
+
 @router.post("/", response_model=ReportResponse)
 def create_report(
     report_data: ReportCreate,
@@ -158,41 +232,87 @@ def create_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Create a new report (requires reports:create)."""
+    """Create a new report (requires reports:create).
+
+    Céluma 1.3 Fase 2, Bloque B: when the tenant has
+    `reports_v2_enabled=true` AND the caller explicitly selects a
+    `template_version_id`, the report is created as schema_version=2 with a
+    backend-built, backend-validated rendering snapshot embedded in its JSON
+    body. In every other case (flag off, or no template_version_id sent) the
+    legacy flow below is unchanged byte-for-byte. See
+    phase-2-block-b-architecture-decision.md for the full rationale.
+    """
     _require(user.id, "reports:create", session)
     # Verify that the report's tenant_id matches the authenticated user's tenant_id
     if report_data.tenant_id != ctx.tenant_id:
         raise HTTPException(403, "Cannot create reports for a different tenant")
-    
+
     # Verify tenant, branch, and order exist
     tenant = session.get(Tenant, report_data.tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
-    
+
     branch = session.get(Branch, report_data.branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
-    
+
     # Verify branch belongs to the tenant
     if str(branch.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Branch does not belong to your tenant")
-    
+
     order = session.get(Order, report_data.order_id)
     if not order:
         raise HTTPException(404, "Order not found")
-    
+
     # Verify order belongs to the tenant
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Order does not belong to your tenant")
-    
+
     # Check if report already exists for this order
     existing_report = session.exec(
         select(Report).where(Report.order_id == report_data.order_id)
     ).first()
-    
+
     if existing_report:
         raise HTTPException(400, "Report already exists for this order")
-    
+
+    # ------------------------------------------------------------------
+    # Céluma 1.3 Fase 2, Bloque B, Historia B6 — resolve V2 vs legacy BEFORE
+    # writing anything to the database, so an invalid V2 request never
+    # creates a partial Report row.
+    # ------------------------------------------------------------------
+    template_version: ReportTemplateVersion | None = None
+    validated_snapshot: ReportRenderingSnapshotV2 | None = None
+    if report_data.template_version_id is not None:
+        if not tenant.reports_v2_enabled:
+            raise HTTPException(403, "V2 report creation is not enabled for this tenant")
+
+        template_version = session.get(ReportTemplateVersion, report_data.template_version_id)
+        if not template_version or str(template_version.tenant_id) != ctx.tenant_id:
+            raise HTTPException(404, "Template version not found")
+        if template_version.status == ReportTemplateVersionStatus.ARCHIVED:
+            raise HTTPException(
+                409, "Cannot create a report from an archived template version"
+            )
+        if report_data.report is None:
+            raise HTTPException(
+                400, "V2 reports require report content to build the rendering snapshot"
+            )
+        try:
+            validated_snapshot = ReportRenderingSnapshotV2.model_validate(
+                template_version.configuration
+            )
+        except PydanticValidationError as exc:
+            logger.error(
+                "Stored template version configuration failed re-validation",
+                extra={
+                    "event": "report.create_v2_invalid_template_version_configuration",
+                    "template_version_id": str(template_version.id),
+                    "error": str(exc),
+                },
+            )
+            raise HTTPException(500, "Template version configuration is invalid") from exc
+
     report = Report(
         tenant_id=report_data.tenant_id,
         branch_id=report_data.branch_id,
@@ -252,43 +372,93 @@ def create_report(
     
     session.commit()
     session.refresh(report)
-    
+
     # If a JSON report body is provided, upload to S3 and create initial version (v1)
     if report_data.report is not None:
-        s3 = S3Service()
-        # Build S3 key
-        key = f"reports/{report.tenant_id}/{report.branch_id}/{report.id}/versions/1/report.json"
-        data_bytes = json.dumps(report_data.report, ensure_ascii=False).encode("utf-8")
-        info = s3.upload_bytes(data_bytes, key=key, content_type="application/json")
+        body = dict(report_data.report)
+        is_v2 = template_version is not None
+        if is_v2:
+            # Backend-authoritative: the client's `report_data.report` never
+            # carries its own snapshot — only the validated, server-resolved
+            # one is embedded (Historia B6, "el frontend puede seleccionar
+            # template_version_id, pero no debe poder suministrar
+            # arbitrariamente el snapshot final").
+            body["schema_version"] = 2
+            body["rendering_snapshot"] = validated_snapshot.model_dump(mode="json")
 
-        storage = StorageObject(
-            provider="aws",
-            region=s3.region,
-            bucket=info.bucket,
-            object_key=info.key,
-            version_id=info.version_id,
-            etag=info.etag,
-            content_type="application/json",
-            size_bytes=info.size_bytes,
-            created_by=report.created_by,
-        )
-        session.add(storage)
-        session.flush()
+        try:
+            s3 = S3Service()
+            # Build S3 key
+            key = f"reports/{report.tenant_id}/{report.branch_id}/{report.id}/versions/1/report.json"
+            data_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            info = s3.upload_bytes(data_bytes, key=key, content_type="application/json")
 
-        # Mark existing versions as not current (none expected on create)
-        # Create version 1 as current
-        version = ReportVersion(
-            report_id=report.id,
-            version_no=1,
-            json_storage_id=storage.id,
-            pdf_storage_id=None,
-            html_storage_id=None,
-            authored_by=report.created_by,
-            is_current=True,
-        )
-        session.add(version)
-        session.commit()
-        session.refresh(version)
+            storage = StorageObject(
+                provider="aws",
+                region=s3.region,
+                bucket=info.bucket,
+                object_key=info.key,
+                version_id=info.version_id,
+                etag=info.etag,
+                content_type="application/json",
+                size_bytes=info.size_bytes,
+                created_by=report.created_by,
+            )
+            session.add(storage)
+            session.flush()
+
+            # Mark existing versions as not current (none expected on create)
+            # Create version 1 as current
+            version = ReportVersion(
+                report_id=report.id,
+                version_no=1,
+                json_storage_id=storage.id,
+                pdf_storage_id=None,
+                html_storage_id=None,
+                authored_by=report.created_by,
+                is_current=True,
+                schema_version=(2 if is_v2 else None),
+                template_version_id=(template_version.id if is_v2 else None),
+                generated_by_renderer_version=(
+                    f"backend-snapshot-builder/{SNAPSHOT_BUILDER_VERSION}" if is_v2 else None
+                ),
+            )
+            session.add(version)
+            session.commit()
+            session.refresh(version)
+        except Exception as exc:
+            session.rollback()
+            if is_v2:
+                # Historia B8: a V2 report is all-or-nothing. Compensate the
+                # already-committed Report row rather than leave it orphaned
+                # with no content and no snapshot anywhere.
+                _compensate_failed_v2_report_creation(report.id, session)
+                logger.error(
+                    "V2 report creation failed after the Report row was committed; compensated",
+                    extra={
+                        "event": "report.create_v2_failed_compensated",
+                        "report_id": str(report.id),
+                        "error": str(exc),
+                    },
+                )
+                raise HTTPException(
+                    500,
+                    "Failed to create the V2 report: the rendering snapshot could "
+                    "not be persisted. No report was created.",
+                )
+            # Legacy path: this failure mode (Report row committed, content
+            # upload then fails) pre-dates this block and is not changed
+            # here — see phase-2-block-b-architecture-decision.md, B8, for
+            # why fixing it is out of scope for Bloque B.
+            logger.error(
+                "Report content upload failed after the Report row was already committed",
+                extra={
+                    "event": "report.create_legacy_content_upload_failed",
+                    "report_id": str(report.id),
+                    "error": str(exc),
+                },
+            )
+            raise
 
     return ReportResponse(
         id=str(report.id),
@@ -322,6 +492,15 @@ def create_report_new_version(
     # Verify report belongs to the authenticated user's tenant
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
+
+    # Céluma 1.3 Fase 2, Bloque B, Historia B9: a published (or retracted)
+    # report's content/template/branding is frozen. This moves the
+    # protection from the frontend (which already disables the relevant
+    # buttons) into the API itself — see phase-2-block-b-architecture-decision.md.
+    if report.status in _IMMUTABLE_REPORT_STATUSES:
+        raise HTTPException(
+            409, f"Cannot create a new version for a report in {report.status} status"
+        )
 
     # Determine next version number
     current_version = session.exec(
@@ -660,6 +839,23 @@ def delete_template(
         raise HTTPException(403, "Template does not belong to your tenant")
     
     if hard_delete:
+        # Céluma 1.3 Fase 2, Bloque B: a template with published versions can
+        # never be hard-deleted — those versions may still be referenced by
+        # report_version rows and must remain reconstructible. Soft-delete
+        # (deactivate) instead. The FK itself already blocks this at the DB
+        # level (no ON DELETE CASCADE); this check returns a clear 409
+        # instead of surfacing a raw IntegrityError.
+        has_versions = session.exec(
+            select(ReportTemplateVersion.id).where(
+                ReportTemplateVersion.report_template_id == template.id
+            )
+        ).first()
+        if has_versions:
+            raise HTTPException(
+                409,
+                "Cannot permanently delete a template with published versions. "
+                "Archive its versions or deactivate the template instead.",
+            )
         # Permanently delete the template
         session.delete(template)
         session.commit()
@@ -690,6 +886,264 @@ def delete_template(
         )
         
         return {"message": "Template deactivated", "id": str(template.id)}
+
+
+# ============================================================================
+# Report Template Version Endpoints (append-only, immutable) — Bloque B
+#
+# These publish/activate/archive immutable snapshots of a template's
+# rendering configuration for administration and audit. They are NEVER
+# consulted by a renderer to reconstruct an existing report — that source of
+# truth is the snapshot embedded in the report's own JSON body at creation
+# time (see phase-2-block-b-architecture-decision.md). There is deliberately
+# no PUT/PATCH here: correcting a version means publishing a new one.
+# ============================================================================
+
+def _get_owned_template(template_id: str, ctx: AuthContext, session: Session) -> ReportTemplate:
+    template = session.get(ReportTemplate, template_id)
+    if not template:
+        raise HTTPException(404, "Template not found")
+    if str(template.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Template not found")
+    return template
+
+
+def _get_owned_template_version(
+    template_id: str, version_id: str, ctx: AuthContext, session: Session
+) -> ReportTemplateVersion:
+    version = session.get(ReportTemplateVersion, version_id)
+    if (
+        not version
+        or str(version.report_template_id) != template_id
+        or str(version.tenant_id) != ctx.tenant_id
+    ):
+        raise HTTPException(404, "Template version not found")
+    return version
+
+
+def _template_version_response(v: ReportTemplateVersion) -> ReportTemplateVersionResponse:
+    return ReportTemplateVersionResponse(
+        id=str(v.id),
+        tenant_id=str(v.tenant_id),
+        report_template_id=str(v.report_template_id),
+        version_number=v.version_number,
+        schema_version=v.schema_version,
+        status=v.status,
+        created_by=str(v.created_by) if v.created_by else None,
+        published_at=v.published_at,
+        activated_at=v.activated_at,
+        archived_at=v.archived_at,
+    )
+
+
+@router.get(
+    "/templates/{template_id}/versions", response_model=ReportTemplateVersionsListResponse
+)
+def list_template_versions(
+    template_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """List all published versions of a template, newest first (requires reports:manage_templates)."""
+    _require(user.id, "reports:manage_templates", session)
+    _get_owned_template(template_id, ctx, session)
+    versions = session.exec(
+        select(ReportTemplateVersion)
+        .where(ReportTemplateVersion.report_template_id == template_id)
+        .order_by(ReportTemplateVersion.version_number.desc())
+    ).all()
+    return ReportTemplateVersionsListResponse(
+        versions=[_template_version_response(v) for v in versions]
+    )
+
+
+@router.get(
+    "/templates/{template_id}/versions/{version_id}",
+    response_model=ReportTemplateVersionDetailResponse,
+)
+def get_template_version(
+    template_id: str,
+    version_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Get a specific template version, including its full immutable configuration."""
+    _require(user.id, "reports:manage_templates", session)
+    _get_owned_template(template_id, ctx, session)
+    version = _get_owned_template_version(template_id, version_id, ctx, session)
+    return ReportTemplateVersionDetailResponse(
+        **_template_version_response(version).model_dump(),
+        configuration=version.configuration,
+    )
+
+
+@router.post(
+    "/templates/{template_id}/versions", response_model=ReportTemplateVersionDetailResponse
+)
+def create_template_version(
+    template_id: str,
+    payload: ReportTemplateVersionCreate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Publish a new, immutable version of a template's rendering configuration.
+
+    `payload.configuration` is validated against `ReportRenderingSnapshotV2`
+    by FastAPI/Pydantic before this function runs. Append-only: this is the
+    only way to add a version; there is no endpoint to edit one afterwards.
+    """
+    _require(user.id, "reports:manage_templates", session)
+    template = _get_owned_template(template_id, ctx, session)
+
+    logo_storage_id = payload.configuration.presentation.header.logo_storage_id
+    if logo_storage_id is not None:
+        logo_object = session.get(StorageObject, logo_storage_id)
+        if not logo_object:
+            raise HTTPException(400, "logo_storage_id does not reference an existing object")
+
+    last_version = session.exec(
+        select(ReportTemplateVersion)
+        .where(ReportTemplateVersion.report_template_id == template.id)
+        .order_by(ReportTemplateVersion.version_number.desc())
+    ).first()
+    next_version_number = (last_version.version_number + 1) if last_version else 1
+
+    version = ReportTemplateVersion(
+        tenant_id=template.tenant_id,
+        report_template_id=template.id,
+        version_number=next_version_number,
+        schema_version=payload.configuration.schema_version,
+        configuration=payload.configuration.model_dump(mode="json"),
+        status=ReportTemplateVersionStatus.PUBLISHED,
+        created_by=user.id,
+    )
+    session.add(version)
+    session.commit()
+    session.refresh(version)
+
+    logger.info(
+        f"Report template version {version.version_number} published for template {template_id}",
+        extra={
+            "event": "report_template_version.published",
+            "template_id": template_id,
+            "version_id": str(version.id),
+            "user_id": str(user.id),
+        },
+    )
+
+    return ReportTemplateVersionDetailResponse(
+        **_template_version_response(version).model_dump(),
+        configuration=version.configuration,
+    )
+
+
+@router.post(
+    "/templates/{template_id}/versions/{version_id}/activate",
+    response_model=ReportTemplateVersionResponse,
+)
+def activate_template_version(
+    template_id: str,
+    version_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Mark a version as the template's active/default version.
+
+    At most one version is ACTIVE per template at a time (also enforced by a
+    partial unique index at the database level). Calling this on an
+    ARCHIVED version reactivates it — that is the explicit, intentional flow
+    for reactivation; nothing else may reactivate an archived version as a
+    side effect.
+    """
+    _require(user.id, "reports:manage_templates", session)
+    _get_owned_template(template_id, ctx, session)
+    version = _get_owned_template_version(template_id, version_id, ctx, session)
+
+    previous_active = session.exec(
+        select(ReportTemplateVersion).where(
+            ReportTemplateVersion.report_template_id == template_id,
+            ReportTemplateVersion.status == ReportTemplateVersionStatus.ACTIVE,
+            ReportTemplateVersion.id != version.id,
+        )
+    ).first()
+    if previous_active:
+        previous_active.status = ReportTemplateVersionStatus.PUBLISHED
+        session.add(previous_active)
+        # Flush the demotion before promoting `version` below: both rows are
+        # covered by the same partial unique index (at most one ACTIVE per
+        # template), which Postgres checks per-statement, not per-transaction.
+        # Without this explicit ordering, the flush order of the two UPDATEs
+        # is otherwise unspecified and can violate the index transiently.
+        session.flush()
+
+    version.status = ReportTemplateVersionStatus.ACTIVE
+    version.activated_at = datetime.utcnow()
+    version.archived_at = None
+    session.add(version)
+    session.commit()
+    session.refresh(version)
+
+    logger.info(
+        f"Report template version {version_id} activated for template {template_id}",
+        extra={
+            "event": "report_template_version.activated",
+            "template_id": template_id,
+            "version_id": version_id,
+            "user_id": str(user.id),
+        },
+    )
+    return _template_version_response(version)
+
+
+@router.post(
+    "/templates/{template_id}/versions/{version_id}/archive",
+    response_model=ReportTemplateVersionResponse,
+)
+def archive_template_version(
+    template_id: str,
+    version_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Retire a version so it can no longer be selected for new reports.
+
+    Existing reports that already reference this version are unaffected:
+    their rendering snapshot was already embedded in their own JSON body at
+    creation time and is never re-read from here.
+    """
+    _require(user.id, "reports:manage_templates", session)
+    _get_owned_template(template_id, ctx, session)
+    version = _get_owned_template_version(template_id, version_id, ctx, session)
+
+    if version.status == ReportTemplateVersionStatus.ACTIVE:
+        raise HTTPException(
+            409,
+            "Cannot archive the active version. Activate a replacement version first.",
+        )
+    if version.status == ReportTemplateVersionStatus.ARCHIVED:
+        raise HTTPException(400, "Version is already archived")
+
+    version.status = ReportTemplateVersionStatus.ARCHIVED
+    version.archived_at = datetime.utcnow()
+    session.add(version)
+    session.commit()
+    session.refresh(version)
+
+    logger.info(
+        f"Report template version {version_id} archived for template {template_id}",
+        extra={
+            "event": "report_template_version.archived",
+            "template_id": template_id,
+            "version_id": version_id,
+            "user_id": str(user.id),
+        },
+    )
+    return _template_version_response(version)
 
 
 def _build_report_detail_response(
@@ -723,6 +1177,15 @@ def _build_report_detail_response(
         signed_by=(str(version.signed_by) if version and version.signed_by else None),
         signed_at=(version.signed_at if version else None),
         report=report_json,
+        schema_version=(version.schema_version if version else None),
+        template_version_id=(
+            str(version.template_version_id)
+            if version and version.template_version_id
+            else None
+        ),
+        generated_by_renderer_version=(
+            version.generated_by_renderer_version if version else None
+        ),
     )
 
 
@@ -904,6 +1367,13 @@ def upload_pdf_to_specific_version(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.3 Fase 2, Bloque B, Historia B9: never silently replace the
+    # PDF of a published/retracted report.
+    if report.status in _IMMUTABLE_REPORT_STATUSES:
+        raise HTTPException(
+            409, f"Cannot replace the PDF for a report in {report.status} status"
+        )
+
     version = session.exec(
         select(ReportVersion).where(
             ReportVersion.report_id == report.id,
@@ -981,6 +1451,13 @@ def upload_pdf_to_latest_version(
     # Verify report belongs to the authenticated user's tenant
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
+
+    # Céluma 1.3 Fase 2, Bloque B, Historia B9: never silently replace the
+    # PDF of a published/retracted report.
+    if report.status in _IMMUTABLE_REPORT_STATUSES:
+        raise HTTPException(
+            409, f"Cannot replace the PDF for a report in {report.status} status"
+        )
 
     latest_version = session.exec(
         select(ReportVersion)
