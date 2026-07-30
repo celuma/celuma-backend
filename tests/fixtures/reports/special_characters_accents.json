@@ -1,0 +1,22 @@
+{
+  "_fixture_meta": {
+    "covers": ["caracteres especiales y acentos"],
+    "status": "DRAFT",
+    "note": "Datos sintéticos con acentos, eñes, diéresis y símbolos, sin datos reales de pacientes."
+  },
+  "base": {
+    "order_code": { "is_visible": true, "label": "Código de orden", "value": "SYN-0005" },
+    "patient": { "is_visible": true, "label": "Paciente", "value": "María José Muñóz Peña" },
+    "study_type": { "is_visible": true, "label": "Tipo de estudio", "value": "Citología Exfoliativa" },
+    "patient_age": { "is_visible": true, "label": "Edad", "value": "27" },
+    "requesting_physician": { "is_visible": true, "label": "Médico solicitante", "value": "Dr. Iñaki Núñez Vázquez" }
+  },
+  "sections": {
+    "section_macroscopic": { "is_visible": true, "label": "Macroscópica", "type": "richtext", "content": "<p>Muestra sintética con acentos: áéíóú, ñ, ü, símbolos: 50% ± 5°C, § ¶ — “comillas tipográficas”.</p>" },
+    "section_microscopic": { "is_visible": true, "label": "Microscópica", "type": "richtext", "content": "<p>Descripción sintética: célula(s) atípica(s) — n/a, <script>alert(1)</script> se conserva como texto de prueba de escape, no como riesgo real ya que el contenido se sanitiza en el editor.</p>" },
+    "images": { "is_visible": true, "label": "Imágenes", "type": "images", "content": [] }
+  },
+  "base_order": ["order_code", "patient", "study_type", "patient_age", "requesting_physician"],
+  "section_order": ["section_macroscopic", "section_microscopic", "images"],
+  "signatureMetadata": { "show_signature_section": false, "require_digital_signature": false }
+}

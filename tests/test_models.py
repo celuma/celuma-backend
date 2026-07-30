@@ -27,6 +27,16 @@ class TestTenantModel:
         tenant = Tenant(name="Test Tenant", legal_name="Test Legal", tax_id="123")
         assert "Test Tenant" in str(tenant)
 
+    def test_tenant_reports_v2_enabled_defaults_to_false(self):
+        """Céluma 1.3 Fase 2, Bloque A / Historia A6: existing/new tenants
+        must default to reports_v2_enabled=False unless explicitly set."""
+        tenant = Tenant(name="Test Tenant")
+        assert tenant.reports_v2_enabled is False
+
+    def test_tenant_reports_v2_enabled_can_be_explicitly_enabled(self):
+        tenant = Tenant(name="Test Tenant", reports_v2_enabled=True)
+        assert tenant.reports_v2_enabled is True
+
 
 class TestBranchModel:
     """Test Branch model functionality"""

@@ -30,7 +30,10 @@ def list_tenants(
     """List all tenants (for admin use)"""
     # By default, restrict to the current tenant only to avoid data leakage.
     tenants = session.exec(select(Tenant).where(Tenant.id == ctx.tenant_id)).all()
-    return [{"id": str(t.id), "name": t.name, "legal_name": t.legal_name} for t in tenants]
+    return [
+        {"id": str(t.id), "name": t.name, "legal_name": t.legal_name, "reports_v2_enabled": t.reports_v2_enabled}
+        for t in tenants
+    ]
 
 @router.post("/", response_model=TenantResponse)
 def create_tenant(tenant_data: TenantCreate, session: Session = Depends(get_session)):
@@ -39,7 +42,7 @@ def create_tenant(tenant_data: TenantCreate, session: Session = Depends(get_sess
     session.add(tenant)
     session.commit()
     session.refresh(tenant)
-    return TenantResponse(id=str(tenant.id), name=tenant.name, legal_name=tenant.legal_name)
+    return TenantResponse(id=str(tenant.id), name=tenant.name, legal_name=tenant.legal_name, reports_v2_enabled=tenant.reports_v2_enabled)
 
 @router.get("/{tenant_id}", response_model=TenantDetailResponse)
 def get_tenant(
@@ -53,7 +56,13 @@ def get_tenant(
         raise HTTPException(404, "Tenant not found")
     if str(tenant.id) != ctx.tenant_id:
         raise HTTPException(404, "Tenant not found")
-    return TenantDetailResponse(id=str(tenant.id), name=tenant.name, legal_name=tenant.legal_name, tax_id=tenant.tax_id)
+    return TenantDetailResponse(
+        id=str(tenant.id),
+        name=tenant.name,
+        legal_name=tenant.legal_name,
+        tax_id=tenant.tax_id,
+        reports_v2_enabled=tenant.reports_v2_enabled,
+    )
 
 @router.get("/{tenant_id}/branches")
 def list_tenant_branches(

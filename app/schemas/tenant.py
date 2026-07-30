@@ -12,6 +12,7 @@ class TenantResponse(BaseModel):
     id: str
     name: str
     legal_name: Optional[str] = None
+    reports_v2_enabled: bool = False
 
 class TenantDetailResponse(BaseModel):
     """Schema for detailed tenant response"""
@@ -19,6 +20,7 @@ class TenantDetailResponse(BaseModel):
     name: str
     legal_name: Optional[str] = None
     tax_id: Optional[str] = None
+    reports_v2_enabled: bool = False
 
 class BranchCreate(BaseModel):
     """Schema for creating a branch"""

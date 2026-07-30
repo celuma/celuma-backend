@@ -1,0 +1,24 @@
+{
+  "_fixture_meta": {
+    "covers": ["secciones opcionales vacías"],
+    "status": "DRAFT",
+    "note": "Datos sintéticos. section_diagnosis está marcada visible pero sin contenido; section_extra_notes es invisible."
+  },
+  "base": {
+    "order_code": { "is_visible": true, "label": "Código de orden", "value": "SYN-0003" },
+    "patient": { "is_visible": true, "label": "Paciente", "value": "Paciente de Prueba Tres" },
+    "study_type": { "is_visible": true, "label": "Tipo de estudio", "value": "Histopatología" },
+    "patient_age": { "is_visible": false, "label": "Edad", "value": "" },
+    "requesting_physician": { "is_visible": true, "label": "Médico solicitante", "value": "Dr. Solicitante Sintético" }
+  },
+  "sections": {
+    "section_macroscopic": { "is_visible": true, "label": "Macroscópica", "type": "richtext", "content": "<p>Descripción sintética breve.</p>" },
+    "section_microscopic": { "is_visible": true, "label": "Microscópica", "type": "richtext", "content": "<p>Descripción sintética breve.</p>" },
+    "section_diagnosis": { "is_visible": true, "label": "Diagnóstico", "type": "text", "content": "" },
+    "section_extra_notes": { "is_visible": false, "label": "Notas adicionales", "type": "text", "content": "" },
+    "images": { "is_visible": true, "label": "Imágenes", "type": "images", "content": [] }
+  },
+  "base_order": ["order_code", "patient", "study_type", "patient_age", "requesting_physician"],
+  "section_order": ["section_macroscopic", "section_microscopic", "section_diagnosis", "section_extra_notes", "images"],
+  "signatureMetadata": { "show_signature_section": false, "require_digital_signature": false }
+}
