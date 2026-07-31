@@ -403,6 +403,14 @@ MEDIA_PRESIGNED_EXPIRE_SECONDS=3600
 
 # Custom S3 endpoint (LocalStack/MinIO)
 # S3_ENDPOINT_URL=http://localhost:4566
+
+# CORS — comma-separated list of allowed frontend origins. Defaults to the
+# local Vite dev/preview ports. Must never include a bare "*": combined with
+# allow_credentials=True (required for authenticated requests), Starlette
+# would send Access-Control-Allow-Origin: * on every response, which
+# browsers reject for credentialed requests. List the exact production
+# frontend origin(s) here in production.
+CORS_ALLOWED_ORIGINS=https://app.your-domain.com
 ```
 
 ## 📊 Monitoring

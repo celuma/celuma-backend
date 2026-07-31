@@ -26,6 +26,7 @@ from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.portal import router as portal_router
 from app.api.v1.worklist import router as worklist_router
 from app.api.v1.rbac import router as rbac_router
+from app.core.config import settings
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -71,17 +72,15 @@ app.add_middleware(
 # `/api/*` server-side, so the browser never saw it as cross-origin at all.
 # Fixed by listing only explicit origins — no bare "*" — so
 # Access-Control-Allow-Origin correctly echoes the literal requesting origin.
+#
+# Céluma 1.3 Fase 2, Bloque D, Historia D1: the origin list itself now comes
+# from `settings.cors_allowed_origins` (CORS_ALLOWED_ORIGINS env var) instead
+# of being hardcoded here, so the production frontend origin can be
+# configured without a code change. `cors_allowed_origins_list` still
+# enforces the no-bare-"*" invariant above.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        # `vite preview` (static production build validation) serves on 4173
-        # and does not go through the dev-only proxy, so it needs its own
-        # explicit CORS entry like the dev server already has.
-        "http://localhost:4173",
-        "http://127.0.0.1:4173",
-    ],  # In production, list the exact deployed frontend origin(s) here too.
+    allow_origins=settings.cors_allowed_origins_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],

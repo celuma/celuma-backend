@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 import app.models  # noqa: F401  registers every table on SQLModel.metadata
 from app.core.config import settings
 from app.core.db import get_session
-from app.main import app
+from app.main import app, rate_limit_storage
 
 
 # Céluma 1.3 Fase 2, Bloque B, Historia B10: HTTP tests run against a real,
@@ -112,6 +112,20 @@ def _reset_fake_s3():
 @pytest.fixture(autouse=True)
 def _patch_s3(monkeypatch):
     monkeypatch.setattr("app.api.v1.reports.S3Service", FakeS3Service)
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit_storage():
+    """`app.main.basic_rate_limiting` is a real, always-on middleware (100
+    requests/60s per client IP) with in-memory, process-lifetime state — it
+    is not test-aware. TestClient requests all share the same synthetic
+    client IP, so without resetting this between test functions, the whole
+    HTTP suite shares one 60s window and later tests start failing with 429
+    once enough earlier tests have run (Céluma 1.3 Fase 2, Bloque D —
+    surfaced when this block's new HTTP tests pushed the full-suite request
+    count over the limit)."""
+    rate_limit_storage.clear()
+    yield
 
 
 @pytest.fixture(name="engine")

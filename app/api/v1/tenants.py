@@ -21,6 +21,13 @@ class TenantUpdate(BaseModel):
     name: Optional[str] = None
     legal_name: Optional[str] = None
     tax_id: Optional[str] = None
+    # Céluma 1.3 Fase 2, Bloque D, Historia D9: exposed here rather than a
+    # dedicated endpoint, following the same "reuse the tenant update
+    # pattern" recommendation as the other tenant-wide settings above.
+    # Reuses the same admin:manage_tenant gate as the rest of this endpoint
+    # (see block-c-dependencies.md — this was the open question it left for
+    # Bloque D: reuse admin:manage_tenant vs. a new permission).
+    reports_v2_enabled: Optional[bool] = None
 
 @router.get("/")
 def list_tenants(
@@ -128,11 +135,19 @@ def update_tenant(
         tenant.legal_name = tenant_data.legal_name
     if tenant_data.tax_id is not None:
         tenant.tax_id = tenant_data.tax_id
-    
+
+    reports_v2_flag_changed = (
+        tenant_data.reports_v2_enabled is not None
+        and tenant_data.reports_v2_enabled != tenant.reports_v2_enabled
+    )
+    previous_reports_v2_enabled = tenant.reports_v2_enabled
+    if tenant_data.reports_v2_enabled is not None:
+        tenant.reports_v2_enabled = tenant_data.reports_v2_enabled
+
     session.add(tenant)
     session.commit()
     session.refresh(tenant)
-    
+
     logger.info(
         f"Tenant {tenant.name} updated",
         extra={
@@ -141,12 +156,30 @@ def update_tenant(
             "updated_by": str(user.id),
         },
     )
-    
+
+    if reports_v2_flag_changed:
+        # Céluma 1.3 Fase 2, Bloque D, Historia D9: separate audit line — this
+        # flag controls creation of new V2 reports (never reading/rendering
+        # existing ones), so a distinct, greppable event is worth having
+        # beyond the generic "tenant.updated" line above.
+        logger.info(
+            f"Tenant {tenant.name} reports_v2_enabled changed: "
+            f"{previous_reports_v2_enabled} -> {tenant.reports_v2_enabled}",
+            extra={
+                "event": "tenant.reports_v2_enabled_changed",
+                "tenant_id": str(tenant.id),
+                "previous_value": previous_reports_v2_enabled,
+                "new_value": tenant.reports_v2_enabled,
+                "updated_by": str(user.id),
+            },
+        )
+
     return TenantDetailResponse(
         id=str(tenant.id),
         name=tenant.name,
         legal_name=tenant.legal_name,
-        tax_id=tenant.tax_id
+        tax_id=tenant.tax_id,
+        reports_v2_enabled=tenant.reports_v2_enabled,
     )
 
 

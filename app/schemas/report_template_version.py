@@ -227,3 +227,18 @@ class ReportTemplateVersionDetailResponse(ReportTemplateVersionResponse):
 
 class ReportTemplateVersionsListResponse(BaseModel):
     versions: List[ReportTemplateVersionResponse]
+
+
+# ---------------------------------------------------------------------------
+# Template logo upload response (Céluma 1.3, Fase 2, Bloque D — Historia D2)
+# ---------------------------------------------------------------------------
+
+class ReportTemplateLogoUploadResponse(BaseModel):
+    """Returned after uploading a template logo. `storage_object_id` is what
+    the editor should send back as `presentation.header.logo_storage_id`
+    when publishing a version — never a raw URL."""
+
+    storage_object_id: str
+    url: str
+    content_type: str
+    size_bytes: int

@@ -46,9 +46,13 @@ from app.schemas.report_template_version import (
     ReportTemplateVersionDetailResponse,
     ReportTemplateVersionsListResponse,
     ReportRenderingSnapshotV2,
+    ReportTemplateLogoUploadResponse,
 )
 from app.schemas.laboratory import ReportFullDetailResponse
 from pydantic import ValidationError as PydanticValidationError
+from PIL import Image, UnidentifiedImageError
+from io import BytesIO
+from uuid import uuid4
 import json
 from datetime import datetime
 import logging
@@ -1234,6 +1238,147 @@ def archive_template_version(
         },
     )
     return _template_version_response(version)
+
+
+# ============================================================================
+# Report Template Logo Upload — Bloque D, Historia D2
+#
+# Uploads a logo image to be referenced (by StorageObject id) as
+# `presentation.header.logo_storage_id` when publishing a
+# ReportTemplateVersion (see create_template_version above, which validates
+# tenant ownership of the referenced object at publish time). Follows the
+# StorageObject-creating pattern used by upload_my_signature
+# (app/api/v1/users.py) rather than upload_tenant_logo (app/api/v1/tenants.py,
+# which sets a plain string field and creates no StorageObject) — a
+# report-template logo must be resolvable by id, with tenant_id populated,
+# per report-resource-resolution-contract.md. SVG is explicitly rejected: it
+# can carry embedded scripts/markup, which nothing else in this contract
+# permits.
+# ============================================================================
+
+_TEMPLATE_LOGO_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
+_TEMPLATE_LOGO_MAX_DIMENSION_PX = 4000  # sanity cap, not a specific design requirement
+_TEMPLATE_LOGO_CONTENT_TYPE_TO_FORMAT = {
+    "image/png": "PNG",
+    "image/jpeg": "JPEG",
+    "image/jpg": "JPEG",
+    "image/webp": "WEBP",
+}
+_TEMPLATE_LOGO_FORMAT_TO_CANONICAL = {
+    "PNG": ("image/png", "png"),
+    "JPEG": ("image/jpeg", "jpg"),
+    "WEBP": ("image/webp", "webp"),
+}
+
+
+@router.post(
+    "/templates/{template_id}/logo",
+    response_model=ReportTemplateLogoUploadResponse,
+)
+def upload_template_logo(
+    template_id: str,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Upload a logo image for a template version's `presentation.header`.
+
+    Returns a `storage_object_id` to use as `logo_storage_id` when publishing
+    a version. Does not touch any ReportTemplateVersion — publishing is a
+    separate, explicit step (create_template_version).
+    """
+    _require(user.id, "reports:manage_templates", session)
+    template = _get_owned_template(template_id, ctx, session)
+
+    declared_content_type = (file.content_type or "").split(";")[0].strip().lower()
+    expected_format = _TEMPLATE_LOGO_CONTENT_TYPE_TO_FORMAT.get(declared_content_type)
+    if expected_format is None:
+        raise HTTPException(
+            400, "Only PNG, JPEG, or WEBP images are allowed (SVG is not supported)"
+        )
+
+    file_bytes = file.file.read()
+    if not file_bytes:
+        raise HTTPException(400, "Uploaded file is empty")
+    if len(file_bytes) > _TEMPLATE_LOGO_MAX_BYTES:
+        raise HTTPException(400, "Logo file size must be less than 5MB")
+
+    try:
+        with Image.open(BytesIO(file_bytes)) as probe:
+            probe.verify()
+        with Image.open(BytesIO(file_bytes)) as img:
+            actual_format = img.format
+            width, height = img.size
+    except (UnidentifiedImageError, OSError, ValueError):
+        raise HTTPException(400, "Uploaded file is not a valid image")
+
+    if actual_format != expected_format:
+        raise HTTPException(
+            400, "Declared content type does not match the actual image content"
+        )
+    if width > _TEMPLATE_LOGO_MAX_DIMENSION_PX or height > _TEMPLATE_LOGO_MAX_DIMENSION_PX:
+        raise HTTPException(
+            400, f"Image dimensions must not exceed {_TEMPLATE_LOGO_MAX_DIMENSION_PX}px"
+        )
+
+    content_type, ext = _TEMPLATE_LOGO_FORMAT_TO_CANONICAL[actual_format]
+
+    s3 = S3Service()
+    key = f"report-templates/{template_id}/logos/{uuid4().hex}.{ext}"
+    info = s3.upload_bytes(file_bytes, key=key, content_type=content_type)
+
+    try:
+        storage = StorageObject(
+            provider="aws",
+            region=s3.region,
+            bucket=info.bucket,
+            object_key=info.key,
+            version_id=info.version_id,
+            etag=info.etag,
+            content_type=content_type,
+            size_bytes=info.size_bytes,
+            created_by=user.id,
+            # Populated (unlike most StorageObject rows) because this object
+            # must be resolvable by id alone, with no parent entity to check
+            # ownership through — see storage.py's tenant_id comment.
+            tenant_id=template.tenant_id,
+        )
+        session.add(storage)
+        session.commit()
+        session.refresh(storage)
+    except Exception:
+        session.rollback()
+        try:
+            s3.delete_object(key)
+        except Exception:
+            logger.error(
+                "Failed to compensate (delete orphaned S3 object) after a "
+                "StorageObject creation failure",
+                extra={
+                    "event": "report_template_logo.compensation_failed",
+                    "template_id": template_id,
+                    "key": key,
+                },
+            )
+        raise HTTPException(500, "Failed to register uploaded logo") from None
+
+    logger.info(
+        f"Report template logo uploaded for template {template_id}",
+        extra={
+            "event": "report_template_logo.uploaded",
+            "template_id": template_id,
+            "storage_object_id": str(storage.id),
+            "user_id": str(user.id),
+        },
+    )
+
+    return ReportTemplateLogoUploadResponse(
+        storage_object_id=str(storage.id),
+        url=s3.object_public_url(key),
+        content_type=content_type,
+        size_bytes=info.size_bytes,
+    )
 
 
 def _resolve_report_resources(
