@@ -5,6 +5,12 @@ from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.core.rbac import has_permission
 from app.models.study_type import StudyType
 from app.models.report import ReportTemplate
+from app.models.report_template_version import ReportTemplateVersion, ReportTemplateVersionStatus
+from app.models.report_letterhead import ReportLetterhead
+from app.models.report_letterhead_version import (
+    ReportLetterheadVersion,
+    ReportLetterheadVersionStatus,
+)
 from app.models.tenant import Tenant
 from app.models.user import AppUser
 from app.schemas.study_type import (
@@ -13,6 +19,7 @@ from app.schemas.study_type import (
     StudyTypeResponse,
     StudyTypeDetailResponse,
     StudyTypesListResponse,
+    StudyTypeReportDefaultsResponse,
     TemplateRef,
 )
 import logging
@@ -306,3 +313,84 @@ def delete_study_type(
         )
         
         return {"message": "Study type deactivated", "id": str(study_type.id)}
+
+
+@router.get("/{study_type_id}/report-defaults", response_model=StudyTypeReportDefaultsResponse)
+def get_study_type_report_defaults(
+    study_type_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Resolve everything the report editor needs to bootstrap a brand-new
+    V2 report in one round trip (requires lab:read).
+
+    Post-Fase-2 remediation, R7. Mirrors the exact resolution order used
+    server-side by `create_report` (reports.py): the study type's default
+    clinical template -> its ACTIVE version; then a letterhead via the
+    template's `preferred_letterhead_version_id` -> the tenant's default
+    letterhead's ACTIVE version. Never raises for an unconfigured tenant —
+    every field is simply None, and the frontend decides how to react
+    (mirrors `v2ConfigBlocked`).
+    """
+    if not has_permission(user.id, "lab:read", session):
+        raise HTTPException(403, "Permission required: lab:read")
+    study_type = session.get(StudyType, study_type_id)
+    if not study_type or str(study_type.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Study type not found")
+
+    template_id = study_type.default_report_template_id
+    active_template_version_id = None
+    owning_template = None
+    if template_id is not None:
+        owning_template = session.get(ReportTemplate, template_id)
+        if owning_template is not None:
+            active_version = session.exec(
+                select(ReportTemplateVersion).where(
+                    ReportTemplateVersion.report_template_id == template_id,
+                    ReportTemplateVersion.status == ReportTemplateVersionStatus.ACTIVE,
+                )
+            ).first()
+            if active_version is not None:
+                active_template_version_id = active_version.id
+
+    resolved_letterhead_version: ReportLetterheadVersion | None = None
+    if owning_template is not None and owning_template.preferred_letterhead_version_id:
+        candidate = session.get(
+            ReportLetterheadVersion, owning_template.preferred_letterhead_version_id
+        )
+        if candidate is not None and candidate.status != ReportLetterheadVersionStatus.ARCHIVED:
+            resolved_letterhead_version = candidate
+
+    if resolved_letterhead_version is None:
+        default_letterhead = session.exec(
+            select(ReportLetterhead).where(
+                ReportLetterhead.tenant_id == ctx.tenant_id,
+                ReportLetterhead.is_default == True,
+            )
+        ).first()
+        if default_letterhead is not None:
+            resolved_letterhead_version = session.exec(
+                select(ReportLetterheadVersion).where(
+                    ReportLetterheadVersion.report_letterhead_id == default_letterhead.id,
+                    ReportLetterheadVersion.status == ReportLetterheadVersionStatus.ACTIVE,
+                )
+            ).first()
+
+    letterhead_name = None
+    if resolved_letterhead_version is not None:
+        letterhead = session.get(
+            ReportLetterhead, resolved_letterhead_version.report_letterhead_id
+        )
+        letterhead_name = letterhead.name if letterhead else None
+
+    return StudyTypeReportDefaultsResponse(
+        template_id=str(template_id) if template_id else None,
+        active_template_version_id=(
+            str(active_template_version_id) if active_template_version_id else None
+        ),
+        letterhead_version_id=(
+            str(resolved_letterhead_version.id) if resolved_letterhead_version else None
+        ),
+        letterhead_name=letterhead_name,
+    )

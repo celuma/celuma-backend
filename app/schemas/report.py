@@ -44,6 +44,14 @@ class ReportCreate(BaseModel):
     # — this id is a selection, never a trusted snapshot. See
     # phase-2-block-b-architecture-decision.md.
     template_version_id: Optional[str] = None
+    # Post-Fase-2 remediation: caller may select a published/active
+    # ReportLetterheadVersion to brand this V2 report. If omitted, the
+    # backend resolves one server-side (template preference -> tenant
+    # default) and, if none is resolvable, falls back to the template
+    # version's own embedded `presentation` — never blocked, to avoid
+    # silently breaking tenants that have not adopted the letterhead
+    # domain yet. See template-letterhead-association-contract.md.
+    letterhead_version_id: Optional[str] = None
 
 class ReportResolvedResources(BaseModel):
     """Céluma 1.3 Fase 2, Bloque C, Historia C1.
@@ -85,6 +93,11 @@ class ReportDetailResponse(BaseModel):
     # All null for legacy reports (schema_version absent/1).
     schema_version: Optional[int] = None
     template_version_id: Optional[str] = None
+    # Post-Fase-2 remediation: administrative twin of `template_version_id`
+    # — which ReportLetterheadVersion produced this version's `presentation`
+    # block. None for legacy reports and for V2 reports created before this
+    # remediation (never backfilled).
+    letterhead_version_id: Optional[str] = None
     generated_by_renderer_version: Optional[str] = None
     # Céluma 1.3 Fase 2, Bloque C: ephemeral, request-scoped resources
     # resolved from `report.rendering_snapshot` (never part of the snapshot
@@ -122,6 +135,7 @@ class ReportVersionResponse(BaseModel):
     is_current: bool
     schema_version: Optional[int] = None
     template_version_id: Optional[str] = None
+    letterhead_version_id: Optional[str] = None
     generated_by_renderer_version: Optional[str] = None
 
 
@@ -211,6 +225,11 @@ class ReportTemplateUpdate(BaseModel):
     description: Optional[str] = None
     template_json: Optional[Dict[str, Any]] = None
     is_active: Optional[bool] = None
+    # Post-Fase-2 remediation: administrative preference only, not
+    # ownership — see template-letterhead-association-contract.md. Omitting
+    # a preference (or None means "no preference") falls back to the
+    # tenant's default letterhead at report-creation time.
+    preferred_letterhead_version_id: Optional[str] = None
 
 
 class ReportTemplateResponse(BaseModel):
@@ -221,6 +240,7 @@ class ReportTemplateResponse(BaseModel):
     description: Optional[str] = None
     is_active: bool
     created_at: datetime
+    preferred_letterhead_version_id: Optional[str] = None
 
 
 class ReportTemplateDetailResponse(BaseModel):
@@ -233,6 +253,7 @@ class ReportTemplateDetailResponse(BaseModel):
     created_by: Optional[str] = None
     is_active: bool
     created_at: datetime
+    preferred_letterhead_version_id: Optional[str] = None
 
 
 class ReportTemplatesListResponse(BaseModel):

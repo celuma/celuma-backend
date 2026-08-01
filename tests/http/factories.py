@@ -106,6 +106,68 @@ def create_storage_object(
     return obj
 
 
+def valid_presentation(**overrides) -> dict:
+    """A ReportPresentationSnapshotV2-shaped payload — post-Fase-2
+    remediation, used as the `configuration` of a
+    ReportLetterheadVersionCreate request. Field-for-field the same shape
+    as valid_rendering_snapshot()'s `presentation` key, kept separate so
+    letterhead tests don't depend on the template-version helper."""
+    base = {
+        "paper": {
+            "size": "LETTER",
+            "orientation": "PORTRAIT",
+            "margins_cm": {"top": 2.0, "right": 2.0, "bottom": 2.0, "left": 2.0},
+        },
+        "header": {
+            "enabled": True,
+            "institution_name": "Céluma Labs",
+            "subtitle": "Diagnóstico Anatomopatológico",
+            "address": "Av. Siempre Viva 123",
+            "phone": "+52 55 1234 5678",
+            "email": "contacto@celuma.example",
+        },
+        "footer": {"enabled": True, "custom_text": "Confidencial", "show_page_number": True},
+        "style": {"primary_color": "#336699"},
+    }
+    base.update(overrides)
+    return base
+
+
+def create_letterhead(session: Session, tenant: Tenant, *, name: str = "Default Letterhead") -> "ReportLetterhead":
+    from app.models.report_letterhead import ReportLetterhead
+
+    letterhead = ReportLetterhead(tenant_id=tenant.id, name=name, is_active=True)
+    session.add(letterhead)
+    session.commit()
+    session.refresh(letterhead)
+    return letterhead
+
+
+def create_letterhead_version(
+    session: Session,
+    tenant: Tenant,
+    letterhead: "ReportLetterhead",
+    *,
+    version_number: int = 1,
+    status: str = "PUBLISHED",
+    configuration: Optional[dict] = None,
+) -> "ReportLetterheadVersion":
+    from app.models.report_letterhead_version import ReportLetterheadVersion
+
+    version = ReportLetterheadVersion(
+        tenant_id=tenant.id,
+        report_letterhead_id=letterhead.id,
+        version_number=version_number,
+        schema_version=2,
+        configuration=configuration or valid_presentation(),
+        status=status,
+    )
+    session.add(version)
+    session.commit()
+    session.refresh(version)
+    return version
+
+
 def valid_rendering_snapshot(**overrides) -> dict:
     """A ReportRenderingSnapshotV2-shaped payload usable as the `configuration`
     of a `ReportTemplateVersionCreate` request."""

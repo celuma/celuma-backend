@@ -18,6 +18,7 @@ from app.api.v1.patients import router as patients_router
 from app.api.v1.requesting_physicians import router as requesting_physicians_router
 from app.api.v1.laboratory import router as laboratory_router
 from app.api.v1.reports import router as reports_router
+from app.api.v1.report_letterheads import router as report_letterheads_router
 from app.api.v1.report_sections import router as report_sections_router
 from app.api.v1.study_types import router as study_types_router
 from app.api.v1.price_catalog import router as price_catalog_router
@@ -279,6 +280,9 @@ app.include_router(patients_router, prefix="/api/v1", dependencies=[Depends(curr
 app.include_router(requesting_physicians_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(laboratory_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(reports_router, prefix="/api/v1", dependencies=[Depends(current_user)])
+app.include_router(
+    report_letterheads_router, prefix="/api/v1", dependencies=[Depends(current_user)]
+)
 app.include_router(report_sections_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(study_types_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(price_catalog_router, prefix="/api/v1", dependencies=[Depends(current_user)])

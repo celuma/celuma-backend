@@ -107,3 +107,23 @@ class StudyTypeRef(BaseModel):
     id: str
     code: str
     name: str
+
+
+class StudyTypeReportDefaultsResponse(BaseModel):
+    """Post-Fase-2 remediation: one round-trip resolving everything the
+    report editor needs to bootstrap a brand-new V2 report — clinical
+    template, its active version, and the letterhead that would be used if
+    the user does not override it. Replaces the previous 3-sequential-fetch
+    dance (study type -> template -> template versions), reducing the
+    number of intermediate states the editor can render in (see
+    report-editor-letterhead-selection-contract.md, "Preview inicial V2").
+
+    All fields are None when nothing is resolvable (e.g. no default
+    template, no ACTIVE version, no letterhead) — the caller decides how to
+    react (mirrors today's `v2ConfigBlocked` behavior), this endpoint never
+    raises for an unconfigured tenant.
+    """
+    template_id: Optional[str] = None
+    active_template_version_id: Optional[str] = None
+    letterhead_version_id: Optional[str] = None
+    letterhead_name: Optional[str] = None

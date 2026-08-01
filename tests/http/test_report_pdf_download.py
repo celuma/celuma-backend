@@ -76,7 +76,11 @@ class TestOfficialDownload:
         user_b = create_user(session, tenant_b, email="u@t2.example")
 
         resp = client.get(f"/api/v1/reports/{report.id}/versions/1/pdf", headers=auth_headers(user_b))
-        assert resp.status_code in (403, 404)
+        # Post-Fase-2 remediation: tightened from `in (403, 404)` now that
+        # the tenant-mismatch inconsistency between this endpoint and its
+        # "latest version" sibling is fixed — see
+        # test_report_pdf_download_permissions.py for the full matrix.
+        assert resp.status_code == 404
 
     def test_published_pdf_survives_and_remains_downloadable(self, client, session, stub_pdf_render):
         """A published report's PDF must stay downloadable — the download

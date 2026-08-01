@@ -71,6 +71,16 @@ class ReportVersion(BaseModel, TimestampMixin, table=True):
     pdf_error_code: Optional[str] = Field(max_length=50, default=None)
     pdf_error_message: Optional[str] = Field(max_length=500, default=None)
 
+    # Post-Fase-2 remediation: administrative/audit twin of
+    # `template_version_id` — records which letterhead version produced
+    # this report version's `presentation` block. Nullable/additive,
+    # never backfilled. NOT the source of truth for rendering: that
+    # remains the embedded `rendering_snapshot.presentation` in the JSON
+    # body (see report-letterhead-version-contract.md).
+    letterhead_version_id: Optional[UUID] = Field(
+        foreign_key="report_letterhead_version.id", default=None
+    )
+
     # Basic relationships only
     report: Report = Relationship(back_populates="versions")
 
@@ -86,3 +96,13 @@ class ReportTemplate(BaseModel, TimestampMixin, TenantMixin, table=True):
     template_json: Dict[str, Any] = Field(sa_type=JSON, default={})
     created_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
     is_active: bool = Field(default=True)
+
+    # Post-Fase-2 remediation: administrative preference, not ownership.
+    # When a report is created from this clinical template, this is the
+    # letterhead version preselected (before falling back to the tenant's
+    # default letterhead) — see template-letterhead-association-contract.md.
+    # A NULL value does not mean "no branding"; it means "resolve the
+    # tenant default at creation time."
+    preferred_letterhead_version_id: Optional[UUID] = Field(
+        foreign_key="report_letterhead_version.id", default=None
+    )

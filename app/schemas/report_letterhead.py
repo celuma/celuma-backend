@@ -1,0 +1,138 @@
+"""Request/response schemas for the shared, tenant-owned letterhead
+("membrete") domain — post-Fase-2 remediation.
+
+`ReportLetterheadVersionCreate.configuration` reuses
+`ReportPresentationSnapshotV2` verbatim from
+`app/schemas/report_template_version.py` (the same model already embedded
+in `ReportRenderingSnapshotV2.presentation`) so the two contracts can never
+diverge — see report-letterhead-version-contract.md.
+"""
+from datetime import datetime
+from typing import Dict, Any, List, Optional
+
+from pydantic import BaseModel
+
+from app.schemas.report_template_version import ReportPresentationSnapshotV2
+
+
+# ---------------------------------------------------------------------------
+# ReportLetterhead (shell) schemas
+# ---------------------------------------------------------------------------
+
+class ReportLetterheadCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+
+class ReportLetterheadUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class ReportLetterheadResponse(BaseModel):
+    id: str
+    tenant_id: str
+    name: str
+    description: Optional[str] = None
+    is_default: bool
+    is_active: bool
+    created_at: datetime
+
+
+class ReportLetterheadDetailResponse(ReportLetterheadResponse):
+    created_by: Optional[str] = None
+
+
+class ReportLetterheadsListResponse(BaseModel):
+    letterheads: List[ReportLetterheadResponse]
+
+
+# ---------------------------------------------------------------------------
+# ReportLetterheadVersion (immutable, published presentation) schemas
+# ---------------------------------------------------------------------------
+
+class ReportLetterheadVersionCreate(BaseModel):
+    """Payload to publish a new, immutable letterhead version."""
+    configuration: ReportPresentationSnapshotV2
+
+
+class ReportLetterheadVersionResponse(BaseModel):
+    """Lightweight version metadata — never includes `configuration`."""
+    id: str
+    tenant_id: str
+    report_letterhead_id: str
+    version_number: int
+    schema_version: int
+    status: str
+    created_by: Optional[str] = None
+    published_at: datetime
+    activated_at: Optional[datetime] = None
+    archived_at: Optional[datetime] = None
+
+
+class ReportLetterheadVersionDetailResponse(ReportLetterheadVersionResponse):
+    """Full version detail, including the immutable configuration."""
+    configuration: Dict[str, Any]
+
+
+class ReportLetterheadVersionsListResponse(BaseModel):
+    versions: List[ReportLetterheadVersionResponse]
+
+
+# ---------------------------------------------------------------------------
+# Letterhead logo upload response — same shape as the template-logo one,
+# defined separately so the two domains stay independently versionable.
+# ---------------------------------------------------------------------------
+
+class ReportLetterheadLogoUploadResponse(BaseModel):
+    storage_object_id: str
+    url: str
+    content_type: str
+    size_bytes: int
+
+
+# ---------------------------------------------------------------------------
+# .celuma portable file format — post-Fase-2 remediation, R12/R13.
+#
+# Deliberately excludes tenant_id, StorageObject id, bucket/key, and any
+# presigned/public URL — the envelope must be portable between tenants and
+# reveal nothing about the exporting tenant's internal identifiers. The
+# logo (if any) travels as base64 bytes + a sha256 hash for corruption
+# detection; import re-validates the decoded bytes through
+# ManagedTenantImageService exactly like a fresh upload (never trusts the
+# embedded content_type/hash blindly). See celuma-letterhead-file-format.md.
+# ---------------------------------------------------------------------------
+
+CELUMA_FORMAT = "celuma-letterhead"
+CELUMA_FORMAT_VERSION = 1
+MAX_CELUMA_LOGO_BYTES = 5 * 1024 * 1024  # matches ManagedTenantImageService's cap
+
+
+class CelumaLetterheadAsset(BaseModel):
+    media_type: str
+    sha256: str
+    data_base64: str
+
+
+class CelumaLetterheadSource(BaseModel):
+    product: str = "Céluma"
+    schema_version: int = 2
+
+
+class CelumaLetterheadPayload(BaseModel):
+    name: str
+    description: Optional[str] = None
+    presentation: ReportPresentationSnapshotV2
+
+
+class CelumaLetterheadEnvelope(BaseModel):
+    """The `.celuma` file's JSON shape (envelope['format'] must equal
+    CELUMA_FORMAT; envelope['source']['format_version'] must be a version
+    this backend understands — currently only 1)."""
+    format: str
+    format_version: int
+    exported_at: str
+    source: CelumaLetterheadSource
+    letterhead: CelumaLetterheadPayload
+    assets: Dict[str, CelumaLetterheadAsset] = {}

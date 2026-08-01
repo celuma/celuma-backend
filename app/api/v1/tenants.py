@@ -6,7 +6,11 @@ from app.core.rbac import has_permission, get_user_roles
 from app.models.tenant import Tenant
 from app.models.user import AppUser
 from app.schemas.tenant import TenantCreate, TenantResponse, TenantDetailResponse
-from app.services.s3 import S3Service
+from app.services.managed_tenant_image_service import (
+    ManagedTenantImageService,
+    InvalidImageError,
+    ImageRegistrationError,
+)
 from pydantic import BaseModel
 from typing import Optional
 import logging
@@ -201,23 +205,27 @@ def upload_tenant_logo(
     
     if str(tenant.id) != ctx.tenant_id:
         raise HTTPException(403, "Cannot update different tenant")
-    
-    # Validate file type
-    content_type = (file.content_type or "").lower()
-    if not any(img_type in content_type for img_type in ["image/jpeg", "image/jpg", "image/png", "image/webp"]):
-        raise HTTPException(400, "Only image files (JPEG, PNG, WEBP) are allowed")
-    
-    # Upload to S3
+
     file_bytes = file.file.read()
-    if not file_bytes:
-        raise HTTPException(400, "Uploaded file is empty")
-    
-    s3 = S3Service()
-    key = f"tenants/{tenant_id}/logo.{file.filename.split('.')[-1]}"
-    info = s3.upload_bytes(file_bytes, key=key, content_type=content_type)
-    
-    # Update tenant logo_url
-    tenant.logo_url = s3.object_public_url(key)
+    try:
+        result = ManagedTenantImageService().upload(
+            file_bytes=file_bytes,
+            declared_content_type=file.content_type or "",
+            tenant_id=tenant.id,
+            key_prefix=f"tenants/{tenant_id}/logo",
+            created_by=user.id,
+            session=session,
+        )
+    except InvalidImageError as exc:
+        raise HTTPException(400, exc.message) from None
+    except ImageRegistrationError:
+        raise HTTPException(500, "Failed to register uploaded logo") from None
+
+    # Update tenant logo_url. Tenant does not carry a logo_storage_id FK
+    # (out of scope for this remediation — see managed-logo-upload-contract.md);
+    # the StorageObject row created above still exists and is tenant-scoped,
+    # it is just not referenced by id from Tenant.
+    tenant.logo_url = result.url
     session.add(tenant)
     session.commit()
     

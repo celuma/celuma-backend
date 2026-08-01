@@ -118,6 +118,12 @@ def _patch_s3(monkeypatch):
     # generated PDF via its own S3Service import — never the real AWS
     # bucket in tests, same as every other flow above.
     monkeypatch.setattr("app.services.report_pdf_generation.S3Service", FakeS3Service)
+    # Post-Fase-2 remediation: ManagedTenantImageService (shared by
+    # template-logo, tenant-logo, and letterhead-logo endpoints) has its
+    # own S3Service import, patched independently of the callers above.
+    monkeypatch.setattr(
+        "app.services.managed_tenant_image_service.S3Service", FakeS3Service
+    )
 
 
 def make_pdf_bytes(num_pages: int = 1) -> bytes:

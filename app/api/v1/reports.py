@@ -6,6 +6,11 @@ from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.models.report import Report, ReportVersion, ReportTemplate
 from app.models.report_template_version import ReportTemplateVersion, ReportTemplateVersionStatus
+from app.models.report_letterhead import ReportLetterhead
+from app.models.report_letterhead_version import (
+    ReportLetterheadVersion,
+    ReportLetterheadVersionStatus,
+)
 from app.models.laboratory import Order
 from app.models.tenant import Tenant, Branch
 from app.models.patient import Patient
@@ -17,6 +22,11 @@ from app.core.rbac import has_permission, has_any_role, ROLE_REVIEWER
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
 from app.services.s3 import S3Service
+from app.services.managed_tenant_image_service import (
+    ManagedTenantImageService,
+    InvalidImageError,
+    ImageRegistrationError,
+)
 from app.services.report_pdf_generation import (
     ReportPdfGenerationService,
     ReportPdfGenerationError,
@@ -53,13 +63,11 @@ from app.schemas.report_template_version import (
     ReportTemplateVersionDetailResponse,
     ReportTemplateVersionsListResponse,
     ReportRenderingSnapshotV2,
+    ReportPresentationSnapshotV2,
     ReportTemplateLogoUploadResponse,
 )
 from app.schemas.laboratory import ReportFullDetailResponse
 from pydantic import ValidationError as PydanticValidationError
-from PIL import Image, UnidentifiedImageError
-from io import BytesIO
-from uuid import uuid4
 import json
 import re
 from datetime import datetime
@@ -318,6 +326,7 @@ def create_report(
     # ------------------------------------------------------------------
     template_version: ReportTemplateVersion | None = None
     validated_snapshot: ReportRenderingSnapshotV2 | None = None
+    resolved_letterhead_version: ReportLetterheadVersion | None = None
     if report_data.template_version_id is not None:
         if not tenant.reports_v2_enabled:
             raise HTTPException(403, "V2 report creation is not enabled for this tenant")
@@ -347,6 +356,74 @@ def create_report(
                 },
             )
             raise HTTPException(500, "Template version configuration is invalid") from exc
+
+        # ------------------------------------------------------------------
+        # Post-Fase-2 remediation, R7: resolve a membrete (letterhead) to
+        # override the template version's embedded `presentation`.
+        # Resolution order: explicit letterhead_version_id -> the owning
+        # template's preferred_letterhead_version_id -> the tenant's default
+        # letterhead's ACTIVE version. If none resolves, silently keep the
+        # template version's own presentation (never blocks V2 creation) —
+        # this is what keeps tenants that have not adopted the letterhead
+        # domain yet byte-for-byte unchanged.
+        # ------------------------------------------------------------------
+        if report_data.letterhead_version_id is not None:
+            resolved_letterhead_version = session.get(
+                ReportLetterheadVersion, report_data.letterhead_version_id
+            )
+            if (
+                not resolved_letterhead_version
+                or str(resolved_letterhead_version.tenant_id) != ctx.tenant_id
+            ):
+                raise HTTPException(404, "Letterhead version not found")
+            if resolved_letterhead_version.status == ReportLetterheadVersionStatus.ARCHIVED:
+                raise HTTPException(
+                    409, "Cannot create a report from an archived letterhead version"
+                )
+        else:
+            owning_template = session.get(ReportTemplate, template_version.report_template_id)
+            preferred_id = (
+                owning_template.preferred_letterhead_version_id if owning_template else None
+            )
+            if preferred_id is not None:
+                candidate = session.get(ReportLetterheadVersion, preferred_id)
+                if candidate is not None and candidate.status != ReportLetterheadVersionStatus.ARCHIVED:
+                    resolved_letterhead_version = candidate
+            if resolved_letterhead_version is None:
+                default_letterhead = session.exec(
+                    select(ReportLetterhead).where(
+                        ReportLetterhead.tenant_id == ctx.tenant_id,
+                        ReportLetterhead.is_default == True,
+                    )
+                ).first()
+                if default_letterhead is not None:
+                    resolved_letterhead_version = session.exec(
+                        select(ReportLetterheadVersion).where(
+                            ReportLetterheadVersion.report_letterhead_id == default_letterhead.id,
+                            ReportLetterheadVersion.status == ReportLetterheadVersionStatus.ACTIVE,
+                        )
+                    ).first()
+
+        if resolved_letterhead_version is not None:
+            try:
+                resolved_presentation = ReportPresentationSnapshotV2.model_validate(
+                    resolved_letterhead_version.configuration
+                )
+            except PydanticValidationError as exc:
+                logger.error(
+                    "Stored letterhead version configuration failed re-validation",
+                    extra={
+                        "event": "report.create_v2_invalid_letterhead_version_configuration",
+                        "letterhead_version_id": str(resolved_letterhead_version.id),
+                        "error": str(exc),
+                    },
+                )
+                raise HTTPException(500, "Letterhead version configuration is invalid") from exc
+            validated_snapshot = ReportRenderingSnapshotV2(
+                schema_version=2,
+                template=validated_snapshot.template,
+                presentation=resolved_presentation,
+            )
 
     report = Report(
         tenant_id=report_data.tenant_id,
@@ -457,6 +534,11 @@ def create_report(
                 generated_by_renderer_version=(
                     f"backend-snapshot-builder/{SNAPSHOT_BUILDER_VERSION}" if is_v2 else None
                 ),
+                letterhead_version_id=(
+                    resolved_letterhead_version.id
+                    if is_v2 and resolved_letterhead_version
+                    else None
+                ),
             )
             session.add(version)
             session.commit()
@@ -508,7 +590,7 @@ def _carry_forward_v2_metadata(
     current_version: ReportVersion | None,
     report_body: dict | None,
     session: Session,
-) -> tuple[dict | None, int | None, str | None, str | None]:
+) -> tuple[dict | None, int | None, str | None, str | None, str | None]:
     """Céluma 1.3 Fase 2, Bloque C, Historia C9.
 
     `create_report_new_version` only ever changes clinical content — it must
@@ -527,14 +609,21 @@ def _carry_forward_v2_metadata(
     ReportTemplateVersion (that would violate "no reconsultar la plantilla
     administrativa"), and never trusts a `rendering_snapshot` the client may
     have sent, only ever the one already persisted for this report.
+
+    Post-Fase-2 remediation: also carries forward `letterhead_version_id`,
+    the administrative twin of `template_version_id` — the membrete
+    selector is only ever shown before a report's first save (D10), so a
+    content-only save on an existing report must never change which
+    letterhead produced its frozen `presentation` block.
     """
     if current_version is None or current_version.schema_version != 2:
-        return report_body, None, None, None
+        return report_body, None, None, None, None
 
     carried_metadata = (
         current_version.schema_version,
         str(current_version.template_version_id) if current_version.template_version_id else None,
         current_version.generated_by_renderer_version,
+        str(current_version.letterhead_version_id) if current_version.letterhead_version_id else None,
     )
 
     if report_body is None:
@@ -608,9 +697,13 @@ def create_report_new_version(
     ).first()
     next_version_no = (current_version.version_no + 1) if current_version else 1
 
-    carried_report_body, carried_schema_version, carried_template_version_id, carried_renderer_version = (
-        _carry_forward_v2_metadata(current_version, report_data.report, session)
-    )
+    (
+        carried_report_body,
+        carried_schema_version,
+        carried_template_version_id,
+        carried_renderer_version,
+        carried_letterhead_version_id,
+    ) = _carry_forward_v2_metadata(current_version, report_data.report, session)
 
     json_storage_id = None
     if carried_report_body is not None:
@@ -651,6 +744,7 @@ def create_report_new_version(
         schema_version=carried_schema_version,
         template_version_id=carried_template_version_id,
         generated_by_renderer_version=carried_renderer_version,
+        letterhead_version_id=carried_letterhead_version_id,
     )
     session.add(new_version)
     
@@ -697,6 +791,9 @@ def create_report_new_version(
         schema_version=new_version.schema_version,
         template_version_id=(
             str(new_version.template_version_id) if new_version.template_version_id else None
+        ),
+        letterhead_version_id=(
+            str(new_version.letterhead_version_id) if new_version.letterhead_version_id else None
         ),
         generated_by_renderer_version=new_version.generated_by_renderer_version,
     )
@@ -807,6 +904,11 @@ def list_templates(
                 description=t.description,
                 is_active=t.is_active,
                 created_at=t.created_at,
+                preferred_letterhead_version_id=(
+                    str(t.preferred_letterhead_version_id)
+                    if t.preferred_letterhead_version_id
+                    else None
+                ),
             )
             for t in templates
         ]
@@ -838,6 +940,11 @@ def get_template(
         created_by=str(template.created_by) if template.created_by else None,
         is_active=template.is_active,
         created_at=template.created_at,
+        preferred_letterhead_version_id=(
+            str(template.preferred_letterhead_version_id)
+            if template.preferred_letterhead_version_id
+            else None
+        ),
     )
 
 
@@ -909,11 +1016,29 @@ def update_template(
         flag_modified(template, "template_json")
     if template_data.is_active is not None:
         template.is_active = template_data.is_active
-    
+    # Post-Fase-2 remediation: unlike the fields above, an explicit null is
+    # meaningful here ("no preference, use the tenant default") — so this
+    # checks `model_fields_set` instead of `is not None`.
+    if "preferred_letterhead_version_id" in template_data.model_fields_set:
+        new_pref = template_data.preferred_letterhead_version_id
+        if new_pref is not None:
+            pref_version = session.get(ReportLetterheadVersion, new_pref)
+            if (
+                not pref_version
+                or str(pref_version.tenant_id) != ctx.tenant_id
+                or pref_version.status == ReportLetterheadVersionStatus.ARCHIVED
+            ):
+                raise HTTPException(
+                    400,
+                    "preferred_letterhead_version_id must reference a "
+                    "non-archived letterhead version owned by this tenant",
+                )
+        template.preferred_letterhead_version_id = new_pref
+
     session.add(template)
     session.commit()
     session.refresh(template)
-    
+
     logger.info(
         f"Report template '{template.name}' updated",
         extra={
@@ -922,7 +1047,7 @@ def update_template(
             "user_id": str(user.id),
         },
     )
-    
+
     return ReportTemplateResponse(
         id=str(template.id),
         tenant_id=str(template.tenant_id),
@@ -930,6 +1055,11 @@ def update_template(
         description=template.description,
         is_active=template.is_active,
         created_at=template.created_at,
+        preferred_letterhead_version_id=(
+            str(template.preferred_letterhead_version_id)
+            if template.preferred_letterhead_version_id
+            else None
+        ),
     )
 
 
@@ -1276,30 +1406,14 @@ def archive_template_version(
 # Uploads a logo image to be referenced (by StorageObject id) as
 # `presentation.header.logo_storage_id` when publishing a
 # ReportTemplateVersion (see create_template_version above, which validates
-# tenant ownership of the referenced object at publish time). Follows the
-# StorageObject-creating pattern used by upload_my_signature
-# (app/api/v1/users.py) rather than upload_tenant_logo (app/api/v1/tenants.py,
-# which sets a plain string field and creates no StorageObject) — a
+# tenant ownership of the referenced object at publish time). A
 # report-template logo must be resolvable by id, with tenant_id populated,
 # per report-resource-resolution-contract.md. SVG is explicitly rejected: it
 # can carry embedded scripts/markup, which nothing else in this contract
-# permits.
+# permits. Validation/upload shared with the tenant-logo and letterhead-logo
+# endpoints via `ManagedTenantImageService` — see
+# managed-logo-upload-contract.md.
 # ============================================================================
-
-_TEMPLATE_LOGO_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
-_TEMPLATE_LOGO_MAX_DIMENSION_PX = 4000  # sanity cap, not a specific design requirement
-_TEMPLATE_LOGO_CONTENT_TYPE_TO_FORMAT = {
-    "image/png": "PNG",
-    "image/jpeg": "JPEG",
-    "image/jpg": "JPEG",
-    "image/webp": "WEBP",
-}
-_TEMPLATE_LOGO_FORMAT_TO_CANONICAL = {
-    "PNG": ("image/png", "png"),
-    "JPEG": ("image/jpeg", "jpg"),
-    "WEBP": ("image/webp", "webp"),
-}
-
 
 @router.post(
     "/templates/{template_id}/logo",
@@ -1317,80 +1431,27 @@ def upload_template_logo(
     Returns a `storage_object_id` to use as `logo_storage_id` when publishing
     a version. Does not touch any ReportTemplateVersion — publishing is a
     separate, explicit step (create_template_version).
+
+    Validation/upload delegated to `ManagedTenantImageService`, shared with
+    the letterhead-logo endpoint and the tenant-logo endpoint (post-Fase-2
+    remediation R5/R9 — see managed-logo-upload-contract.md).
     """
     _require(user.id, "reports:manage_templates", session)
     template = _get_owned_template(template_id, ctx, session)
 
-    declared_content_type = (file.content_type or "").split(";")[0].strip().lower()
-    expected_format = _TEMPLATE_LOGO_CONTENT_TYPE_TO_FORMAT.get(declared_content_type)
-    if expected_format is None:
-        raise HTTPException(
-            400, "Only PNG, JPEG, or WEBP images are allowed (SVG is not supported)"
-        )
-
     file_bytes = file.file.read()
-    if not file_bytes:
-        raise HTTPException(400, "Uploaded file is empty")
-    if len(file_bytes) > _TEMPLATE_LOGO_MAX_BYTES:
-        raise HTTPException(400, "Logo file size must be less than 5MB")
-
     try:
-        with Image.open(BytesIO(file_bytes)) as probe:
-            probe.verify()
-        with Image.open(BytesIO(file_bytes)) as img:
-            actual_format = img.format
-            width, height = img.size
-    except (UnidentifiedImageError, OSError, ValueError):
-        raise HTTPException(400, "Uploaded file is not a valid image")
-
-    if actual_format != expected_format:
-        raise HTTPException(
-            400, "Declared content type does not match the actual image content"
-        )
-    if width > _TEMPLATE_LOGO_MAX_DIMENSION_PX or height > _TEMPLATE_LOGO_MAX_DIMENSION_PX:
-        raise HTTPException(
-            400, f"Image dimensions must not exceed {_TEMPLATE_LOGO_MAX_DIMENSION_PX}px"
-        )
-
-    content_type, ext = _TEMPLATE_LOGO_FORMAT_TO_CANONICAL[actual_format]
-
-    s3 = S3Service()
-    key = f"report-templates/{template_id}/logos/{uuid4().hex}.{ext}"
-    info = s3.upload_bytes(file_bytes, key=key, content_type=content_type)
-
-    try:
-        storage = StorageObject(
-            provider="aws",
-            region=s3.region,
-            bucket=info.bucket,
-            object_key=info.key,
-            version_id=info.version_id,
-            etag=info.etag,
-            content_type=content_type,
-            size_bytes=info.size_bytes,
-            created_by=user.id,
-            # Populated (unlike most StorageObject rows) because this object
-            # must be resolvable by id alone, with no parent entity to check
-            # ownership through — see storage.py's tenant_id comment.
+        result = ManagedTenantImageService().upload(
+            file_bytes=file_bytes,
+            declared_content_type=file.content_type or "",
             tenant_id=template.tenant_id,
+            key_prefix=f"report-templates/{template_id}/logos",
+            created_by=user.id,
+            session=session,
         )
-        session.add(storage)
-        session.commit()
-        session.refresh(storage)
-    except Exception:
-        session.rollback()
-        try:
-            s3.delete_object(key)
-        except Exception:
-            logger.error(
-                "Failed to compensate (delete orphaned S3 object) after a "
-                "StorageObject creation failure",
-                extra={
-                    "event": "report_template_logo.compensation_failed",
-                    "template_id": template_id,
-                    "key": key,
-                },
-            )
+    except InvalidImageError as exc:
+        raise HTTPException(400, exc.message) from None
+    except ImageRegistrationError:
         raise HTTPException(500, "Failed to register uploaded logo") from None
 
     logger.info(
@@ -1398,16 +1459,16 @@ def upload_template_logo(
         extra={
             "event": "report_template_logo.uploaded",
             "template_id": template_id,
-            "storage_object_id": str(storage.id),
+            "storage_object_id": str(result.storage_object.id),
             "user_id": str(user.id),
         },
     )
 
     return ReportTemplateLogoUploadResponse(
-        storage_object_id=str(storage.id),
-        url=s3.object_public_url(key),
-        content_type=content_type,
-        size_bytes=info.size_bytes,
+        storage_object_id=str(result.storage_object.id),
+        url=result.url,
+        content_type=result.content_type,
+        size_bytes=result.size_bytes,
     )
 
 
@@ -1491,6 +1552,11 @@ def _build_report_detail_response(
         template_version_id=(
             str(version.template_version_id)
             if version and version.template_version_id
+            else None
+        ),
+        letterhead_version_id=(
+            str(version.letterhead_version_id)
+            if version and version.letterhead_version_id
             else None
         ),
         generated_by_renderer_version=(
@@ -1917,10 +1983,13 @@ def get_pdf_of_specific_version(
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
-    
-    # Verify report belongs to the authenticated user's tenant
+
+    # Post-Fase-2 remediation (bug 4): tenant mismatch now 404s, matching
+    # get_pdf_of_latest_version and every other report-lookup endpoint in
+    # this file — a 403 here previously leaked "this report exists but
+    # belongs to another tenant", inconsistent with the rest of the API.
     if str(report.tenant_id) != ctx.tenant_id:
-        raise HTTPException(403, "Report does not belong to your tenant")
+        raise HTTPException(404, "Report not found")
 
     # Check if order is locked due to pending payment
     order = session.get(Order, report.order_id)
