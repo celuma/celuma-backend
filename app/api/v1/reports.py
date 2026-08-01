@@ -1527,28 +1527,46 @@ def _resolve_report_resources(
     if not isinstance(snapshot, dict):
         return None
     presentation = snapshot.get("presentation")
-    header = presentation.get("header") if isinstance(presentation, dict) else None
-    logo_storage_id = header.get("logo_storage_id") if isinstance(header, dict) else None
-    if not logo_storage_id:
+    if not isinstance(presentation, dict):
         return None
-
-    try:
-        logo_object = session.get(StorageObject, logo_storage_id)
-    except (ValueError, TypeError):
-        logo_object = None
-    if not logo_object:
-        return None
-    # Defense in depth: the object was already validated as belonging to
-    # this tenant when the ReportTemplateVersion that produced this
-    # snapshot was published (create_template_version). Re-checking here
-    # means a future bug in that check, or a historical row inserted before
-    # this validation existed, can never leak a cross-tenant logo through a
-    # report read.
-    if str(logo_object.tenant_id) != str(report.tenant_id):
+    header = presentation.get("header")
+    footer = presentation.get("footer")
+    header_logo_storage_id = header.get("logo_storage_id") if isinstance(header, dict) else None
+    footer_logo_storage_id = footer.get("logo_storage_id") if isinstance(footer, dict) else None
+    if not header_logo_storage_id and not footer_logo_storage_id:
         return None
 
     s3 = S3Service()
-    return ReportResolvedResources(header_logo_url=s3.object_public_url(logo_object.object_key))
+
+    def _resolve_one(storage_id: str | None) -> str | None:
+        if not storage_id:
+            return None
+        try:
+            logo_object = session.get(StorageObject, storage_id)
+        except (ValueError, TypeError):
+            return None
+        if not logo_object:
+            return None
+        # Defense in depth: the object was already validated as belonging
+        # to this tenant when the ReportTemplateVersion/ReportLetterheadVersion
+        # that produced this snapshot was published. Re-checking here means
+        # a future bug in that check, or a historical row inserted before
+        # this validation existed, can never leak a cross-tenant logo
+        # through a report read.
+        if str(logo_object.tenant_id) != str(report.tenant_id):
+            return None
+        return s3.object_public_url(logo_object.object_key)
+
+    header_logo_url = _resolve_one(header_logo_storage_id)
+    footer_logo_url = _resolve_one(footer_logo_storage_id)
+    if header_logo_url is None and footer_logo_url is None:
+        # Preserves the pre-existing contract: `resolved_resources` is None
+        # whenever there's nothing usable to resolve — whether because
+        # nothing was referenced, or because every reference that WAS
+        # present failed validation (e.g. cross-tenant) — never an object
+        # with every field null.
+        return None
+    return ReportResolvedResources(header_logo_url=header_logo_url, footer_logo_url=footer_logo_url)
 
 
 def _build_report_detail_response(

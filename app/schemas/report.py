@@ -64,6 +64,10 @@ class ReportResolvedResources(BaseModel):
     logo configured). See report-resource-resolution-contract.md.
     """
     header_logo_url: Optional[str] = None
+    # Segunda remediación post-Fase 2 (UX): gemelo de header_logo_url para
+    # presentation.footer.logo_storage_id — necesario para paridad Legacy
+    # (el logo de Legacy vive en el pie, no en el header).
+    footer_logo_url: Optional[str] = None
 
 
 class ReportResponse(BaseModel):
