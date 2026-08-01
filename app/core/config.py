@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     pdf_max_size_bytes: int = 25 * 1024 * 1024  # 25 MB
     pdf_max_page_count: int = 100
 
+    # Segunda remediación post-Fase 2 (UX): staleness window for the
+    # sign-and-publish claim (publish_started_at/by on ReportVersion),
+    # mirroring pdf_generation_timeout_seconds's `* 3` staleness pattern.
+    # Larger than pure PDF generation because the claim also spans the
+    # signature-embedding JSON rewrite and the final publish transaction.
+    report_publish_timeout_seconds: int = 45
+
     class Config:
         env_file = ".env"
 

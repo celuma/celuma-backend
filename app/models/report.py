@@ -81,6 +81,14 @@ class ReportVersion(BaseModel, TimestampMixin, table=True):
         foreign_key="report_letterhead_version.id", default=None
     )
 
+    # Post-Fase-2 UX remediation: lightweight claim guarding sign-and-publish
+    # against double-firma/double-Chromium/concurrent-publish. Mirrors the
+    # pdf_generation_started_at staleness pattern. Cleared on both success
+    # and failure; a stale (crashed) claim is recoverable, never a permanent
+    # lock. See signed-pdf-publication-workflow.md.
+    publish_started_at: Optional[datetime] = Field(default=None)
+    publish_started_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
+
     # Basic relationships only
     report: Report = Relationship(back_populates="versions")
 
@@ -105,4 +113,14 @@ class ReportTemplate(BaseModel, TimestampMixin, TenantMixin, table=True):
     # tenant default at creation time."
     preferred_letterhead_version_id: Optional[UUID] = Field(
         foreign_key="report_letterhead_version.id", default=None
+    )
+
+    # Segunda remediación post-Fase 2 (UX): the logical letterhead preferred
+    # for this template, not a specific version. This is the field the app
+    # writes going forward — `preferred_letterhead_version_id` above becomes
+    # read-only, kept only so old rows keep resolving. See
+    # template-simplification-contract.md and
+    # report-letterhead-selection-ux.md for the full resolution order.
+    preferred_letterhead_id: Optional[UUID] = Field(
+        foreign_key="report_letterhead.id", default=None
     )
