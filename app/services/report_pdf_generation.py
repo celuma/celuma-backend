@@ -60,12 +60,26 @@ class ReportPdfGenerationService:
         self.session = session
 
     def generate(
-        self, report: Report, version: ReportVersion, triggered_by_user_id: UUID | None
+        self,
+        report: Report,
+        version: ReportVersion,
+        triggered_by_user_id: UUID | None,
+        force: bool = False,
     ) -> ReportVersion:
         """Generate (or idempotently re-confirm) the official PDF for one
         ReportVersion. Raises ReportPdfGenerationError subclasses on any
         rejection or failure; the caller (the HTTP endpoint) maps those to
         the appropriate status code.
+
+        `force=True` (segunda remediación post-Fase 2, UX) bypasses the
+        READY short-circuit below — used exclusively by
+        `report_publishing.sign_and_publish`, which may need to embed
+        signature metadata into the report's JSON body immediately before
+        calling this, and a stale READY from an earlier (pre-signature)
+        generation must never be trusted as-is: the official PDF must
+        always reflect the just-signed content. Does not bypass the
+        GENERATING-in-progress guard below — a real concurrent generation
+        still wins.
         """
         if report.status in _IMMUTABLE_REPORT_STATUSES:
             # Checked before the READY idempotency short-circuit below,
@@ -78,7 +92,7 @@ class ReportPdfGenerationService:
                 "REPORT_IMMUTABLE", "Cannot generate a PDF for a published or retracted report"
             )
 
-        if version.pdf_generation_status == _READY:
+        if version.pdf_generation_status == _READY and not force:
             # Idempotent: already generated, nothing to do. Covers a
             # deliberate re-check or a double-click from the UI, always
             # pre-publish (see the immutable-status check above).

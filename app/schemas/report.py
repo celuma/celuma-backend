@@ -211,6 +211,19 @@ class ReportActionResponse(BaseModel):
     message: str
 
 
+class ReportSignAndPublishResponse(ReportActionResponse):
+    """Segunda remediación post-Fase 2 (UX): respuesta de
+    `POST /{report_id}/sign-and-publish` — el reporte publicado junto con
+    los metadatos del PDF oficial recién generado (ya firmado), para que el
+    frontend no necesite un segundo round-trip antes de ofrecer la
+    descarga."""
+    pdf_generation_status: Optional[str] = None
+    pdf_sha256: Optional[str] = None
+    pdf_size_bytes: Optional[int] = None
+    pdf_page_count: Optional[int] = None
+    pdf_generated_at: Optional[datetime] = None
+
+
 # Report Template Schemas
 class ReportTemplateCreate(BaseModel):
     """Schema for creating a report template"""

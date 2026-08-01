@@ -36,6 +36,15 @@ from app.services.report_pdf_generation import (
 )
 from app.services.letterhead_resolution import resolve_fallback_letterhead_version
 from app.services.report_template_autoversion import snapshot_and_activate_template_version
+from app.services.report_publishing import (
+    embed_signature_metadata_if_required,
+    claim_publish,
+    clear_publish_claim,
+    finalize_publish,
+    ReportPublishError,
+    ReportPublishAlreadyInProgressError,
+    ReportPublishConflictError,
+)
 from app.schemas.report import (
     ReportCreate, 
     ReportResponse, 
@@ -51,6 +60,7 @@ from app.schemas.report import (
     ReportSignRequest,
     ReportReviewComment,
     ReportActionResponse,
+    ReportSignAndPublishResponse,
     ReportTemplateCreate,
     ReportTemplateUpdate,
     ReportTemplateResponse,
@@ -2467,71 +2477,26 @@ def sign_report(
             "Generate the official PDF before publishing.",
         )
 
-    # If the persisted JSON requires a digital signature, embed the signer's
-    # PNG (presigned URL) into the document under signatureMetadata before
-    # finalising the signature.
-    if current_version.json_storage_id is not None:
-        json_storage = session.get(StorageObject, current_version.json_storage_id)
-        if json_storage is not None:
-            s3 = S3Service()
-            try:
-                raw_json = s3.download_text(json_storage.object_key)
-                report_doc = json.loads(raw_json)
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Failed to load report JSON from S3 while signing",
-                    extra={
-                        "event": "report.sign_json_load_failed",
-                        "report_id": report_id,
-                        "object_key": json_storage.object_key,
-                        "error": str(exc),
-                    },
-                )
-                raise HTTPException(500, "Failed to load report content for signing")
+    # Segunda remediación post-Fase 2 (UX): mismo claim que
+    # sign_and_publish_report usa, como defensa en profundidad contra un
+    # doble-submit directo a este endpoint (el flujo principal de la UI ya
+    # no lo llama, pero sigue existiendo para compatibilidad). No se
+    # mantiene el lock durante la llamada — se libera al hacer commit.
+    try:
+        claim_publish(session, current_version, user.id)
+    except ReportPublishAlreadyInProgressError as exc:
+        raise HTTPException(409, exc.message) from None
 
-            metadata_dict = report_doc.get("signatureMetadata") or {}
-            try:
-                signature_meta = SignatureMetadata.model_validate(metadata_dict)
-            except Exception:
-                # Tolerate legacy or malformed metadata: fall back to defaults.
-                signature_meta = SignatureMetadata()
+    # Si el reporte requiere firma digital, embebe la URL pública de la
+    # firma del usuario en el JSON persistido — ver report_publishing.py.
+    try:
+        embed_signature_metadata_if_required(session, report_id, current_version, user)
+    except ReportPublishError as exc:
+        clear_publish_claim(session, current_version)
+        raise HTTPException(422, exc.message) from None
 
-            if signature_meta.require_digital_signature:
-                if user.signature_storage_id is None:
-                    raise HTTPException(
-                        422,
-                        "Cannot sign: the report requires a digital signature image but the signer has no signature uploaded",
-                    )
-                sig_storage = session.get(StorageObject, user.signature_storage_id)
-                if sig_storage is None:
-                    raise HTTPException(
-                        422,
-                        "Cannot sign: signer's signature storage object is missing",
-                    )
-                # Use the public CDN URL (same pattern as avatars, sample images
-                # and /users/me/signature). Presigned S3 URLs would fail in the
-                # browser when the bucket is fronted by CloudFront with public
-                # access blocked at the S3 level. The signature object key is
-                # already unique per upload (timestamp-suffixed), so no cache
-                # buster query string is needed.
-                signature_url = s3.object_public_url(sig_storage.object_key)
-                report_doc["signatureMetadata"] = {
-                    **metadata_dict,
-                    "show_signature_section": True,
-                    "require_digital_signature": True,
-                    "signature_url": signature_url,
-                }
-
-                updated_bytes = json.dumps(report_doc, ensure_ascii=False).encode("utf-8")
-                info = s3.upload_bytes(
-                    updated_bytes,
-                    key=json_storage.object_key,
-                    content_type="application/json",
-                )
-                json_storage.etag = info.etag
-                json_storage.size_bytes = info.size_bytes
-                json_storage.version_id = info.version_id
-                session.add(json_storage)
+    current_version.publish_started_at = None
+    current_version.publish_started_by = None
 
     # Update version with signature
     current_version.signed_by = user.id
@@ -2605,6 +2570,163 @@ def sign_report(
         id=str(report.id),
         status=report.status,
         message="Report signed and published"
+    )
+
+
+@router.post("/{report_id}/sign-and-publish", response_model=ReportSignAndPublishResponse)
+def sign_and_publish_report(
+    report_id: str,
+    data: ReportSignRequest,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Segunda remediación post-Fase 2 (UX): "Firmar y publicar" como una
+    sola acción de producto (requiere reports:sign + rol reviewer),
+    reemplazando el flujo de dos botones "Generar PDF oficial" -> "Firmar y
+    Publicar" en la UI normal.
+
+    Orquesta, bajo un claim que serializa intentos concurrentes
+    (`publish_started_at`/`publish_started_by` en `ReportVersion`, mismo
+    patrón de staleness que la generación de PDF):
+      1. Embebe la firma digital en el JSON persistido SI el reporte la
+         requiere (antes de generar el PDF, no después — ver
+         signed-pdf-publication-workflow.md sobre por qué el orden
+         anterior era un bug conceptual: el PDF "oficial" nunca reflejaba
+         el estado realmente firmado).
+      2. Genera (forzando regeneración: `force=True`) el PDF oficial
+         reflejando ya ese estado firmado.
+      3. Si ambos pasos tienen éxito, fija signed_by/signed_at y
+         report.status=PUBLISHED atómicamente. Si algo falla, el claim se
+         libera, el reporte permanece APPROVED, y la operación es
+         reintentable — nunca queda un reporte firmado sin publicar, ni un
+         PDF oficial sin la firma.
+
+    `POST .../generate-pdf` y `POST .../sign` (arriba) se mantienen intactos
+    para compatibilidad/uso interno — este endpoint es el único que la UI
+    principal invoca.
+    """
+    if not has_permission(user.id, "reports:sign", session):
+        raise HTTPException(403, "Permission required: reports:sign")
+    if not has_any_role(user.id, {ROLE_REVIEWER}, session):
+        raise HTTPException(403, f"Only users with the '{ROLE_REVIEWER}' role can sign reports")
+
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
+    if report.status != ReportStatus.APPROVED:
+        raise HTTPException(
+            400, f"Cannot sign report in {report.status} status. Report must be approved first."
+        )
+
+    current_version = session.exec(
+        select(ReportVersion).where(
+            ReportVersion.report_id == report.id,
+            ReportVersion.is_current == True,
+        )
+    ).first()
+    if not current_version:
+        raise HTTPException(404, "No current version found for this report")
+
+    report, version = load_locked_version(session, report_id, current_version.version_no)
+    if not report or not version:
+        raise HTTPException(404, "Report or version not found")
+
+    try:
+        claim_publish(session, version, user.id)
+    except ReportPublishAlreadyInProgressError as exc:
+        raise HTTPException(409, exc.message) from None
+
+    try:
+        embed_signature_metadata_if_required(session, report_id, version, user)
+        pdf_service = ReportPdfGenerationService(session)
+        version = pdf_service.generate(report, version, user.id, force=True)
+    except (ReportPdfAlreadyInProgressError, ReportPdfImmutableError) as exc:
+        clear_publish_claim(session, version)
+        raise HTTPException(409, exc.message) from None
+    except ReportPdfGenerationError as exc:
+        clear_publish_claim(session, version)
+        raise HTTPException(422, exc.message) from None
+    except ReportPublishError as exc:
+        clear_publish_claim(session, version)
+        raise HTTPException(422, exc.message) from None
+    except Exception:
+        clear_publish_claim(session, version)
+        raise
+
+    report, version = load_locked_version(session, report_id, version.version_no)
+    old_status = report.status
+    try:
+        finalize_publish(session, report, version, user.id, data.changelog)
+    except ReportPublishConflictError as exc:
+        clear_publish_claim(session, version)
+        raise HTTPException(409, exc.message) from None
+
+    _create_audit_log(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        branch_id=str(report.branch_id),
+        actor_user_id=ctx.user_id,
+        action="REPORT.SIGN_AND_PUBLISH",
+        entity_type="report",
+        entity_id=report_id,
+        old_values={"status": old_status},
+        new_values={
+            "status": report.status,
+            "signed_by": str(user.id),
+            "signed_at": report.published_at.isoformat() if report.published_at else None,
+            "changelog": data.changelog,
+            "pdf_sha256": version.pdf_sha256,
+        },
+    )
+
+    from app.models.events import OrderEvent
+    from app.models.enums import EventType
+
+    sign_event = OrderEvent(
+        tenant_id=report.tenant_id,
+        branch_id=report.branch_id,
+        order_id=report.order_id,
+        event_type=EventType.REPORT_APPROVED,  # Using REPORT_APPROVED for signing
+        description="",
+        event_metadata={
+            "report_id": str(report.id),
+            "signer_id": str(user.id),
+            "signer_name": user.full_name or user.username,
+            "published": True,
+            "changelog": data.changelog if data.changelog else None,
+        },
+        created_by=user.id,
+    )
+    session.add(sign_event)
+
+    if report.order_id:
+        update_order_status_for_report(str(report.order_id), session)
+
+    session.commit()
+    session.refresh(report)
+    session.refresh(version)
+
+    logger.info(
+        f"Report {report_id} signed and published (single-action) by pathologist {ctx.user_id}",
+        extra={
+            "event": "report.sign_and_publish",
+            "report_id": report_id,
+            "user_id": ctx.user_id,
+        },
+    )
+
+    return ReportSignAndPublishResponse(
+        id=str(report.id),
+        status=report.status,
+        message="Reporte firmado y publicado",
+        pdf_generation_status=version.pdf_generation_status,
+        pdf_sha256=version.pdf_sha256,
+        pdf_size_bytes=version.pdf_size_bytes,
+        pdf_page_count=version.pdf_page_count,
+        pdf_generated_at=version.pdf_generated_at,
     )
 
 
