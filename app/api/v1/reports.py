@@ -34,6 +34,8 @@ from app.services.report_pdf_generation import (
     ReportPdfImmutableError,
     load_locked_version,
 )
+from app.services.letterhead_resolution import resolve_fallback_letterhead_version
+from app.services.report_template_autoversion import snapshot_and_activate_template_version
 from app.schemas.report import (
     ReportCreate, 
     ReportResponse, 
@@ -358,14 +360,17 @@ def create_report(
             raise HTTPException(500, "Template version configuration is invalid") from exc
 
         # ------------------------------------------------------------------
-        # Post-Fase-2 remediation, R7: resolve a membrete (letterhead) to
-        # override the template version's embedded `presentation`.
-        # Resolution order: explicit letterhead_version_id -> the owning
-        # template's preferred_letterhead_version_id -> the tenant's default
-        # letterhead's ACTIVE version. If none resolves, silently keep the
-        # template version's own presentation (never blocks V2 creation) —
-        # this is what keeps tenants that have not adopted the letterhead
-        # domain yet byte-for-byte unchanged.
+        # Post-Fase-2 remediation, R7 (orden extendido en la segunda
+        # remediación UX): resolve a membrete (letterhead) to override the
+        # template version's embedded `presentation`. Resolution order:
+        # explicit letterhead_version_id -> the owning template's
+        # preferred_letterhead_id (logical letterhead) -> the legacy
+        # preferred_letterhead_version_id -> the tenant's default
+        # letterhead's ACTIVE version (see resolve_fallback_letterhead_version
+        # in app/services/letterhead_resolution.py). If none resolves,
+        # silently keep the template version's own presentation (never
+        # blocks V2 creation) — this is what keeps tenants that have not
+        # adopted the letterhead domain yet byte-for-byte unchanged.
         # ------------------------------------------------------------------
         if report_data.letterhead_version_id is not None:
             resolved_letterhead_version = session.get(
@@ -382,27 +387,9 @@ def create_report(
                 )
         else:
             owning_template = session.get(ReportTemplate, template_version.report_template_id)
-            preferred_id = (
-                owning_template.preferred_letterhead_version_id if owning_template else None
+            resolved_letterhead_version = resolve_fallback_letterhead_version(
+                session, ctx.tenant_id, owning_template
             )
-            if preferred_id is not None:
-                candidate = session.get(ReportLetterheadVersion, preferred_id)
-                if candidate is not None and candidate.status != ReportLetterheadVersionStatus.ARCHIVED:
-                    resolved_letterhead_version = candidate
-            if resolved_letterhead_version is None:
-                default_letterhead = session.exec(
-                    select(ReportLetterhead).where(
-                        ReportLetterhead.tenant_id == ctx.tenant_id,
-                        ReportLetterhead.is_default == True,
-                    )
-                ).first()
-                if default_letterhead is not None:
-                    resolved_letterhead_version = session.exec(
-                        select(ReportLetterheadVersion).where(
-                            ReportLetterheadVersion.report_letterhead_id == default_letterhead.id,
-                            ReportLetterheadVersion.status == ReportLetterheadVersionStatus.ACTIVE,
-                        )
-                    ).first()
 
         if resolved_letterhead_version is not None:
             try:
@@ -909,6 +896,9 @@ def list_templates(
                     if t.preferred_letterhead_version_id
                     else None
                 ),
+                preferred_letterhead_id=(
+                    str(t.preferred_letterhead_id) if t.preferred_letterhead_id else None
+                ),
             )
             for t in templates
         ]
@@ -945,6 +935,9 @@ def get_template(
             if template.preferred_letterhead_version_id
             else None
         ),
+        preferred_letterhead_id=(
+            str(template.preferred_letterhead_id) if template.preferred_letterhead_id else None
+        ),
     )
 
 
@@ -969,7 +962,11 @@ def create_template(
     session.add(template)
     session.commit()
     session.refresh(template)
-    
+
+    # Segunda remediación post-Fase 2 (UX): crea y activa la primera
+    # revisión clínica interna de una vez, si ya hay un membrete resoluble.
+    snapshot_and_activate_template_version(session, template, user.id)
+
     logger.info(
         f"Report template '{template.name}' created",
         extra={
@@ -978,7 +975,7 @@ def create_template(
             "user_id": str(user.id),
         },
     )
-    
+
     return ReportTemplateResponse(
         id=str(template.id),
         tenant_id=str(template.tenant_id),
@@ -1035,9 +1032,33 @@ def update_template(
                 )
         template.preferred_letterhead_version_id = new_pref
 
+    # Segunda remediación post-Fase 2 (UX): el campo que la app escribe
+    # desde ahora es el membrete lógico, no una versión concreta. Mismo
+    # patrón `model_fields_set` que el campo legado de arriba: un `null`
+    # explícito limpia la preferencia (cae al default del tenant).
+    if "preferred_letterhead_id" in template_data.model_fields_set:
+        new_letterhead_pref = template_data.preferred_letterhead_id
+        if new_letterhead_pref is not None:
+            pref_letterhead = session.get(ReportLetterhead, new_letterhead_pref)
+            if not pref_letterhead or str(pref_letterhead.tenant_id) != ctx.tenant_id:
+                raise HTTPException(
+                    400,
+                    "preferred_letterhead_id must reference a letterhead owned by this tenant",
+                )
+        template.preferred_letterhead_id = new_letterhead_pref
+
     session.add(template)
     session.commit()
     session.refresh(template)
+
+    # Segunda remediación post-Fase 2 (UX): re-snapshotea/activa la revisión
+    # clínica interna solo si `template_json` cambió (hash-diff interno).
+    # Un cambio de `preferred_letterhead_id` por sí solo no dispara una
+    # revisión nueva: el membrete se resuelve en fresco en cada creación de
+    # reporte (resolve_fallback_letterhead_version), nunca desde la
+    # `presentation` embebida en esta versión — ver
+    # report-letterhead-selection-ux.md.
+    snapshot_and_activate_template_version(session, template, user.id)
 
     logger.info(
         f"Report template '{template.name}' updated",
@@ -1059,6 +1080,9 @@ def update_template(
             str(template.preferred_letterhead_version_id)
             if template.preferred_letterhead_version_id
             else None
+        ),
+        preferred_letterhead_id=(
+            str(template.preferred_letterhead_id) if template.preferred_letterhead_id else None
         ),
     )
 

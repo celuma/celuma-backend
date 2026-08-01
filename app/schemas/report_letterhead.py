@@ -93,19 +93,29 @@ class ReportLetterheadLogoUploadResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# .celuma portable file format — post-Fase-2 remediation, R12/R13.
+# Archivo portable `.cell`/`.clm`/`.celuma` — post-Fase-2 remediation,
+# R12/R13; extensión y formato v2 en la segunda remediación (UX).
 #
 # Deliberately excludes tenant_id, StorageObject id, bucket/key, and any
 # presigned/public URL — the envelope must be portable between tenants and
-# reveal nothing about the exporting tenant's internal identifiers. The
-# logo (if any) travels as base64 bytes + a sha256 hash for corruption
-# detection; import re-validates the decoded bytes through
-# ManagedTenantImageService exactly like a fresh upload (never trusts the
-# embedded content_type/hash blindly). See celuma-letterhead-file-format.md.
+# reveal nothing about the exporting tenant's internal identifiers. Logos
+# (if any) travel as base64 bytes + a sha256 hash for corruption detection;
+# import re-validates the decoded bytes through ManagedTenantImageService
+# exactly like a fresh upload (never trusts the embedded
+# content_type/hash blindly). See cell-file-format-v2.md.
+#
+# `format_version` 1: `assets.logo` (single asset) -> `header.logo_storage_id`
+# only — the original shape, still importable forever (`.celuma` legacy).
+# `format_version` 2: `assets.header_logo`/`assets.footer_logo` (both
+# independently optional) -> `header.logo_storage_id`/`footer.logo_storage_id`
+# — needed since a membrete can now carry a footer logo too (paridad
+# Legacy). Export always writes the CURRENT version (2); `.clm` is an
+# import-only extension alias, never an export target.
 # ---------------------------------------------------------------------------
 
 CELUMA_FORMAT = "celuma-letterhead"
-CELUMA_FORMAT_VERSION = 1
+CELUMA_FORMAT_VERSION = 2  # version written on export
+CELUMA_SUPPORTED_FORMAT_VERSIONS = frozenset({1, 2})  # versions accepted on import
 MAX_CELUMA_LOGO_BYTES = 5 * 1024 * 1024  # matches ManagedTenantImageService's cap
 
 

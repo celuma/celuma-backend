@@ -69,6 +69,65 @@ class ReportPaperConfig(BaseModel):
     margins_cm: ReportMarginsCm
 
 
+def _valid_storage_id(v: Optional[str]) -> Optional[str]:
+    if v is None:
+        return v
+    try:
+        import uuid as _uuid
+
+        _uuid.UUID(v)
+    except (ValueError, AttributeError, TypeError):
+        raise ValueError("must be a valid StorageObject UUID")
+    return v
+
+
+# ---------------------------------------------------------------------------
+# Segunda remediación post-Fase 2 (UX): extensión aditiva del contrato de
+# presentación para paridad visual con el membrete Legacy. Todos los campos
+# son opcionales con defaults que reproducen EXACTAMENTE el comportamiento
+# actual de `VersionedReportRendererV2` (Arial 10pt, línea única de 1px en
+# el color primario bajo el header y sobre el footer, sin logo de pie) — un
+# snapshot V2 ya persistido, sin estos campos, debe seguir renderizando
+# idéntico. Ver legacy-parity-contract.md.
+# ---------------------------------------------------------------------------
+
+class DividerConfig(BaseModel):
+    """Línea divisoria bajo el header / sobre el footer. El default
+    reproduce la línea sólida de 1px en el color primario que el renderer
+    ya dibuja hoy incondicionalmente (`border-bottom`/`border-top`).
+    `style="DOUBLE"` agrega una segunda línea (necesario para paridad
+    Legacy con doble filete) separada por `gap_mm`."""
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    style: Literal["SINGLE", "DOUBLE"] = "SINGLE"
+    primary_width_px: float = Field(default=1.0, ge=0.25, le=8.0)
+    secondary_width_px: float = Field(default=1.0, ge=0.25, le=8.0)
+    gap_mm: float = Field(default=1.0, ge=0.0, le=20.0)
+    color: Optional[str] = Field(default=None, max_length=7)
+
+    @field_validator("color")
+    @classmethod
+    def _valid_hex_color(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not _HEX_COLOR_PATTERN.match(v):
+            raise ValueError("color must be a 6-digit hex color, e.g. #4A4A4A")
+        return v
+
+
+class ReportTypographyConfig(BaseModel):
+    """Defaults calcados de la tipografía fija actual de
+    `VersionedReportRendererV2`: Arial en todo el documento, cuerpo/header a
+    10pt (institución en negrita), pie a 7pt."""
+    model_config = ConfigDict(extra="forbid")
+
+    font_family: Literal["ARIAL", "HELVETICA", "TIMES", "CALIBRI"] = "ARIAL"
+    base_font_size_pt: float = Field(default=10.0, ge=6.0, le=24.0)
+    header_font_size_pt: float = Field(default=10.0, ge=6.0, le=32.0)
+    footer_font_size_pt: float = Field(default=7.0, ge=6.0, le=18.0)
+
+
 class ReportHeaderConfig(BaseModel):
     """Institutional header/branding. `logo_storage_id` references a
     `StorageObject` already owned by Céluma — never an arbitrary external URL."""
@@ -81,6 +140,11 @@ class ReportHeaderConfig(BaseModel):
     address: Optional[str] = Field(default=None, max_length=500)
     phone: Optional[str] = Field(default=None, max_length=50)
     email: Optional[EmailStr] = None
+    # Segunda remediación UX — paridad Legacy (todos opcionales/aditivos):
+    logo_position: Literal["LEFT", "CENTER", "RIGHT"] = "LEFT"
+    content_alignment: Literal["TOP", "CENTER", "BOTTOM"] = "CENTER"
+    height_mm: Optional[float] = Field(default=None, ge=5.0, le=100.0)
+    divider: DividerConfig = Field(default_factory=DividerConfig)
 
     @field_validator("institution_name", "subtitle", "address")
     @classmethod
@@ -99,15 +163,7 @@ class ReportHeaderConfig(BaseModel):
     @field_validator("logo_storage_id")
     @classmethod
     def _valid_logo_reference(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        try:
-            import uuid as _uuid
-
-            _uuid.UUID(v)
-        except (ValueError, AttributeError, TypeError):
-            raise ValueError("logo_storage_id must be a valid StorageObject UUID")
-        return v
+        return _valid_storage_id(v)
 
 
 class ReportFooterConfig(BaseModel):
@@ -116,23 +172,49 @@ class ReportFooterConfig(BaseModel):
     enabled: bool = True
     custom_text: Optional[str] = Field(default=None, max_length=1000)
     show_page_number: bool = True
+    # Segunda remediación UX — paridad Legacy (todos opcionales/aditivos):
+    # Legacy coloca su logo en el PIE, no en el header — de ahí el valor de
+    # este campo (ver legacy-parity-contract.md).
+    logo_storage_id: Optional[str] = Field(default=None, max_length=64)
+    logo_position: Literal["LEFT", "CENTER", "RIGHT"] = "LEFT"
+    content_alignment: Literal["LEFT", "CENTER", "RIGHT"] = "CENTER"
+    height_mm: Optional[float] = Field(default=None, ge=5.0, le=100.0)
+    divider: DividerConfig = Field(default_factory=DividerConfig)
 
     @field_validator("custom_text")
     @classmethod
     def _no_markup(cls, v: Optional[str]) -> Optional[str]:
         return _reject_markup(v)
 
+    @field_validator("logo_storage_id")
+    @classmethod
+    def _valid_logo_reference(cls, v: Optional[str]) -> Optional[str]:
+        return _valid_storage_id(v)
+
 
 class ReportStyleConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     primary_color: str = Field(default="#4A4A4A")
+    # Segunda remediación UX — paridad Legacy (opcional/aditivo): None
+    # conserva el comportamiento actual de un solo color.
+    secondary_color: Optional[str] = Field(default=None, max_length=7)
+    typography: ReportTypographyConfig = Field(default_factory=ReportTypographyConfig)
 
     @field_validator("primary_color")
     @classmethod
     def _valid_hex_color(cls, v: str) -> str:
         if not _HEX_COLOR_PATTERN.match(v):
             raise ValueError("primary_color must be a 6-digit hex color, e.g. #4A4A4A")
+        return v
+
+    @field_validator("secondary_color")
+    @classmethod
+    def _valid_secondary_hex_color(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not _HEX_COLOR_PATTERN.match(v):
+            raise ValueError("secondary_color must be a 6-digit hex color, e.g. #4A4A4A")
         return v
 
 

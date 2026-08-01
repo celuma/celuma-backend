@@ -28,7 +28,7 @@ class TestExport:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["format"] == "celuma-letterhead"
-        assert body["format_version"] == 1
+        assert body["format_version"] == 2
         assert body["letterhead"]["name"] == "Exportable"
 
         raw_text = json.dumps(body)

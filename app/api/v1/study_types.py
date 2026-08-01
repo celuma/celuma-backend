@@ -13,6 +13,7 @@ from app.models.report_letterhead_version import (
 )
 from app.models.tenant import Tenant
 from app.models.user import AppUser
+from app.services.letterhead_resolution import resolve_fallback_letterhead_version
 from app.schemas.study_type import (
     StudyTypeCreate,
     StudyTypeUpdate,
@@ -325,10 +326,12 @@ def get_study_type_report_defaults(
     """Resolve everything the report editor needs to bootstrap a brand-new
     V2 report in one round trip (requires lab:read).
 
-    Post-Fase-2 remediation, R7. Mirrors the exact resolution order used
-    server-side by `create_report` (reports.py): the study type's default
-    clinical template -> its ACTIVE version; then a letterhead via the
-    template's `preferred_letterhead_version_id` -> the tenant's default
+    Post-Fase-2 remediation, R7 (orden extendido en la segunda remediación
+    UX). Mirrors the exact resolution order used server-side by
+    `create_report` (reports.py) via `resolve_fallback_letterhead_version`:
+    the study type's default clinical template -> its ACTIVE version; then
+    a letterhead via the template's `preferred_letterhead_id` (logical) ->
+    the legacy `preferred_letterhead_version_id` -> the tenant's default
     letterhead's ACTIVE version. Never raises for an unconfigured tenant —
     every field is simply None, and the frontend decides how to react
     (mirrors `v2ConfigBlocked`).
@@ -354,28 +357,9 @@ def get_study_type_report_defaults(
             if active_version is not None:
                 active_template_version_id = active_version.id
 
-    resolved_letterhead_version: ReportLetterheadVersion | None = None
-    if owning_template is not None and owning_template.preferred_letterhead_version_id:
-        candidate = session.get(
-            ReportLetterheadVersion, owning_template.preferred_letterhead_version_id
-        )
-        if candidate is not None and candidate.status != ReportLetterheadVersionStatus.ARCHIVED:
-            resolved_letterhead_version = candidate
-
-    if resolved_letterhead_version is None:
-        default_letterhead = session.exec(
-            select(ReportLetterhead).where(
-                ReportLetterhead.tenant_id == ctx.tenant_id,
-                ReportLetterhead.is_default == True,
-            )
-        ).first()
-        if default_letterhead is not None:
-            resolved_letterhead_version = session.exec(
-                select(ReportLetterheadVersion).where(
-                    ReportLetterheadVersion.report_letterhead_id == default_letterhead.id,
-                    ReportLetterheadVersion.status == ReportLetterheadVersionStatus.ACTIVE,
-                )
-            ).first()
+    resolved_letterhead_version = resolve_fallback_letterhead_version(
+        session, ctx.tenant_id, owning_template
+    )
 
     letterhead_name = None
     if resolved_letterhead_version is not None:

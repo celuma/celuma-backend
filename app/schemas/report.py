@@ -229,7 +229,12 @@ class ReportTemplateUpdate(BaseModel):
     # ownership — see template-letterhead-association-contract.md. Omitting
     # a preference (or None means "no preference") falls back to the
     # tenant's default letterhead at report-creation time.
+    # Segunda remediación UX: campo legado, de solo lectura para filas
+    # antiguas — la app ya no lo escribe. Usar preferred_letterhead_id.
     preferred_letterhead_version_id: Optional[str] = None
+    # Segunda remediación post-Fase 2 (UX): el membrete lógico preferido
+    # (no una versión concreta) — ver template-simplification-contract.md.
+    preferred_letterhead_id: Optional[str] = None
 
 
 class ReportTemplateResponse(BaseModel):
@@ -241,6 +246,7 @@ class ReportTemplateResponse(BaseModel):
     is_active: bool
     created_at: datetime
     preferred_letterhead_version_id: Optional[str] = None
+    preferred_letterhead_id: Optional[str] = None
 
 
 class ReportTemplateDetailResponse(BaseModel):
@@ -254,6 +260,7 @@ class ReportTemplateDetailResponse(BaseModel):
     is_active: bool
     created_at: datetime
     preferred_letterhead_version_id: Optional[str] = None
+    preferred_letterhead_id: Optional[str] = None
 
 
 class ReportTemplatesListResponse(BaseModel):
