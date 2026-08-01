@@ -17,6 +17,13 @@ from app.core.rbac import has_permission, has_any_role, ROLE_REVIEWER
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
 from app.services.s3 import S3Service
+from app.services.report_pdf_generation import (
+    ReportPdfGenerationService,
+    ReportPdfGenerationError,
+    ReportPdfAlreadyInProgressError,
+    ReportPdfImmutableError,
+    load_locked_version,
+)
 from app.schemas.report import (
     ReportCreate, 
     ReportResponse, 
@@ -54,6 +61,7 @@ from PIL import Image, UnidentifiedImageError
 from io import BytesIO
 from uuid import uuid4
 import json
+import re
 from datetime import datetime
 import logging
 
@@ -79,6 +87,28 @@ def _require(user_id, code: str, session: Session) -> None:
     """Raise 403 if user lacks the specified permission."""
     if not has_permission(user_id, code, session):
         raise HTTPException(403, f"Permission required: {code}")
+
+
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def official_pdf_filename(order_code: str, version_no: int) -> str:
+    """Céluma 1.3 Fase 2, Bloque E, Historia E10: the download filename for
+    an official report PDF. Deliberately never derived from a patient name —
+    only the order's human-readable code, which is already shown in the lab
+    UI and is not more sensitive than the case itself."""
+    safe_code = _UNSAFE_FILENAME_CHARS.sub("-", order_code or "reporte").strip("-") or "reporte"
+    return f"reporte-{safe_code}-v{version_no}.pdf"
+
+
+def official_pdf_presigned_url(
+    s3: S3Service, object_key: str, order_code: str, version_no: int
+) -> str:
+    filename = official_pdf_filename(order_code, version_no)
+    return s3.generate_presigned_url(
+        object_key,
+        response_content_disposition=f'attachment; filename="{filename}"',
+    )
 
 
 # Deferred imports to avoid circular module-load (laboratory <-> reports)
@@ -1467,6 +1497,13 @@ def _build_report_detail_response(
             version.generated_by_renderer_version if version else None
         ),
         resolved_resources=_resolve_report_resources(report, report_json, session),
+        pdf_generation_status=(version.pdf_generation_status if version else None),
+        pdf_generated_at=(version.pdf_generated_at if version else None),
+        pdf_sha256=(version.pdf_sha256 if version else None),
+        pdf_size_bytes=(version.pdf_size_bytes if version else None),
+        pdf_page_count=(version.pdf_page_count if version else None),
+        pdf_error_code=(version.pdf_error_code if version else None),
+        pdf_error_message=(version.pdf_error_message if version else None),
     )
 
 
@@ -1585,7 +1622,7 @@ def get_pdf_of_latest_version(
         raise HTTPException(404, "Storage object not found")
 
     s3 = S3Service()
-    url = s3.generate_presigned_url(storage.object_key)
+    url = official_pdf_presigned_url(s3, storage.object_key, order.order_code if order else "", latest_version.version_no)
     return {
         "version_id": str(latest_version.id),
         "version_no": latest_version.version_no,
@@ -1621,6 +1658,56 @@ def get_report_version(
         raise HTTPException(404, "Report version not found")
 
     return _build_report_detail_response(report, version, session)
+
+
+def _pdf_generation_status_response(version: ReportVersion) -> dict:
+    return {
+        "version_id": str(version.id),
+        "version_no": version.version_no,
+        "report_id": str(version.report_id),
+        "pdf_generation_status": version.pdf_generation_status,
+        "pdf_generated_at": version.pdf_generated_at,
+        "pdf_sha256": version.pdf_sha256,
+        "pdf_size_bytes": version.pdf_size_bytes,
+        "pdf_page_count": version.pdf_page_count,
+        "pdf_error_code": version.pdf_error_code,
+        "pdf_error_message": version.pdf_error_message,
+    }
+
+
+@router.post("/{report_id}/versions/{version_no}/generate-pdf")
+def generate_report_pdf(
+    report_id: str,
+    version_no: int,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Generate the official PDF for one report version (requires reports:edit).
+
+    Idempotent once READY (returns the existing artifact's metadata without
+    regenerating). Retryable while FAILED as long as the report is still
+    editable. Rejected (409) once the report is PUBLISHED/RETRACTED, or if a
+    generation attempt is already running for this version. See
+    pdf-generation-contract.md.
+    """
+    _require(user.id, "reports:edit", session)
+
+    report, version = load_locked_version(session, report_id, version_no)
+    if not report or not version:
+        raise HTTPException(404, "Report or version not found")
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Report or version not found")
+
+    service = ReportPdfGenerationService(session)
+    try:
+        version = service.generate(report, version, user.id)
+    except (ReportPdfAlreadyInProgressError, ReportPdfImmutableError) as exc:
+        raise HTTPException(409, exc.message) from None
+    except ReportPdfGenerationError as exc:
+        raise HTTPException(422, exc.message) from None
+
+    return _pdf_generation_status_response(version)
 
 
 @router.post("/{report_id}/versions/{version_no}/pdf")
@@ -1695,6 +1782,21 @@ def upload_pdf_to_specific_version(
     session.flush()
 
     version.pdf_storage_id = storage.id
+    # Céluma 1.3 Fase 2, Bloque E: this manual endpoint bypasses
+    # ReportPdfGenerationService entirely (no render, no validation, no
+    # hash). Any generation metadata a prior official generation left behind
+    # must never keep claiming READY for bytes that were never validated —
+    # reset it so the publish gate in sign_report() correctly requires a
+    # fresh official generation.
+    version.pdf_generation_status = None
+    version.pdf_generation_started_at = None
+    version.pdf_generated_at = None
+    version.pdf_sha256 = None
+    version.pdf_size_bytes = None
+    version.pdf_page_count = None
+    version.pdf_generator_version = None
+    version.pdf_error_code = None
+    version.pdf_error_message = None
     session.add(version)
     session.commit()
     session.refresh(version)
@@ -1778,6 +1880,16 @@ def upload_pdf_to_latest_version(
     session.flush()
 
     latest_version.pdf_storage_id = storage.id
+    # See the equivalent reset in upload_pdf_to_specific_version above.
+    latest_version.pdf_generation_status = None
+    latest_version.pdf_generation_started_at = None
+    latest_version.pdf_generated_at = None
+    latest_version.pdf_sha256 = None
+    latest_version.pdf_size_bytes = None
+    latest_version.pdf_page_count = None
+    latest_version.pdf_generator_version = None
+    latest_version.pdf_error_code = None
+    latest_version.pdf_error_message = None
     session.add(latest_version)
     session.commit()
     session.refresh(latest_version)
@@ -1832,7 +1944,7 @@ def get_pdf_of_specific_version(
         raise HTTPException(404, "Storage object not found")
 
     s3 = S3Service()
-    url = s3.generate_presigned_url(storage.object_key)
+    url = official_pdf_presigned_url(s3, storage.object_key, order.order_code if order else "", version.version_no)
     return {
         "version_id": str(version.id),
         "version_no": version.version_no,
@@ -2248,6 +2360,19 @@ def sign_report(
     
     if not current_version:
         raise HTTPException(404, "No current version found for this report")
+
+    # Céluma 1.3 Fase 2, Bloque E: a report cannot be published without a
+    # validated, hashed, persisted official PDF for the version being
+    # published — see pdf-publication-workflow.md. Generation is a separate,
+    # explicit step (POST .../generate-pdf); signing never generates one
+    # itself, to keep the (potentially slow, browser-driven) generation out
+    # of this transaction.
+    if current_version.pdf_generation_status != "READY":
+        raise HTTPException(
+            422,
+            "Cannot sign: this report version has no generated PDF yet. "
+            "Generate the official PDF before publishing.",
+        )
 
     # If the persisted JSON requires a digital signature, embed the signer's
     # PNG (presigned URL) into the document under signatureMetadata before

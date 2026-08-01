@@ -37,6 +37,18 @@ class S3Service:
         }
         if settings.s3_endpoint_url:
             client_kwargs["endpoint_url"] = settings.s3_endpoint_url
+        elif settings.aws_region:
+            # Céluma 1.3 Fase 2, Bloque E: without an explicit endpoint, boto3
+            # can resolve the global `s3.amazonaws.com` endpoint for
+            # presigned URLs, which AWS rejects for opt-in regions (e.g.
+            # `mx-central-1`, the configured bucket region here) with
+            # IllegalLocationConstraintException. Forcing the region-specific
+            # endpoint makes presigned URLs (and everything else this client
+            # does) work regardless of which region the bucket is in. First
+            # actually exercised by this block — every earlier caller of
+            # generate_presigned_url had no real frontend caller (see
+            # pdf-storage-integrity-contract.md).
+            client_kwargs["endpoint_url"] = f"https://s3.{settings.aws_region}.amazonaws.com"
 
         self._client = self._session.client("s3", **client_kwargs)
 
@@ -90,11 +102,19 @@ class S3Service:
             version_id=version_id if isinstance(version_id, str) else None,
         )
 
-    def generate_presigned_url(self, key: str, expires_in: Optional[int] = None) -> str:
+    def generate_presigned_url(
+        self,
+        key: str,
+        expires_in: Optional[int] = None,
+        response_content_disposition: Optional[str] = None,
+    ) -> str:
         expiry = expires_in if expires_in is not None else settings.media_presigned_expire_seconds
+        params: dict[str, str] = {"Bucket": self.bucket, "Key": key}
+        if response_content_disposition:
+            params["ResponseContentDisposition"] = response_content_disposition
         return self._client.generate_presigned_url(
             "get_object",
-            Params={"Bucket": self.bucket, "Key": key},
+            Params=params,
             ExpiresIn=expiry,
         )
 

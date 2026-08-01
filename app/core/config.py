@@ -28,6 +28,20 @@ class Settings(BaseSettings):
         "http://localhost:4173,http://127.0.0.1:4173"
     )
 
+    # Céluma 1.3 Fase 2, Bloque E: official PDF generation. `pdf_generator_base_url`
+    # is the origin of the frontend the headless browser navigates to render
+    # `/internal/report-render/...` — intentionally has no localhost default so an
+    # environment can never silently fall back to the wrong origin; it must be set
+    # explicitly in `.env`. `pdf_render_token_secret` is distinct from `jwt_secret`:
+    # falls back to `jwt_secret` only if unset, but a dedicated secret is
+    # recommended so render tokens and user sessions never share a key.
+    pdf_generator_base_url: str | None = None
+    pdf_generation_timeout_seconds: int = 30
+    pdf_render_token_expires_seconds: int = 90
+    pdf_render_token_secret: str | None = None
+    pdf_max_size_bytes: int = 25 * 1024 * 1024  # 25 MB
+    pdf_max_page_count: int = 100
+
     class Config:
         env_file = ".env"
 
@@ -42,5 +56,9 @@ class Settings(BaseSettings):
                 "request (see app/main.py CORSMiddleware comment)."
             )
         return origins
+
+    @property
+    def effective_pdf_render_token_secret(self) -> str:
+        return self.pdf_render_token_secret or self.jwt_secret
 
 settings = Settings()

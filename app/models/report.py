@@ -54,6 +54,23 @@ class ReportVersion(BaseModel, TimestampMixin, table=True):
     )
     generated_by_renderer_version: Optional[str] = Field(max_length=100, default=None)
 
+    # Céluma 1.3 Fase 2, Bloque E: official PDF artifact metadata. Nullable/
+    # additive — existing rows are never backfilled. NULL
+    # `pdf_generation_status` means "no generation attempt has ever run
+    # through ReportPdfGenerationService" (distinct from a PDF that may
+    # already sit behind `pdf_storage_id` via the legacy manual upload
+    # endpoints, which never set these fields). See
+    # pdf-generation-contract.md and pdf-storage-integrity-contract.md.
+    pdf_generation_status: Optional[str] = Field(max_length=20, default=None)
+    pdf_generation_started_at: Optional[datetime] = Field(default=None)
+    pdf_generated_at: Optional[datetime] = Field(default=None)
+    pdf_sha256: Optional[str] = Field(max_length=64, default=None)
+    pdf_size_bytes: Optional[int] = Field(default=None)
+    pdf_page_count: Optional[int] = Field(default=None)
+    pdf_generator_version: Optional[str] = Field(max_length=100, default=None)
+    pdf_error_code: Optional[str] = Field(max_length=50, default=None)
+    pdf_error_message: Optional[str] = Field(max_length=500, default=None)
+
     # Basic relationships only
     report: Report = Relationship(back_populates="versions")
 

@@ -92,8 +92,9 @@ class FakeS3Service:
     def download_text(self, key, encoding="utf-8"):
         return FakeS3Service.store[key].decode(encoding)
 
-    def generate_presigned_url(self, key, expires_in=None):
-        return f"https://fake-s3.example/{key}"
+    def generate_presigned_url(self, key, expires_in=None, response_content_disposition=None):
+        suffix = f"?cd={response_content_disposition}" if response_content_disposition else ""
+        return f"https://fake-s3.example/{key}{suffix}"
 
     def object_public_url(self, key):
         return f"https://fake-cdn.example/{key}"
@@ -112,6 +113,63 @@ def _reset_fake_s3():
 @pytest.fixture(autouse=True)
 def _patch_s3(monkeypatch):
     monkeypatch.setattr("app.api.v1.reports.S3Service", FakeS3Service)
+    monkeypatch.setattr("app.api.v1.portal.S3Service", FakeS3Service)
+    # Céluma 1.3 Fase 2, Bloque E: ReportPdfGenerationService uploads the
+    # generated PDF via its own S3Service import — never the real AWS
+    # bucket in tests, same as every other flow above.
+    monkeypatch.setattr("app.services.report_pdf_generation.S3Service", FakeS3Service)
+
+
+def make_pdf_bytes(num_pages: int = 1) -> bytes:
+    """A genuinely valid, parseable PDF (built with pypdf, not a hand-rolled
+    byte string) — Céluma 1.3 Fase 2, Bloque E tests feed this through the
+    *real* validation/hash/page-count logic in ReportPdfGenerationService;
+    only the headless-Chromium render step itself is stubbed (see
+    `stub_pdf_render` below), so E5 (byte validation) is exercised for real."""
+    from pypdf import PdfWriter
+    import io as _io
+
+    writer = PdfWriter()
+    for _ in range(num_pages):
+        writer.add_blank_page(width=612, height=792)
+    buf = _io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+@pytest.fixture
+def stub_pdf_render(monkeypatch):
+    """Replaces ReportPdfGenerationService._render_pdf so tests never launch
+    real Chromium. Returns a controller object: call `.succeed(pdf_bytes)` or
+    `.fail(exc)` to control the next (and subsequent) render call(s), and
+    `.call_count` to assert whether a render actually happened (e.g. to
+    prove idempotency skipped it)."""
+
+    class _Controller:
+        def __init__(self):
+            self.call_count = 0
+            self._result = make_pdf_bytes(1)
+            self._exc = None
+
+        def succeed(self, pdf_bytes: bytes):
+            self._result = pdf_bytes
+            self._exc = None
+
+        def fail(self, exc: Exception):
+            self._exc = exc
+
+        def _render(self, report, version):
+            self.call_count += 1
+            if self._exc is not None:
+                raise self._exc
+            return self._result
+
+    controller = _Controller()
+    monkeypatch.setattr(
+        "app.services.report_pdf_generation.ReportPdfGenerationService._render_pdf",
+        controller._render,
+    )
+    return controller
 
 
 @pytest.fixture(autouse=True)

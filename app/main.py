@@ -26,6 +26,7 @@ from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.portal import router as portal_router
 from app.api.v1.worklist import router as worklist_router
 from app.api.v1.rbac import router as rbac_router
+from app.api.v1.internal_render import router as internal_render_router
 from app.core.config import settings
 
 # Configure logging
@@ -285,6 +286,9 @@ app.include_router(billing_router, prefix="/api/v1", dependencies=[Depends(curre
 app.include_router(dashboard_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(worklist_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(portal_router, prefix="/api/v1")  # Portal has mixed auth requirements
+# Céluma 1.3 Fase 2, Bloque E: token-only auth (render token, not current_user)
+# — must NOT inherit reports_router's blanket Depends(current_user) above.
+app.include_router(internal_render_router, prefix="/api/v1")
 app.include_router(rbac_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 
 CELUMA_VERSION: str = os.environ.get("CELUMA_VERSION", "dev")

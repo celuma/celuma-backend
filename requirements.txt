@@ -16,6 +16,13 @@ Pillow==10.*
 rawpy==0.25.*
 imageio==2.34.*
 
+# Céluma 1.3 Fase 2, Bloque E: official PDF generation. `playwright` drives
+# headless Chromium against the frontend's internal render route; `pypdf`
+# validates/counts pages on the bytes it returns (E5) — no PDF library
+# existed in the backend before this block.
+playwright==1.49.*
+pypdf==5.1.*
+
 # Testing
 pytest==8.4.1
 pytest-cov==6.2.1

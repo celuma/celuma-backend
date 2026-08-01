@@ -91,6 +91,18 @@ class ReportDetailResponse(BaseModel):
     # itself). None for legacy reports and for V2 reports with nothing to
     # resolve.
     resolved_resources: Optional["ReportResolvedResources"] = None
+    # Céluma 1.3 Fase 2, Bloque E: official PDF artifact status, so the
+    # editor/detail UI can show "Sin generar / Generando / Listo / Falló"
+    # without a separate round trip. None (pdf_generation_status) means no
+    # generation attempt has ever run for this version — including every
+    # historical version from before this block existed.
+    pdf_generation_status: Optional[str] = None
+    pdf_generated_at: Optional[datetime] = None
+    pdf_sha256: Optional[str] = None
+    pdf_size_bytes: Optional[int] = None
+    pdf_page_count: Optional[int] = None
+    pdf_error_code: Optional[str] = None
+    pdf_error_message: Optional[str] = None
 
 class ReportVersionCreate(BaseModel):
     """Schema for creating a report version"""
