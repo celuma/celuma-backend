@@ -433,6 +433,150 @@ def list_letterhead_versions(
 
 
 @router.get(
+    "/{letterhead_id}/versions/active",
+    response_model=ReportLetterheadVersionDetailResponse,
+)
+def get_active_letterhead_version(
+    letterhead_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Segunda remediación post-Fase 2 (UX): la configuración ACTIVE actual
+    de un membrete, para precargar el editor visual en modo "Editar". 404 si
+    el membrete no tiene ninguna versión ACTIVE todavía (recién creado).
+
+    Registrado ANTES de `GET /{letterhead_id}/versions/{version_id}` a
+    propósito: FastAPI/Starlette resuelve rutas en orden de registro, y
+    "active" también matchea el patrón `{version_id}` — si este endpoint se
+    registrara después, quedaría inalcanzable (la ruta paramétrica lo
+    interceptaría primero, intentando usar el string "active" como UUID).
+    """
+    _require(user.id, "reports:manage_templates", session)
+    _get_owned_letterhead(letterhead_id, ctx, session)
+    active = session.exec(
+        select(ReportLetterheadVersion).where(
+            ReportLetterheadVersion.report_letterhead_id == letterhead_id,
+            ReportLetterheadVersion.status == ReportLetterheadVersionStatus.ACTIVE,
+        )
+    ).first()
+    if not active:
+        raise HTTPException(404, "This letterhead has no active version yet")
+    return ReportLetterheadVersionDetailResponse(
+        **_version_response(active).model_dump(),
+        configuration=active.configuration,
+    )
+
+
+@router.put(
+    "/{letterhead_id}/versions/current",
+    response_model=ReportLetterheadVersionDetailResponse,
+)
+def save_current_letterhead_version(
+    letterhead_id: str,
+    payload: ReportLetterheadVersionCreate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Segunda remediación post-Fase 2 (UX): "Guardar cambios" del editor
+    visual de membretes — el reemplazo de "Publicar versión" (que se
+    quedaba en PUBLISHED sin activar). Crea una `ReportLetterheadVersion`
+    nueva y la activa atómicamente, archivando la anterior ACTIVE. No-op
+    (devuelve la versión ACTIVE existente sin crear nada) si la
+    configuración enviada es idéntica a la ya activa — evita ruido de
+    historial en un "Guardar" sin cambios reales.
+
+    `POST .../versions` + `POST .../{id}/activate` (abajo) siguen
+    existiendo tal cual para el flujo secundario de historial/rollback
+    ("Nueva versión desde esta", "Restaurar"). Registrado antes de
+    `GET .../versions/{version_id}` por la misma razón de orden de rutas
+    explicada arriba (el método PUT no colisiona con esa ruta GET, pero se
+    mantiene junto a su endpoint hermano por claridad).
+    """
+    _require(user.id, "reports:manage_templates", session)
+    letterhead = _get_owned_letterhead(letterhead_id, ctx, session)
+
+    logo_storage_id = payload.configuration.header.logo_storage_id
+    if logo_storage_id is not None:
+        logo_object = session.get(StorageObject, logo_storage_id)
+        if not logo_object:
+            raise HTTPException(400, "logo_storage_id does not reference an existing object")
+        if str(logo_object.tenant_id) != str(letterhead.tenant_id):
+            raise HTTPException(
+                400, "logo_storage_id does not reference an object owned by this tenant"
+            )
+    footer_logo_storage_id = payload.configuration.footer.logo_storage_id
+    if footer_logo_storage_id is not None:
+        footer_logo_object = session.get(StorageObject, footer_logo_storage_id)
+        if not footer_logo_object:
+            raise HTTPException(
+                400, "footer.logo_storage_id does not reference an existing object"
+            )
+        if str(footer_logo_object.tenant_id) != str(letterhead.tenant_id):
+            raise HTTPException(
+                400, "footer.logo_storage_id does not reference an object owned by this tenant"
+            )
+
+    new_configuration = payload.configuration.model_dump(mode="json")
+
+    active = session.exec(
+        select(ReportLetterheadVersion).where(
+            ReportLetterheadVersion.report_letterhead_id == letterhead.id,
+            ReportLetterheadVersion.status == ReportLetterheadVersionStatus.ACTIVE,
+        )
+    ).first()
+    if active is not None and active.configuration == new_configuration:
+        return ReportLetterheadVersionDetailResponse(
+            **_version_response(active).model_dump(),
+            configuration=active.configuration,
+        )
+
+    if active is not None:
+        # Demote before promoting — mismo orden que activate_letterhead_version,
+        # necesario por el índice único parcial "una ACTIVE por membrete".
+        active.status = ReportLetterheadVersionStatus.PUBLISHED
+        session.add(active)
+        session.flush()
+
+    last_version = session.exec(
+        select(ReportLetterheadVersion)
+        .where(ReportLetterheadVersion.report_letterhead_id == letterhead.id)
+        .order_by(ReportLetterheadVersion.version_number.desc())
+    ).first()
+    next_version_number = (last_version.version_number + 1) if last_version else 1
+
+    new_version = ReportLetterheadVersion(
+        tenant_id=letterhead.tenant_id,
+        report_letterhead_id=letterhead.id,
+        version_number=next_version_number,
+        schema_version=2,
+        configuration=new_configuration,
+        status=ReportLetterheadVersionStatus.ACTIVE,
+        created_by=user.id,
+        activated_at=datetime.utcnow(),
+    )
+    session.add(new_version)
+    session.commit()
+    session.refresh(new_version)
+
+    logger.info(
+        f"Letterhead version {new_version.version_number} saved and activated for letterhead {letterhead_id}",
+        extra={
+            "event": "report_letterhead_version.saved_and_activated",
+            "letterhead_id": letterhead_id,
+            "version_id": str(new_version.id),
+            "user_id": str(user.id),
+        },
+    )
+
+    return ReportLetterheadVersionDetailResponse(
+        **_version_response(new_version).model_dump(),
+        configuration=new_version.configuration,
+    )
+
+
+@router.get(
     "/{letterhead_id}/versions/{version_id}",
     response_model=ReportLetterheadVersionDetailResponse,
 )
@@ -515,140 +659,6 @@ def create_letterhead_version(
     return ReportLetterheadVersionDetailResponse(
         **_version_response(version).model_dump(),
         configuration=version.configuration,
-    )
-
-
-@router.get(
-    "/{letterhead_id}/versions/active",
-    response_model=ReportLetterheadVersionDetailResponse,
-)
-def get_active_letterhead_version(
-    letterhead_id: str,
-    session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx),
-    user: AppUser = Depends(current_user),
-):
-    """Segunda remediación post-Fase 2 (UX): la configuración ACTIVE actual
-    de un membrete, para precargar el editor visual en modo "Editar". 404 si
-    el membrete no tiene ninguna versión ACTIVE todavía (recién creado)."""
-    _require(user.id, "reports:manage_templates", session)
-    _get_owned_letterhead(letterhead_id, ctx, session)
-    active = session.exec(
-        select(ReportLetterheadVersion).where(
-            ReportLetterheadVersion.report_letterhead_id == letterhead_id,
-            ReportLetterheadVersion.status == ReportLetterheadVersionStatus.ACTIVE,
-        )
-    ).first()
-    if not active:
-        raise HTTPException(404, "This letterhead has no active version yet")
-    return ReportLetterheadVersionDetailResponse(
-        **_version_response(active).model_dump(),
-        configuration=active.configuration,
-    )
-
-
-@router.put(
-    "/{letterhead_id}/versions/current",
-    response_model=ReportLetterheadVersionDetailResponse,
-)
-def save_current_letterhead_version(
-    letterhead_id: str,
-    payload: ReportLetterheadVersionCreate,
-    session: Session = Depends(get_session),
-    ctx: AuthContext = Depends(get_auth_ctx),
-    user: AppUser = Depends(current_user),
-):
-    """Segunda remediación post-Fase 2 (UX): "Guardar cambios" del editor
-    visual de membretes — el reemplazo de "Publicar versión" (que se
-    quedaba en PUBLISHED sin activar). Crea una `ReportLetterheadVersion`
-    nueva y la activa atómicamente, archivando la anterior ACTIVE. No-op
-    (devuelve la versión ACTIVE existente sin crear nada) si la
-    configuración enviada es idéntica a la ya activa — evita ruido de
-    historial en un "Guardar" sin cambios reales.
-
-    `POST .../versions` + `POST .../{id}/activate` (sin cambios, arriba)
-    siguen existiendo tal cual para el flujo secundario de historial/
-    rollback ("Nueva versión desde esta", "Restaurar").
-    """
-    _require(user.id, "reports:manage_templates", session)
-    letterhead = _get_owned_letterhead(letterhead_id, ctx, session)
-
-    logo_storage_id = payload.configuration.header.logo_storage_id
-    if logo_storage_id is not None:
-        logo_object = session.get(StorageObject, logo_storage_id)
-        if not logo_object:
-            raise HTTPException(400, "logo_storage_id does not reference an existing object")
-        if str(logo_object.tenant_id) != str(letterhead.tenant_id):
-            raise HTTPException(
-                400, "logo_storage_id does not reference an object owned by this tenant"
-            )
-    footer_logo_storage_id = payload.configuration.footer.logo_storage_id
-    if footer_logo_storage_id is not None:
-        footer_logo_object = session.get(StorageObject, footer_logo_storage_id)
-        if not footer_logo_object:
-            raise HTTPException(
-                400, "footer.logo_storage_id does not reference an existing object"
-            )
-        if str(footer_logo_object.tenant_id) != str(letterhead.tenant_id):
-            raise HTTPException(
-                400, "footer.logo_storage_id does not reference an object owned by this tenant"
-            )
-
-    new_configuration = payload.configuration.model_dump(mode="json")
-
-    active = session.exec(
-        select(ReportLetterheadVersion).where(
-            ReportLetterheadVersion.report_letterhead_id == letterhead.id,
-            ReportLetterheadVersion.status == ReportLetterheadVersionStatus.ACTIVE,
-        )
-    ).first()
-    if active is not None and active.configuration == new_configuration:
-        return ReportLetterheadVersionDetailResponse(
-            **_version_response(active).model_dump(),
-            configuration=active.configuration,
-        )
-
-    if active is not None:
-        # Demote before promoting — mismo orden que activate_letterhead_version,
-        # necesario por el índice único parcial "una ACTIVE por membrete".
-        active.status = ReportLetterheadVersionStatus.PUBLISHED
-        session.add(active)
-        session.flush()
-
-    last_version = session.exec(
-        select(ReportLetterheadVersion)
-        .where(ReportLetterheadVersion.report_letterhead_id == letterhead.id)
-        .order_by(ReportLetterheadVersion.version_number.desc())
-    ).first()
-    next_version_number = (last_version.version_number + 1) if last_version else 1
-
-    new_version = ReportLetterheadVersion(
-        tenant_id=letterhead.tenant_id,
-        report_letterhead_id=letterhead.id,
-        version_number=next_version_number,
-        schema_version=2,
-        configuration=new_configuration,
-        status=ReportLetterheadVersionStatus.ACTIVE,
-        created_by=user.id,
-        activated_at=datetime.utcnow(),
-    )
-    session.add(new_version)
-    session.commit()
-    session.refresh(new_version)
-
-    logger.info(
-        f"Letterhead version {new_version.version_number} saved and activated for letterhead {letterhead_id}",
-        extra={
-            "event": "report_letterhead_version.saved_and_activated",
-            "letterhead_id": letterhead_id,
-            "version_id": str(new_version.id),
-            "user_id": str(user.id),
-        },
-    )
-
-    return ReportLetterheadVersionDetailResponse(
-        **_version_response(new_version).model_dump(),
-        configuration=new_version.configuration,
     )
 
 
