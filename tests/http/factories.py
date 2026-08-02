@@ -168,6 +168,40 @@ def create_letterhead_version(
     return version
 
 
+def create_default_letterhead(
+    session: Session,
+    tenant: Tenant,
+    *,
+    configuration: Optional[dict] = None,
+    name: str = "Membrete predeterminado",
+) -> tuple["ReportLetterhead", "ReportLetterheadVersion"]:
+    """El membrete predeterminado del tenant, con su versión ACTIVE lista.
+
+    Tercera remediación post-Fase 2: desde que la creación V2 exige un
+    membrete resoluble (y bloquea con 409 si no lo hay — ver
+    deterministic-letterhead-resolution-contract.md), cualquier prueba que
+    cree un reporte V2 necesita esto. `configuration` por defecto reproduce
+    el bloque `presentation` de `valid_rendering_snapshot()`, así que las
+    pruebas que ya afirmaban sobre esa presentación siguen valiendo tal cual.
+    """
+    from app.models.report_letterhead import ReportLetterhead
+
+    letterhead = ReportLetterhead(
+        tenant_id=tenant.id, name=name, is_active=True, is_default=True
+    )
+    session.add(letterhead)
+    session.commit()
+    session.refresh(letterhead)
+    version = create_letterhead_version(
+        session,
+        tenant,
+        letterhead,
+        status="ACTIVE",
+        configuration=configuration or valid_rendering_snapshot()["presentation"],
+    )
+    return letterhead, version
+
+
 def valid_rendering_snapshot(**overrides) -> dict:
     """A ReportRenderingSnapshotV2-shaped payload usable as the `configuration`
     of a `ReportTemplateVersionCreate` request."""

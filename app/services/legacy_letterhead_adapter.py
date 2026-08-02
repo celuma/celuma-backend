@@ -10,18 +10,28 @@ used to modify Legacy in any way. If legacy_letterhead_config.ts ever
 changes, this file must be updated by hand to match — see
 legacy-parity-contract.md for the full rationale.
 
-The legacy layout does not map 1:1 onto ReportPresentationSnapshotV2: its
-header shows ONLY the signing physician's block (bottom-aligned, bold,
-8pt, no logo, no separate institution name) and its logo actually lives in
-the FOOTER (left-aligned, next to a right-aligned address+contact block) —
-the exact inverse of V2's default header-identity/footer-text layout. This
-adapter is a best-effort, documented translation, not a pixel-perfect
-reproduction (V2's header always renders a logo slot, even if empty/neutral
-— Legacy's does not; V2's footer text is not bold). See
-legacy-parity-validation-report.md for the full list of residual visual
-differences after this mapping. Legacy itself is never rendered from this
-data; only LegacyReportRendererV1's own hardcoded constants render Legacy
-reports, unchanged.
+The legacy layout does not map 1:1 onto V2's DEFAULT layout: its header
+shows ONLY the signing physician's block (bottom-aligned, bold, 8pt, no
+logo, no separate institution name) and its logo actually lives in the
+FOOTER (left-aligned, next to a right-aligned address+contact block) — the
+exact inverse of V2's default header-identity/footer-text layout.
+
+Hasta la tercera remediación esto era una traducción "best-effort": el
+membrete transportaba los datos, pero el renderer V2 no sabía expresar
+varias de esas decisiones visuales (reservaba caja de logo en el
+encabezado aunque no hubiera logo, usaba alturas de banda fijas, y no
+tenía peso tipográfico para el pie). La CUARTA remediación conectó esas
+capacidades — `logo_mode`, `offset_mm`/`height_mm`/`content_gap_mm`/
+`padding_mm`, `signer_placement`, `layout=SPLIT` y los pesos de
+`ReportTypographyConfig` — de modo que cada campo que este adaptador emite
+hoy tiene un efecto real en `VersionedReportRendererV2`. Ver
+v2-legacy-parity-capabilities.md (capacidades), legacy-adapter-v2-contract.md
+(este mapeo campo a campo) y legacy-dom-parity-report.md /
+legacy-pdf-parity-report.md (diferencias residuales medidas).
+
+Legacy itself is never rendered from this data; only
+LegacyReportRendererV1's own hardcoded constants render Legacy reports,
+unchanged.
 """
 import base64
 import hashlib
@@ -81,43 +91,104 @@ def build_legacy_letterhead_export() -> CelumaLetterheadEnvelope:
         )
 
     presentation = ReportPresentationSnapshotV2(
+        # ------------------------------------------------------------------
+        # Cuarta remediación post-Fase 2. Cada valor de aquí abajo es una
+        # lectura DIRECTA de las constantes y estilos de
+        # legacy_report_renderer_v1.tsx, no una aproximación:
+        #
+        #   MARGIN_L_MM / MARGIN_R_MM = 18   -> margins_cm.left/right = 1.8
+        #   HEADER_H_MM = 28                 -> header.height_mm = 28
+        #   FOOTER_H_MM = 20                 -> footer.height_mm = 20
+        #   header.top = 0 / footer.bottom=0 -> offset_mm = 0 en ambas bandas
+        #   body.top = HEADER_H_MM           -> header.content_gap_mm = 0
+        #   body.bottom = FOOTER_H_MM        -> footer.content_gap_mm = 0
+        #   body.paddingTop = 4mm            -> paper.body_padding_top_mm = 4
+        #   header.paddingBottom = 4mm       -> header.padding_mm = 4
+        #   (el pie no declara padding)      -> footer.padding_mm = 0
+        #
+        # margins_cm.top/bottom quedan fuera del cálculo (los `offset_mm`
+        # explícitos los sustituyen); se dejan en el valor que describe la
+        # banda para que la ficha del membrete siga siendo legible.
+        # Ver legacy-adapter-v2-contract.md.
+        # ------------------------------------------------------------------
         paper=ReportPaperConfig(
             size="LETTER",
             orientation="PORTRAIT",
-            margins_cm=ReportMarginsCm(top=2.5, right=1.5, bottom=2.5, left=1.5),
+            margins_cm=ReportMarginsCm(top=2.8, right=1.8, bottom=2.0, left=1.8),
+            body_padding_top_mm=4.0,
         ),
         header=ReportHeaderConfig(
             enabled=True,
             logo_storage_id=None,
-            institution_name=_PHYSICIAN_NAME,
-            subtitle=_PHYSICIAN_SPECIALTY,
-            address=_FOOTER_ADDRESS,
+            # El encabezado Legacy NO tiene logo y NO reserva espacio para
+            # uno: su logotipo vive en el pie. `NONE` es lo que impide que
+            # V2 dibuje el isotipo neutral de Céluma en su lugar.
+            logo_mode="NONE",
+            # Las cuatro líneas del encabezado Legacy son, en este orden,
+            # nombre / especialidad / adscripción / cédulas — es decir, el
+            # bloque del firmante institucional completo, con una sola
+            # tipografía. Se emiten con `signer_placement="INLINE"` en vez
+            # de repartirlas entre institution_name/subtitle/address, porque
+            # esos campos tienen tamaños distintos por línea y la dirección
+            # postal de Legacy pertenece al PIE, no al encabezado.
+            institution_name=None,
+            subtitle=None,
+            address=None,
             phone=None,  # legacy contact string mixes letters ("Tel."/"Cel.") — not a valid phone value
             email=None,
+            signer_placement="INLINE",
             # Legacy's header is bottom-aligned (flex-end) with no divider
-            # line below it — see module docstring for the residual
-            # difference this leaves (V2 still always renders a header
-            # logo slot; Legacy's header has none at all).
+            # line below it.
             content_alignment="BOTTOM",
             height_mm=28.0,
+            offset_mm=0.0,
+            content_gap_mm=0.0,
+            padding_mm=4.0,
             divider=DividerConfig(enabled=False),
         ),
         footer=ReportFooterConfig(
             enabled=True,
-            custom_text=_FOOTER_CONTACT,
-            show_page_number=True,
+            # Dirección y contacto son DOS renglones en Legacy (`<br/>`). El
+            # contrato prohíbe markup en texto libre, así que viajan como un
+            # salto de línea real y el renderer los imprime con
+            # `white-space: pre-line`.
+            custom_text=f"{_FOOTER_ADDRESS}\n{_FOOTER_CONTACT}",
+            # Legacy nunca imprimió número de página.
+            show_page_number=False,
             # Legacy's logo is footer-left, address+contact text footer-right,
-            # no divider line above the footer.
+            # no divider line above the footer. `logo_storage_id` se rellena
+            # en el import a partir de `assets.footer_logo`; `CUSTOM`
+            # garantiza que, si no se resolviera, no se dibuje ningún
+            # sustituto.
             logo_storage_id=None,
+            logo_mode="CUSTOM",
             logo_position="LEFT",
             content_alignment="RIGHT",
+            layout="SPLIT",
             height_mm=20.0,
+            offset_mm=0.0,
+            content_gap_mm=0.0,
+            padding_mm=0.0,
+            # `height: calc(20mm - 4mm)`, `max-width: 35%` en el logo y
+            # `max-width: 65%` en el texto — literal de Legacy.
+            logo_height_mm=16.0,
+            logo_max_width_pct=35.0,
+            text_max_width_pct=65.0,
             divider=DividerConfig(enabled=False),
         ),
         style=ReportStyleConfig(
             primary_color=_COLOR,
             typography=ReportTypographyConfig(
-                font_family="ARIAL", header_font_size_pt=8.0, footer_font_size_pt=7.0
+                font_family="ARIAL",
+                base_font_size_pt=10.0,
+                # El encabezado Legacy es 8pt en negrita en sus CUATRO
+                # líneas (`fontSize: 8pt` + `fontWeight: bold` en la banda);
+                # el pie, 7pt también en negrita.
+                header_font_size_pt=8.0,
+                header_secondary_font_size_pt=8.0,
+                header_font_weight=700,
+                footer_font_size_pt=7.0,
+                footer_font_weight=700,
             ),
         ),
         signer=ReportSignerSnapshot(

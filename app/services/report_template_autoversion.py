@@ -22,7 +22,10 @@ from sqlmodel import Session, select
 from app.models.report import ReportTemplate
 from app.models.report_template_version import ReportTemplateVersion, ReportTemplateVersionStatus
 from app.schemas.report_template_version import ReportRenderingSnapshotV2
-from app.services.letterhead_resolution import resolve_fallback_letterhead_version
+from app.services.letterhead_resolution import (
+    LetterheadResolutionError,
+    resolve_effective_letterhead_version,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +47,7 @@ def snapshot_and_activate_template_version(
     guardados sin cambio clínico real.
 
     Devuelve `None` sin crear nada si no hay ningún membrete resoluble
-    (`resolve_fallback_letterhead_version`) — el guardado clínico en sí
+    (`resolve_effective_letterhead_version`) — el guardado clínico en sí
     sigue funcionando con normalidad; la creación de reportes V2 permanece
     bloqueada hasta que se configure un membrete, exactamente como antes de
     esta remediación (ver remaining-release-risks.md).
@@ -62,10 +65,27 @@ def snapshot_and_activate_template_version(
         if _hash_template_block(existing_block) == new_hash:
             return active_version
 
-    resolved_letterhead_version = resolve_fallback_letterhead_version(
-        session, str(template.tenant_id), template
-    )
-    if resolved_letterhead_version is None:
+    # Tercera remediación: la resolución es determinista y reporta su fuente.
+    # Un tenant mal configurado (dos versiones ACTIVE, default sin activa)
+    # levanta `LetterheadResolutionError` en vez de devolver una versión al
+    # azar; aquí eso NO puede romper un guardado clínico, así que se degrada
+    # a "no auto-versionar" y se registra — la creación V2 sí bloqueará con
+    # el mismo mensaje, que es donde el usuario debe verlo.
+    try:
+        resolved = resolve_effective_letterhead_version(
+            session, str(template.tenant_id), template=template
+        )
+    except LetterheadResolutionError as exc:
+        logger.warning(
+            "Skipping template auto-version: letterhead resolution failed",
+            extra={
+                "event": "report_template_version.autoversion_unresolvable_letterhead",
+                "template_id": str(template.id),
+                "reason": exc.message,
+            },
+        )
+        return None
+    if resolved is None:
         logger.info(
             "Skipping template auto-version: no resolvable letterhead yet",
             extra={
@@ -79,7 +99,7 @@ def snapshot_and_activate_template_version(
         snapshot = ReportRenderingSnapshotV2(
             schema_version=2,
             template=template.template_json,
-            presentation=resolved_letterhead_version.configuration,
+            presentation=resolved.presentation,
         )
     except PydanticValidationError:
         logger.exception(

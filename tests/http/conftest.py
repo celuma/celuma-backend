@@ -124,6 +124,15 @@ def _patch_s3(monkeypatch):
     monkeypatch.setattr(
         "app.services.managed_tenant_image_service.S3Service", FakeS3Service
     )
+    # Tercera remediación post-Fase 2: `letterhead_portability` descarga los
+    # bytes del logo para embeberlos en el `.cell`, y `letterhead_resources`
+    # firma las URLs efímeras del editor — ambos con su propio import de
+    # S3Service. Sin estos dos parches, cualquier prueba de round-trip CON
+    # logo golpeaba el bucket real (y fallaba con NoSuchKey), que es la razón
+    # por la que el camino "exportar/importar un membrete con logo" nunca
+    # llegó a estar cubierto antes de esta remediación.
+    monkeypatch.setattr("app.services.letterhead_portability.S3Service", FakeS3Service)
+    monkeypatch.setattr("app.services.letterhead_resources.S3Service", FakeS3Service)
 
 
 def make_pdf_bytes(num_pages: int = 1) -> bytes:

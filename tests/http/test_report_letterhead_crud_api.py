@@ -55,7 +55,14 @@ class TestLetterheadCRUD:
         session.refresh(letterhead)
         assert letterhead.is_active is False
 
-    def test_hard_delete_blocked_when_versions_exist(self, client, session):
+    def test_hard_delete_allowed_when_versions_exist_but_nothing_references_it(
+        self, client, session
+    ):
+        """Tercera remediación: tener versiones ya NO bloquea el borrado.
+        Bloqueaba a TODO membrete que se hubiera guardado alguna vez, es
+        decir a todos — el problema D del brief. Lo que bloquea ahora son
+        las referencias reales (default, preferencia de plantilla, reportes),
+        cubiertas en test_letterhead_remediation3.py."""
         tenant = create_tenant(session)
         user = create_user(session, tenant, email="admin@t1.example")
         letterhead = create_letterhead(session, tenant)
@@ -65,7 +72,7 @@ class TestLetterheadCRUD:
             f"/api/v1/report-letterheads/{letterhead.id}?hard_delete=true",
             headers=auth_headers(user),
         )
-        assert resp.status_code == 409
+        assert resp.status_code == 200, resp.text
 
     def test_cross_tenant_letterhead_is_not_found(self, client, session):
         tenant_a = create_tenant(session, name="Tenant A")
@@ -184,6 +191,11 @@ class TestTenantDefaultLetterhead:
         user = create_user(session, tenant, email="admin@t1.example")
         lh1 = create_letterhead(session, tenant, name="Membrete 1")
         lh2 = create_letterhead(session, tenant, name="Membrete 2")
+        # Tercera remediación: solo un membrete con configuración guardada
+        # (versión ACTIVE) puede ser predeterminado — si no, la resolución no
+        # podría resolverlo y V2 quedaría bloqueado sin que nadie lo pidiera.
+        create_letterhead_version(session, tenant, lh1, status="ACTIVE")
+        create_letterhead_version(session, tenant, lh2, status="ACTIVE")
 
         r1 = client.post(f"/api/v1/report-letterheads/{lh1.id}/default", headers=auth_headers(user))
         assert r1.status_code == 200

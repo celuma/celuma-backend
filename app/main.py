@@ -188,8 +188,8 @@ async def basic_rate_limiting(request: Request, call_next):
     
     client_ip = request.client.host if request.client else "unknown"
     current_time = time.time()
-    window_size = 60  # 1 minute
-    max_requests = 100  # 100 requests per minute per IP
+    window_size = settings.rate_limit_window_seconds
+    max_requests = settings.rate_limit_max_requests
     
     async with rate_limit_lock:
         # Clean old entries

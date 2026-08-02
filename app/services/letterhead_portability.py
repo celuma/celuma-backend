@@ -45,14 +45,34 @@ class CelumaPortabilityError(ValueError):
 
 
 def _export_asset(
-    storage_id: Optional[str], session: Session, s3: S3Service
+    storage_id: Optional[str], session: Session, s3: S3Service, label: str
 ) -> Optional[CelumaLetterheadAsset]:
+    """Embeds one referenced logo as base64 + sha256, or `None` if the
+    version references no logo at that slot.
+
+    Tercera remediación: si el `logo_storage_id` SÍ está puesto pero el
+    objeto no existe (o sus bytes no están en el bucket), esto levanta en
+    vez de devolver `None`. Antes fallaba en silencio y el `.cell` salía
+    sin logo — el usuario solo lo descubría al importarlo en otro tenant y
+    encontrarse el logo neutral, que es exactamente el síntoma del
+    problema A del brief. Un export a medias es peor que un export que
+    falla: el archivo parece bueno y se propaga.
+    """
     if not storage_id:
         return None
     storage = session.get(StorageObject, storage_id)
     if storage is None:
-        return None
-    logo_bytes = s3.download_bytes(storage.object_key)
+        raise CelumaPortabilityError(
+            f"El {label} de este membrete apunta a un archivo que ya no existe. "
+            "Vuelve a subirlo antes de exportar."
+        )
+    try:
+        logo_bytes = s3.download_bytes(storage.object_key)
+    except Exception:
+        raise CelumaPortabilityError(
+            f"No se pudieron leer los bytes del {label} de este membrete. "
+            "Vuelve a subirlo antes de exportar."
+        ) from None
     return CelumaLetterheadAsset(
         media_type=storage.content_type or "image/png",
         sha256=hashlib.sha256(logo_bytes).hexdigest(),
@@ -75,10 +95,14 @@ def export_letterhead_version(
     presentation = ReportPresentationSnapshotV2.model_validate(version.configuration)
 
     assets: dict[str, CelumaLetterheadAsset] = {}
-    header_asset = _export_asset(presentation.header.logo_storage_id, session, s3)
+    header_asset = _export_asset(
+        presentation.header.logo_storage_id, session, s3, "logo del encabezado"
+    )
     if header_asset is not None:
         assets["header_logo"] = header_asset
-    footer_asset = _export_asset(presentation.footer.logo_storage_id, session, s3)
+    footer_asset = _export_asset(
+        presentation.footer.logo_storage_id, session, s3, "logo del pie"
+    )
     if footer_asset is not None:
         assets["footer_logo"] = footer_asset
 
@@ -211,6 +235,11 @@ def import_letterhead_version(
             label="footer logo",
         )
 
+    # Los ÚNICOS campos que el import reescribe son los dos
+    # `logo_storage_id` (los ids del tenant de origen no significan nada
+    # aquí y se regeneran). Todo lo demás — colores, márgenes, layout,
+    # tipografía, divisores, alturas, alineaciones, firmante — se persiste
+    # tal cual venía en el archivo; nunca se "reconstruye con defaults".
     imported_presentation = presentation.model_copy(
         update={
             "header": presentation.header.model_copy(
@@ -228,6 +257,8 @@ def import_letterhead_version(
         description=envelope.letterhead.description,
         created_by=created_by,
         is_active=True,
+        # El import NUNCA marca predeterminado: eso sigue siendo una
+        # decisión explícita del administrador.
         is_default=False,
     )
     session.add(new_letterhead)
@@ -239,8 +270,19 @@ def import_letterhead_version(
         version_number=1,
         schema_version=2,
         configuration=imported_presentation.model_dump(mode="json"),
-        status=ReportLetterheadVersionStatus.PUBLISHED,
+        # Tercera remediación — CAUSA RAÍZ del problema A: esta versión
+        # nacía PUBLISHED. Como el membrete recién importado es nuevo y no
+        # tiene ninguna otra versión, se quedaba SIN versión ACTIVE, de modo
+        # que `GET .../versions/active` respondía 404 y el editor arrancaba
+        # desde BLANK_PRESENTATION — el usuario veía "se perdió el logo, el
+        # color y el layout" cuando en realidad todo estaba correctamente
+        # persistido en una versión que nadie leía. Un membrete importado
+        # tiene que ser inmediatamente visible y editable; que sea el
+        # predeterminado del tenant es otra decisión, y sigue siendo
+        # explícita (`is_default=False` arriba).
+        status=ReportLetterheadVersionStatus.ACTIVE,
         created_by=created_by,
+        activated_at=datetime.now(timezone.utc).replace(tzinfo=None),
     )
     session.add(new_version)
     session.commit()

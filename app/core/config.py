@@ -28,6 +28,16 @@ class Settings(BaseSettings):
         "http://localhost:4173,http://127.0.0.1:4173"
     )
 
+    # Tercera remediación post-Fase 2: el limitador de peticiones en memoria
+    # de app/main.py tenía sus dos números escritos a mano. El default
+    # (100/60s por IP) es el mismo de siempre, así que producción no cambia;
+    # se vuelve configurable porque la suite E2E real dispara todo su tráfico
+    # desde una sola IP y agotaba la ventana a mitad de la corrida — daba
+    # 429 en pruebas que no tenían nada malo. Ver
+    # remediation-3-e2e-report.md.
+    rate_limit_max_requests: int = 100
+    rate_limit_window_seconds: int = 60
+
     # Céluma 1.3 Fase 2, Bloque E: official PDF generation. `pdf_generator_base_url`
     # is the origin of the frontend the headless browser navigates to render
     # `/internal/report-render/...` — intentionally has no localhost default so an

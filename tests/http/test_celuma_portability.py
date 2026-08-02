@@ -86,12 +86,16 @@ class TestRoundTrip:
         assert imported.status_code == 200, imported.text
         body = imported.json()
         assert body["configuration"]["style"]["primary_color"] == "#654321"
-        assert body["status"] == "PUBLISHED"
+        # Tercera remediación: el import deja la versión ACTIVE para que el
+        # membrete sea inmediatamente visible y editable (antes nacía
+        # PUBLISHED y `GET .../versions/active` devolvía 404, que es lo que
+        # hacía parecer que el import "perdía" logo, color y layout).
+        assert body["status"] == "ACTIVE"
         # Never reuses the source letterhead/version id.
         assert body["report_letterhead_id"] != str(letterhead.id)
         assert body["id"] != str(version.id)
 
-    def test_import_never_makes_it_default_or_active(self, client, session):
+    def test_import_activates_the_version_but_never_makes_it_default(self, client, session):
         tenant = create_tenant(session)
         user = create_user(session, tenant, email="admin@t1.example")
         letterhead = create_letterhead(session, tenant)
@@ -110,7 +114,9 @@ class TestRoundTrip:
         letterheads = client.get("/api/v1/report-letterheads/", headers=auth_headers(user)).json()
         new_letterhead = next(l for l in letterheads["letterheads"] if l["id"] == imported["report_letterhead_id"])
         assert new_letterhead["is_default"] is False
-        assert imported["status"] == "PUBLISHED"  # not ACTIVE
+        # Activa (usable de inmediato) pero NUNCA predeterminada del tenant:
+        # marcar el predeterminado sigue siendo una decisión explícita.
+        assert imported["status"] == "ACTIVE"
 
 
 class TestImportValidation:

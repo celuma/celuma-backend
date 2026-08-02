@@ -34,7 +34,12 @@ from app.services.report_pdf_generation import (
     ReportPdfImmutableError,
     load_locked_version,
 )
-from app.services.letterhead_resolution import resolve_fallback_letterhead_version
+from app.services.letterhead_resolution import (
+    LetterheadArchivedError,
+    LetterheadConfigurationError,
+    LetterheadNotFoundError,
+    resolve_effective_letterhead_version,
+)
 from app.services.report_template_autoversion import snapshot_and_activate_template_version
 from app.services.report_publishing import (
     embed_signature_metadata_if_required,
@@ -370,57 +375,55 @@ def create_report(
             raise HTTPException(500, "Template version configuration is invalid") from exc
 
         # ------------------------------------------------------------------
-        # Post-Fase-2 remediation, R7 (orden extendido en la segunda
-        # remediación UX): resolve a membrete (letterhead) to override the
-        # template version's embedded `presentation`. Resolution order:
-        # explicit letterhead_version_id -> the owning template's
-        # preferred_letterhead_id (logical letterhead) -> the legacy
-        # preferred_letterhead_version_id -> the tenant's default
-        # letterhead's ACTIVE version (see resolve_fallback_letterhead_version
-        # in app/services/letterhead_resolution.py). If none resolves,
-        # silently keep the template version's own presentation (never
-        # blocks V2 creation) — this is what keeps tenants that have not
-        # adopted the letterhead domain yet byte-for-byte unchanged.
+        # Post-Fase-2 remediation, R7; resolución determinista + bloqueo
+        # explícito en la tercera remediación. `resolve_effective_letterhead_version`
+        # es el ÚNICO punto de verdad (compartido con
+        # `GET /study-types/{id}/report-defaults`): explícito -> preferido de
+        # la plantilla -> default del tenant, con invariantes estrictas
+        # (mismo tenant, membrete activo, EXACTAMENTE una versión ACTIVE).
+        #
+        # Cambio de comportamiento deliberado: si no resuelve NINGÚN
+        # membrete, la creación V2 se bloquea con 409 en vez de quedarse en
+        # silencio con la `presentation` embebida en la versión de plantilla.
+        # Aquel silencio era justamente lo que producía reportes V2 con un
+        # membrete que el usuario nunca eligió (y, en el editor, el fallback
+        # a Legacy). Ver deterministic-letterhead-resolution-contract.md.
         # ------------------------------------------------------------------
-        if report_data.letterhead_version_id is not None:
-            resolved_letterhead_version = session.get(
-                ReportLetterheadVersion, report_data.letterhead_version_id
+        try:
+            resolved_letterhead = resolve_effective_letterhead_version(
+                session,
+                ctx.tenant_id,
+                template=session.get(ReportTemplate, template_version.report_template_id),
+                letterhead_version_id=report_data.letterhead_version_id,
             )
-            if (
-                not resolved_letterhead_version
-                or str(resolved_letterhead_version.tenant_id) != ctx.tenant_id
-            ):
-                raise HTTPException(404, "Letterhead version not found")
-            if resolved_letterhead_version.status == ReportLetterheadVersionStatus.ARCHIVED:
-                raise HTTPException(
-                    409, "Cannot create a report from an archived letterhead version"
-                )
-        else:
-            owning_template = session.get(ReportTemplate, template_version.report_template_id)
-            resolved_letterhead_version = resolve_fallback_letterhead_version(
-                session, ctx.tenant_id, owning_template
+        except LetterheadNotFoundError as exc:
+            raise HTTPException(404, exc.message) from None
+        except (LetterheadArchivedError, LetterheadConfigurationError) as exc:
+            raise HTTPException(409, exc.message) from None
+
+        if resolved_letterhead is None:
+            raise HTTPException(
+                409,
+                "No hay ningún membrete predeterminado configurado para este "
+                "laboratorio. Configura uno en Configuración → Membretes y "
+                "márcalo como predeterminado antes de crear reportes.",
             )
 
-        if resolved_letterhead_version is not None:
-            try:
-                resolved_presentation = ReportPresentationSnapshotV2.model_validate(
-                    resolved_letterhead_version.configuration
-                )
-            except PydanticValidationError as exc:
-                logger.error(
-                    "Stored letterhead version configuration failed re-validation",
-                    extra={
-                        "event": "report.create_v2_invalid_letterhead_version_configuration",
-                        "letterhead_version_id": str(resolved_letterhead_version.id),
-                        "error": str(exc),
-                    },
-                )
-                raise HTTPException(500, "Letterhead version configuration is invalid") from exc
-            validated_snapshot = ReportRenderingSnapshotV2(
-                schema_version=2,
-                template=validated_snapshot.template,
-                presentation=resolved_presentation,
-            )
+        resolved_letterhead_version = resolved_letterhead.version
+        validated_snapshot = ReportRenderingSnapshotV2(
+            schema_version=2,
+            template=validated_snapshot.template,
+            presentation=resolved_letterhead.presentation,
+        )
+        logger.info(
+            "V2 report letterhead resolved",
+            extra={
+                "event": "report.create_v2_letterhead_resolved",
+                "letterhead_id": resolved_letterhead.letterhead_id,
+                "letterhead_version_id": resolved_letterhead.letterhead_version_id,
+                "resolution_source": resolved_letterhead.source.value,
+            },
+        )
 
     report = Report(
         tenant_id=report_data.tenant_id,
@@ -1065,7 +1068,7 @@ def update_template(
     # clínica interna solo si `template_json` cambió (hash-diff interno).
     # Un cambio de `preferred_letterhead_id` por sí solo no dispara una
     # revisión nueva: el membrete se resuelve en fresco en cada creación de
-    # reporte (resolve_fallback_letterhead_version), nunca desde la
+    # reporte (resolve_effective_letterhead_version), nunca desde la
     # `presentation` embebida en esta versión — ver
     # report-letterhead-selection-ux.md.
     snapshot_and_activate_template_version(session, template, user.id)

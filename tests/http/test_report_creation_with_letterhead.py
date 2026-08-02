@@ -185,10 +185,19 @@ class TestAutomaticLetterheadResolution:
         assert detail["letterhead_version_id"] == str(lh_version.id)
         assert detail["report"]["rendering_snapshot"]["presentation"]["style"]["primary_color"] == "#333333"
 
-    def test_no_letterhead_resolvable_falls_back_to_template_presentation_never_blocks(self, client, session):
-        """Hard compatibility requirement: a tenant that has not adopted
-        the letterhead domain yet (no letterheads at all) must keep
-        creating V2 reports exactly as before this remediation."""
+    def test_no_letterhead_resolvable_blocks_v2_creation_explicitly(self, client, session):
+        """REVERSIÓN DELIBERADA de la segunda remediación (ver
+        deterministic-letterhead-resolution-contract.md, "Cambio de
+        comportamiento").
+
+        Antes, un tenant sin ningún membrete creaba el reporte V2 en
+        silencio con la `presentation` embebida en la versión de plantilla.
+        Ese silencio era el mecanismo exacto detrás de dos síntomas del
+        brief: reportes V2 con un membrete que el usuario nunca eligió, y un
+        editor que, al no tener membrete que resolver, montaba Legacy. Ahora
+        se bloquea con 409 y un mensaje accionable — nunca Legacy, nunca un
+        membrete elegido por defecto implícito.
+        """
         tenant = create_tenant(session, reports_v2_enabled=True)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
@@ -201,11 +210,8 @@ class TestAutomaticLetterheadResolution:
         )
 
         resp = _create_report(client, headers, tenant, branch, order, template_version["id"])
-        assert resp.status_code == 200, resp.text
-
-        detail = client.get(f"/api/v1/reports/{resp.json()['id']}", headers=headers).json()
-        assert detail["letterhead_version_id"] is None
-        assert detail["report"]["rendering_snapshot"]["presentation"]["style"]["primary_color"] == "#999999"
+        assert resp.status_code == 409, resp.text
+        assert "membrete" in resp.json()["detail"].lower()
 
     def test_explicit_selection_wins_over_template_preference_and_tenant_default(self, client, session):
         tenant = create_tenant(session, reports_v2_enabled=True)

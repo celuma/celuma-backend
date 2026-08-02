@@ -10,9 +10,36 @@ diverge — see report-letterhead-version-contract.md.
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.schemas.report_template_version import ReportPresentationSnapshotV2
+
+
+# ---------------------------------------------------------------------------
+# Cuarta remediación post-Fase 2 — descripción opcional (Observación 2).
+#
+# `ReportLetterhead.description` es opcional en TODAS las operaciones y debe
+# poder quedar vacía. La normalización es única y compartida para que
+# create/update/import/export no puedan divergir:
+#
+#     None      -> None      (limpiar, o "no había nada")
+#     ""        -> None
+#     "   "     -> None
+#     " Texto " -> "Texto"
+#
+# Lo que NO normaliza este validador es la diferencia entre "campo omitido"
+# y "campo enviado como null": eso solo se puede distinguir con
+# `model_fields_set` en el endpoint PUT/PATCH (ver
+# `update_letterhead` en app/api/v1/report_letterheads.py) —
+# ver optional-letterhead-description-contract.md.
+# ---------------------------------------------------------------------------
+
+def normalize_optional_description(value: Optional[str]) -> Optional[str]:
+    """Blank/whitespace-only descriptions collapse to ``None``."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 # ---------------------------------------------------------------------------
@@ -23,11 +50,21 @@ class ReportLetterheadCreate(BaseModel):
     name: str
     description: Optional[str] = None
 
+    @field_validator("description")
+    @classmethod
+    def _normalize_description(cls, v: Optional[str]) -> Optional[str]:
+        return normalize_optional_description(v)
+
 
 class ReportLetterheadUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     is_active: Optional[bool] = None
+
+    @field_validator("description")
+    @classmethod
+    def _normalize_description(cls, v: Optional[str]) -> Optional[str]:
+        return normalize_optional_description(v)
 
 
 class ReportLetterheadResponse(BaseModel):
@@ -38,6 +75,16 @@ class ReportLetterheadResponse(BaseModel):
     is_default: bool
     is_active: bool
     created_at: datetime
+    # Tercera remediación post-Fase 2: la UI debe mostrar SOLO las acciones
+    # válidas ("Eliminar" únicamente cuando es seguro; "Desactivar" cuando
+    # hay historial que conservar), en vez de ofrecer Eliminar siempre y
+    # dejar que el backend responda 409 después del clic. Ver
+    # letterhead-delete-deactivate-contract.md.
+    has_active_version: bool = False
+    can_hard_delete: bool = False
+    # Motivos legibles por los que NO puede borrarse físicamente; vacío
+    # cuando `can_hard_delete` es true.
+    blocking_references: List[str] = []
 
 
 class ReportLetterheadDetailResponse(ReportLetterheadResponse):
@@ -72,8 +119,18 @@ class ReportLetterheadVersionResponse(BaseModel):
 
 
 class ReportLetterheadVersionDetailResponse(ReportLetterheadVersionResponse):
-    """Full version detail, including the immutable configuration."""
+    """Full version detail, including the immutable configuration.
+
+    Tercera remediación post-Fase 2: `resolved_resources` acompaña ahora a
+    `configuration` con las URLs efímeras de los logos referenciados por
+    `header.logo_storage_id`/`footer.logo_storage_id`. Sin esto el editor
+    no tenía forma de previsualizar un logo ya persistido al reabrirse, y
+    siempre caía al logo neutral de Céluma (problemas B y C del brief).
+    `None` cuando no hay ningún logo configurado — mismo contrato que
+    `ReportDetailResponse.resolved_resources`.
+    """
     configuration: Dict[str, Any]
+    resolved_resources: Optional[Dict[str, Any]] = None
 
 
 class ReportLetterheadVersionsListResponse(BaseModel):
@@ -134,6 +191,14 @@ class CelumaLetterheadPayload(BaseModel):
     name: str
     description: Optional[str] = None
     presentation: ReportPresentationSnapshotV2
+
+    @field_validator("description")
+    @classmethod
+    def _normalize_description(cls, v: Optional[str]) -> Optional[str]:
+        # Cuarta remediación: un `.cell` puede traer `"description": null`,
+        # `""` o solo espacios; el round-trip debe conservar la MISMA
+        # semántica ("sin descripción") en los tres casos.
+        return normalize_optional_description(v)
 
 
 class CelumaLetterheadEnvelope(BaseModel):

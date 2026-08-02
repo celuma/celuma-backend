@@ -8,6 +8,7 @@ from .factories import (
     auth_headers,
     create_branch,
     create_order,
+    create_default_letterhead,
     create_tenant,
     create_user,
     valid_rendering_snapshot,
@@ -120,6 +121,11 @@ class TestV2Creation:
         user = create_user(session, tenant, email="admin@t1.example")
         template = _create_template(session, tenant)
         headers = auth_headers(user)
+        # Tercera remediación: la creación V2 exige un membrete resoluble
+        # (ver deterministic-letterhead-resolution-contract.md). Su
+        # configuración por defecto es la misma `presentation` de
+        # valid_rendering_snapshot(), así que las aserciones no cambian.
+        create_default_letterhead(session, tenant)
         version = _publish_version(client, headers, template.id)
 
         resp = client.post(
@@ -247,6 +253,7 @@ class TestSnapshotImmutability:
         user = create_user(session, tenant, email="admin@t1.example")
         template = _create_template(session, tenant)
         headers = auth_headers(user)
+        letterhead, _lh_version = create_default_letterhead(session, tenant)
 
         version_a = _publish_version(client, headers, template.id)
 
@@ -284,6 +291,25 @@ class TestSnapshotImmutability:
             headers=headers,
         )
 
+        # Tercera remediación: la `presentation` de un reporte V2 la aporta
+        # ahora SIEMPRE el membrete resuelto, así que la prueba de
+        # inmutabilidad tiene que mover también esa palanca — cambiar el
+        # membrete después de crear el reporte tampoco puede alterarlo.
+        rebrand = client.put(
+            f"/api/v1/report-letterheads/{letterhead.id}/versions/current",
+            json={
+                "configuration": {
+                    **valid_rendering_snapshot()["presentation"],
+                    "header": {
+                        **valid_rendering_snapshot()["presentation"]["header"],
+                        "institution_name": "Membrete Cambiado Después",
+                    },
+                }
+            },
+            headers=headers,
+        )
+        assert rebrand.status_code == 200, rebrand.text
+
         # Change tenant "live" branding too.
         tenant.name = "Nombre Cambiado En Vivo"
         session.add(tenant)
@@ -309,6 +335,7 @@ class TestV2Atomicity:
         user = create_user(session, tenant, email="admin@t1.example")
         template = _create_template(session, tenant)
         headers = auth_headers(user)
+        create_default_letterhead(session, tenant)
         version = _publish_version(client, headers, template.id)
 
         FakeS3Service.fail_next_upload = True
@@ -344,6 +371,7 @@ class TestV2Atomicity:
         user = create_user(session, tenant, email="admin@t1.example")
         template = _create_template(session, tenant)
         headers = auth_headers(user)
+        create_default_letterhead(session, tenant)
         version = _publish_version(client, headers, template.id)
 
         FakeS3Service.fail_next_upload = True

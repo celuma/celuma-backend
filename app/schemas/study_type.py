@@ -1,5 +1,5 @@
 from pydantic import BaseModel, field_validator
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from datetime import datetime
 
 
@@ -122,8 +122,31 @@ class StudyTypeReportDefaultsResponse(BaseModel):
     template, no ACTIVE version, no letterhead) — the caller decides how to
     react (mirrors today's `v2ConfigBlocked` behavior), this endpoint never
     raises for an unconfigured tenant.
+
+    Tercera remediación post-Fase 2: además del id, devuelve el
+    `letterhead_id` lógico, la `presentation` ya resuelta y de dónde salió
+    (`letterhead_resolution_source`). Antes el editor tenía que encadenar
+    listar-membretes -> listar-versiones -> leer-versión para reconstruir
+    la presentación, y si CUALQUIER paso fallaba se quedaba sin
+    `presentation` y montaba Legacy en silencio. Con la presentación
+    incluida aquí ese camino desaparece: o hay membrete (V2), o
+    `v2_blocked_reason` dice exactamente por qué no (estado bloqueado),
+    nunca Legacy. Ver deterministic-letterhead-resolution-contract.md.
     """
     template_id: Optional[str] = None
     active_template_version_id: Optional[str] = None
     letterhead_version_id: Optional[str] = None
     letterhead_name: Optional[str] = None
+    letterhead_id: Optional[str] = None
+    # "EXPLICIT" | "TEMPLATE_PREFERRED" | "TENANT_DEFAULT"
+    letterhead_resolution_source: Optional[str] = None
+    letterhead_presentation: Optional[Dict[str, Any]] = None
+    # Ephemeral logo URLs for the letterhead above (never persisted).
+    letterhead_resolved_resources: Optional[Dict[str, Any]] = None
+    # None = V2 puede proceder. Si no:
+    #   "NO_TEMPLATE"            — el tipo de estudio no tiene plantilla.
+    #   "NO_ACTIVE_TEMPLATE_VERSION" — la plantilla no tiene versión activa.
+    #   "NO_LETTERHEAD"          — no hay membrete predeterminado resoluble.
+    #   "LETTERHEAD_MISCONFIGURED" — datos inconsistentes; ver el mensaje.
+    v2_blocked_reason: Optional[str] = None
+    v2_blocked_detail: Optional[str] = None

@@ -13,6 +13,7 @@ from .factories import (
     auth_headers,
     create_branch,
     create_order,
+    create_default_letterhead,
     create_tenant,
     create_user,
     valid_rendering_snapshot,
@@ -74,6 +75,8 @@ class TestV2ContentEditPreservesSnapshot:
         user = create_user(session, tenant, email="admin@t1.example")
         headers = auth_headers(user)
         template = _create_template(session, tenant)
+        # Tercera remediación: la creación V2 exige un membrete resoluble.
+        create_default_letterhead(session, tenant)
         report_id, version = self._create_v2_report(
             client, headers, tenant, branch, order, template.id
         )
@@ -117,6 +120,8 @@ class TestV2ContentEditPreservesSnapshot:
         user = create_user(session, tenant, email="admin@t1.example")
         headers = auth_headers(user)
         template = _create_template(session, tenant)
+        # Tercera remediación: la creación V2 exige un membrete resoluble.
+        create_default_letterhead(session, tenant)
         report_id, _version = self._create_v2_report(
             client, headers, tenant, branch, order, template.id
         )

@@ -14,6 +14,7 @@ from .factories import (
     create_branch,
     create_order,
     create_storage_object,
+    create_default_letterhead,
     create_tenant,
     create_user,
     valid_rendering_snapshot,
@@ -57,11 +58,16 @@ class TestLogoResolutionOnRead:
         headers = auth_headers(user)
         logo = create_storage_object(session, key="logos/t1-logo.png", tenant=tenant)
 
-        version = _publish_version(
-            client,
-            headers,
-            template.id,
-            presentation={
+        # Tercera remediación: el logo vive en el MEMBRETE, no en la versión
+        # de plantilla — la `presentation` del reporte la aporta ahora
+        # siempre el membrete resuelto (ver
+        # deterministic-letterhead-resolution-contract.md). Lo que esta
+        # prueba cubre, resolver `logo_storage_id` -> URL sin escribirla en
+        # el snapshot, es idéntico.
+        create_default_letterhead(
+            session,
+            tenant,
+            configuration={
                 **valid_rendering_snapshot()["presentation"],
                 "header": {
                     **valid_rendering_snapshot()["presentation"]["header"],
@@ -69,6 +75,7 @@ class TestLogoResolutionOnRead:
                 },
             },
         )
+        version = _publish_version(client, headers, template.id)
 
         create_resp = client.post(
             "/api/v1/reports/",
@@ -99,6 +106,7 @@ class TestLogoResolutionOnRead:
         user = create_user(session, tenant, email="admin@t1.example")
         template = _create_template(session, tenant)
         headers = auth_headers(user)
+        create_default_letterhead(session, tenant)
         version = _publish_version(client, headers, template.id)
 
         create_resp = client.post(
@@ -153,6 +161,7 @@ class TestLogoResolutionOnRead:
         user = create_user(session, tenant, email="admin@t1.example")
         template = _create_template(session, tenant)
         headers = auth_headers(user)
+        create_default_letterhead(session, tenant)
         version = _publish_version(client, headers, template.id)
 
         create_resp = client.post(
