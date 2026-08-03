@@ -1,16 +1,16 @@
-"""Quinta remediación post-Fase 2 — cambio de membrete mientras el reporte
-sigue en DRAFT (Observación A).
+"""Fifth post-Phase-2 remediation — letterhead change while the report
+is still DRAFT (Observation A).
 
-La frontera de inmutabilidad deja de ser "el reporte ya tiene id" y pasa a
-ser "el reporte ya salió de DRAFT". Estas pruebas fijan las dos mitades del
-contrato:
+The immutability boundary is no longer "the report already has an id" and
+becomes "the report has left DRAFT". These tests pin both halves of the
+contract:
 
-  * lo que SÍ cambia: `ReportVersion.letterhead_version_id` y
+  * what DOES change: `ReportVersion.letterhead_version_id` and
     `rendering_snapshot.presentation`;
-  * lo que NUNCA cambia: plantilla clínica, `template_version_id`, campos
-    base, secciones, valores clínicos e imágenes.
+  * what NEVER changes: clinical template, `template_version_id`, base
+    fields, sections, clinical values, and images.
 
-Ver draft-letterhead-change-contract.md y
+See draft-letterhead-change-contract.md and
 letterhead-freeze-at-review-contract.md.
 """
 import pytest
@@ -72,8 +72,8 @@ def _alt_presentation(name: str = "Laboratorio Nefropatología") -> dict:
 
 @pytest.fixture
 def v2_world(client, session):
-    """Un tenant V2 con dos membretes utilizables y un reporte DRAFT ya
-    persistido — el escenario exacto de la Observación A."""
+    """A V2 tenant with two usable letterheads and an already-persisted
+    DRAFT report — the exact Observation A scenario."""
     tenant = create_tenant(session, reports_v2_enabled=True)
     branch = create_branch(session, tenant)
     order = create_order(session, tenant, branch)
@@ -144,9 +144,10 @@ class TestDraftLetterheadChange:
         assert detail["letterhead_version_id"] == str(v2_world["default_version"].id)
 
     def test_persisted_draft_can_change_letterhead(self, client, v2_world):
-        """El corazón de la Observación A: un DRAFT YA GUARDADO cambia de
-        membrete. Antes, `_carry_forward_v2_metadata` reimponía siempre el
-        membrete original y la petición se ignoraba en silencio."""
+        """The heart of Observation A: an ALREADY-SAVED DRAFT changes
+        letterhead. Previously, `_carry_forward_v2_metadata` always
+        reimposed the original letterhead and the request was silently
+        ignored."""
         resp = _save_draft(
             client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)
         )
@@ -159,8 +160,8 @@ class TestDraftLetterheadChange:
         assert presentation["header"]["institution_name"] == "Laboratorio Nefropatología"
 
     def test_reopened_draft_can_change_letterhead(self, client, v2_world):
-        """Reabrir (releer por /full) y luego cambiar: el mismo camino que
-        recorre la usuaria en la UI."""
+        """Reopen (reread via /full) then change: the same path the user
+        takes in the UI."""
         full = client.get(
             f"/api/v1/reports/{v2_world['report_id']}/full", headers=v2_world["headers"]
         )
@@ -219,8 +220,8 @@ class TestDraftLetterheadChange:
         assert detail["report"]["sections"]["galeria"]["content"] == images
 
     def test_change_replaces_only_presentation(self, client, v2_world):
-        """Invariante central de §3.3: el bloque `template` del snapshot y
-        `template_version_id` quedan intactos."""
+        """Central invariant of §3.3: the snapshot `template` block and
+        `template_version_id` remain intact."""
         before = _get(client, v2_world)
         template_before = before["report"]["rendering_snapshot"]["template"]
         template_version_before = before["template_version_id"]
@@ -239,8 +240,8 @@ class TestDraftLetterheadChange:
         )
 
     def test_change_resolves_both_logos(self, client, session, v2_world):
-        """§3.4.5: tras el cambio, `resolved_resources` se recalcula desde el
-        membrete NUEVO — header y footer."""
+        """§3.4.5: after the change, `resolved_resources` is recomputed from
+        the NEW letterhead — header and footer."""
         from .factories import create_storage_object
 
         header_logo = create_storage_object(
@@ -269,8 +270,8 @@ class TestDraftLetterheadChange:
         assert "footer-neph.png" in resources["footer_logo_url"]
 
     def test_content_only_save_keeps_letterhead(self, client, v2_world):
-        """Regresión de C9/R: un guardado sin `letterhead_version_id` sigue
-        siendo carry-forward puro."""
+        """C9/R regression: a save without `letterhead_version_id` remains
+        pure carry-forward."""
         assert _save_draft(client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)).status_code == 200
         assert _save_draft(client, v2_world).status_code == 200
         assert _get(client, v2_world)["letterhead_version_id"] == str(
@@ -383,14 +384,14 @@ class TestLetterheadFreezeAtReview:
         resp = _save_draft(
             client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)
         )
-        # PUBLISHED ya estaba protegido por _IMMUTABLE_REPORT_STATUSES (B9);
-        # lo que importa es que NO sea un 200 ni un 500.
+        # PUBLISHED was already protected by _IMMUTABLE_REPORT_STATUSES (B9);
+        # what matters is that it is NOT a 200 or a 500.
         assert resp.status_code == 409, resp.text
 
     def test_non_draft_echoing_same_letterhead_is_not_an_error(self, client, session, v2_world):
-        """Un guardado de contenido en IN_REVIEW que reenvía el MISMO
-        membrete no es un cambio y no debe rechazarse — si no, la UI de solo
-        lectura no podría reenviar su propio envelope."""
+        """A content save in IN_REVIEW that resends the SAME letterhead is
+        not a change and must not be rejected — otherwise the read-only UI
+        could not resend its own envelope."""
         self._submit(client, session, v2_world)
         resp = _save_draft(
             client, v2_world, letterhead_version_id=str(v2_world["default_version"].id)
@@ -398,9 +399,9 @@ class TestLetterheadFreezeAtReview:
         assert resp.status_code == 200, resp.text
 
     def test_returned_to_draft_can_change_letterhead_again(self, client, session, v2_world):
-        """§3.6: `request-changes` devuelve el reporte a DRAFT sobre la MISMA
-        versión editable (no crea una nueva), así que el membrete vuelve a
-        ser modificable. Decisión documentada en
+        """§3.6: `request-changes` returns the report to DRAFT on the SAME
+        editable version (does not create a new one), so the letterhead
+        becomes changeable again. Decision documented in
         letterhead-freeze-at-review-contract.md."""
         self._submit(client, session, v2_world)
         resp = client.post(
@@ -429,8 +430,9 @@ class TestLetterheadFreezeAtReview:
 
 class TestLegacyUnaffected:
     def test_legacy_report_ignores_letterhead_version_id(self, client, session):
-        """§14: la rama Legacy no cambia. Un reporte sin snapshot V2 no tiene
-        `presentation` que sustituir; la petición se ignora sin error."""
+        """§14: the Legacy branch does not change. A report without a V2
+        snapshot has no `presentation` to replace; the request is ignored
+        without error."""
         tenant = create_tenant(session)  # reports_v2_enabled=False
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)

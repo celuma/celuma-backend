@@ -1,5 +1,5 @@
 """HTTP integration tests for protecting published/retracted reports
-(Céluma 1.3, Fase 2, Bloque B, Historia B9/B10)."""
+(Céluma 1.3, Phase 2, Block B, Story B9/B10)."""
 import io
 
 import pytest

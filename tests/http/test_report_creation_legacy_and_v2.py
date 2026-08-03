@@ -1,5 +1,5 @@
 """HTTP integration tests for legacy vs V2 report creation (Céluma 1.3,
-Fase 2, Bloque B, Historias B6/B7/B10)."""
+Phase 2, Block B, Historias B6/B7/B10)."""
 from app.models.report import ReportTemplate
 from app.models.report_template_version import ReportTemplateVersionStatus
 
@@ -121,10 +121,10 @@ class TestV2Creation:
         user = create_user(session, tenant, email="admin@t1.example")
         template = _create_template(session, tenant)
         headers = auth_headers(user)
-        # Tercera remediación: la creación V2 exige un membrete resoluble
-        # (ver deterministic-letterhead-resolution-contract.md). Su
-        # configuración por defecto es la misma `presentation` de
-        # valid_rendering_snapshot(), así que las aserciones no cambian.
+        # Third remediation: V2 creation requires a resolvable letterhead
+        # (see deterministic-letterhead-resolution-contract.md). Its default
+        # configuration is the same `presentation` as
+        # valid_rendering_snapshot(), so assertions do not change.
         create_default_letterhead(session, tenant)
         version = _publish_version(client, headers, template.id)
 
@@ -240,7 +240,7 @@ class TestV2Creation:
 
 
 class TestSnapshotImmutability:
-    """Historia B10: create with version A, publish/activate version B,
+    """Story B10: create with version A, publish/activate version B,
     change tenant branding, then re-read the original report and confirm it
     is untouched — the whole point of the snapshot mechanism."""
 
@@ -291,10 +291,10 @@ class TestSnapshotImmutability:
             headers=headers,
         )
 
-        # Tercera remediación: la `presentation` de un reporte V2 la aporta
-        # ahora SIEMPRE el membrete resuelto, así que la prueba de
-        # inmutabilidad tiene que mover también esa palanca — cambiar el
-        # membrete después de crear el reporte tampoco puede alterarlo.
+        # Third remediation: a V2 report's `presentation` is now ALWAYS
+        # supplied by the resolved letterhead, so the immutability test
+        # must also move that lever — changing the letterhead after
+        # creating the report must not alter it either.
         rebrand = client.put(
             f"/api/v1/report-letterheads/{letterhead.id}/versions/current",
             json={
@@ -325,7 +325,7 @@ class TestSnapshotImmutability:
 
 
 class TestV2Atomicity:
-    """Historia B8: a failed S3 upload during V2 creation must not leave an
+    """Story B8: a failed S3 upload during V2 creation must not leave an
     orphaned Report row nor a partially-configured version."""
 
     def test_s3_failure_during_v2_creation_leaves_no_orphaned_report(self, client, session):

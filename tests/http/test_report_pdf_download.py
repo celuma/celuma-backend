@@ -1,5 +1,5 @@
 """HTTP integration tests for the official PDF download route (Céluma 1.3,
-Fase 2, Bloque E, Historia E10)."""
+Phase 2, Block E, Story E10)."""
 from sqlmodel import Session
 
 from app.models.enums import ReportStatus
@@ -76,7 +76,7 @@ class TestOfficialDownload:
         user_b = create_user(session, tenant_b, email="u@t2.example")
 
         resp = client.get(f"/api/v1/reports/{report.id}/versions/1/pdf", headers=auth_headers(user_b))
-        # Post-Fase-2 remediation: tightened from `in (403, 404)` now that
+        # Post-Phase-2 remediation: tightened from `in (403, 404)` now that
         # the tenant-mismatch inconsistency between this endpoint and its
         # "latest version" sibling is fixed — see
         # test_report_pdf_download_permissions.py for the full matrix.

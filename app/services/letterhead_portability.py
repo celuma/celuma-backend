@@ -1,5 +1,5 @@
 """Export/import a `ReportLetterheadVersion` as a portable `.celuma` file —
-post-Fase-2 remediation, R12/R13. See celuma-letterhead-file-format.md.
+post-Phase-2 remediation, R12/R13. See celuma-letterhead-file-format.md.
 """
 import base64
 import hashlib
@@ -50,13 +50,13 @@ def _export_asset(
     """Embeds one referenced logo as base64 + sha256, or `None` if the
     version references no logo at that slot.
 
-    Tercera remediación: si el `logo_storage_id` SÍ está puesto pero el
-    objeto no existe (o sus bytes no están en el bucket), esto levanta en
-    vez de devolver `None`. Antes fallaba en silencio y el `.cell` salía
-    sin logo — el usuario solo lo descubría al importarlo en otro tenant y
-    encontrarse el logo neutral, que es exactamente el síntoma del
-    problema A del brief. Un export a medias es peor que un export que
-    falla: el archivo parece bueno y se propaga.
+    Third remediation: if `logo_storage_id` IS set but the object does not
+    exist (or its bytes are not in the bucket), this raises instead of
+    returning `None`. Previously it failed silently and the `.cell` shipped
+    without a logo — the user only discovered it when importing into
+    another tenant and seeing the neutral logo, which is exactly problem A
+    in the brief. A half-export is worse than a failing export: the file
+    looks good and propagates.
     """
     if not storage_id:
         return None
@@ -235,11 +235,11 @@ def import_letterhead_version(
             label="footer logo",
         )
 
-    # Los ÚNICOS campos que el import reescribe son los dos
-    # `logo_storage_id` (los ids del tenant de origen no significan nada
-    # aquí y se regeneran). Todo lo demás — colores, márgenes, layout,
-    # tipografía, divisores, alturas, alineaciones, firmante — se persiste
-    # tal cual venía en el archivo; nunca se "reconstruye con defaults".
+    # The ONLY fields the import rewrites are the two `logo_storage_id`
+    # values (source-tenant ids mean nothing here and are regenerated).
+    # Everything else — colors, margins, layout, typography, dividers,
+    # heights, alignments, signer — is persisted exactly as it came in the
+    # file; never "rebuilt with defaults".
     imported_presentation = presentation.model_copy(
         update={
             "header": presentation.header.model_copy(
@@ -257,8 +257,8 @@ def import_letterhead_version(
         description=envelope.letterhead.description,
         created_by=created_by,
         is_active=True,
-        # El import NUNCA marca predeterminado: eso sigue siendo una
-        # decisión explícita del administrador.
+        # Import NEVER marks as default: that remains an explicit
+        # administrator decision.
         is_default=False,
     )
     session.add(new_letterhead)
@@ -270,16 +270,15 @@ def import_letterhead_version(
         version_number=1,
         schema_version=2,
         configuration=imported_presentation.model_dump(mode="json"),
-        # Tercera remediación — CAUSA RAÍZ del problema A: esta versión
-        # nacía PUBLISHED. Como el membrete recién importado es nuevo y no
-        # tiene ninguna otra versión, se quedaba SIN versión ACTIVE, de modo
-        # que `GET .../versions/active` respondía 404 y el editor arrancaba
-        # desde BLANK_PRESENTATION — el usuario veía "se perdió el logo, el
-        # color y el layout" cuando en realidad todo estaba correctamente
-        # persistido en una versión que nadie leía. Un membrete importado
-        # tiene que ser inmediatamente visible y editable; que sea el
-        # predeterminado del tenant es otra decisión, y sigue siendo
-        # explícita (`is_default=False` arriba).
+        # Third remediation — ROOT CAUSE of problem A: this version was born
+        # PUBLISHED. Because the freshly imported letterhead is new and has
+        # no other version, it ended up with NO ACTIVE version, so
+        # `GET .../versions/active` returned 404 and the editor started from
+        # BLANK_PRESENTATION — the user saw "logo, color, and layout were
+        # lost" when everything was correctly persisted in a version nobody
+        # read. An imported letterhead must be immediately visible and
+        # editable; whether it is the tenant default is a separate decision
+        # and remains explicit (`is_default=False` above).
         status=ReportLetterheadVersionStatus.ACTIVE,
         created_by=created_by,
         activated_at=datetime.now(timezone.utc).replace(tzinfo=None),

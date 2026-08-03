@@ -1,20 +1,19 @@
-"""Resolución de los recursos efímeros de un membrete (URLs de logo) —
-tercera remediación post-Fase 2.
+"""Resolution of ephemeral letterhead resources (logo URLs) —
+third post-Phase-2 remediation.
 
-Contrato único de logos (ver letterhead-logo-persistence-contract.md):
+Single logo contract (see letterhead-logo-persistence-contract.md):
 
-    se persiste   -> `presentation.header.logo_storage_id`
-                     `presentation.footer.logo_storage_id`
-    se resuelve   -> `resolved_resources.header_logo_url`
-                     `resolved_resources.footer_logo_url`
+    persisted    -> `presentation.header.logo_storage_id`
+                    `presentation.footer.logo_storage_id`
+    resolved     -> `resolved_resources.header_logo_url`
+                    `resolved_resources.footer_logo_url`
 
-La URL NUNCA se persiste: es efímera y se recalcula en cada lectura. Antes
-de esta remediación esto solo existía para los reportes ya guardados
-(`_resolve_report_resources` en app/api/v1/reports.py); el editor de
-membretes no tenía ninguna forma de obtener la URL de un logo ya
-persistido, así que al reabrirlo siempre mostraba el logo neutral de
-Céluma aunque el `logo_storage_id` estuviera correctamente guardado — la
-causa raíz de los problemas B y C del brief.
+The URL is NEVER persisted: it is ephemeral and recomputed on every read.
+Before this remediation this only existed for already-saved reports
+(`_resolve_report_resources` in app/api/v1/reports.py); the letterhead
+editor had no way to obtain the URL of an already-persisted logo, so
+reopening always showed Céluma's neutral logo even when `logo_storage_id`
+was correctly saved — the root cause of problems B and C in the brief.
 """
 from __future__ import annotations
 
@@ -38,10 +37,10 @@ def _resolve_one(
         return None
     if logo_object is None:
         return None
-    # Defensa en profundidad: el objeto ya se validó como propio del tenant
-    # al guardar la versión; volver a comprobarlo aquí garantiza que un bug
-    # futuro en aquella validación, o una fila histórica anterior a ella,
-    # nunca filtre un logo de otro tenant en una lectura.
+    # Defense in depth: the object was already validated as belonging to the
+    # tenant when the version was saved; re-checking here guarantees that a
+    # future bug in that validation, or a historical row from before it,
+    # never leaks another tenant's logo on a read.
     if str(logo_object.tenant_id) != str(tenant_id):
         return None
     return s3.object_public_url(logo_object.object_key)
@@ -53,11 +52,11 @@ def resolve_letterhead_resources(
     session: Session,
     s3: Optional[S3Service] = None,
 ) -> Optional[ReportResolvedResources]:
-    """URLs de los logos de una `ReportLetterheadVersion.configuration`.
+    """URLs for the logos in a `ReportLetterheadVersion.configuration`.
 
-    Devuelve `None` cuando no hay nada resoluble — mismo contrato que
-    `_resolve_report_resources`, para que el frontend trate ambos orígenes
-    con el mismo código.
+    Returns `None` when nothing is resolvable — same contract as
+    `_resolve_report_resources`, so the frontend can treat both origins
+    with the same code.
     """
     if not isinstance(configuration, dict):
         return None

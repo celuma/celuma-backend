@@ -28,7 +28,7 @@ class TestTenantModel:
         assert "Test Tenant" in str(tenant)
 
     def test_tenant_reports_v2_enabled_defaults_to_false(self):
-        """Céluma 1.3 Fase 2, Bloque A / Historia A6: existing/new tenants
+        """Céluma 1.3 Phase 2, Block A / Story A6: existing/new tenants
         must default to reports_v2_enabled=False unless explicitly set."""
         tenant = Tenant(name="Test Tenant")
         assert tenant.reports_v2_enabled is False

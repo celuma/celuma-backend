@@ -1,5 +1,5 @@
-"""HTTP integration tests for official PDF generation (Céluma 1.3, Fase 2,
-Bloque E, Historias E4-E9).
+"""HTTP integration tests for official PDF generation (Céluma 1.3, Phase 2,
+Block E, Historias E4-E9).
 
 Real Chromium never runs here — `stub_pdf_render` (conftest.py) replaces
 ReportPdfGenerationService._render_pdf so these tests are fast and
@@ -213,7 +213,7 @@ class TestGenerationImmutability:
         assert stub_pdf_render.call_count == 0
 
     def test_generation_is_rejected_even_when_already_ready(self, client, session, stub_pdf_render, status):
-        """"Rechazar si está PUBLISHED con PDF listo" — regeneration must be
+        """"Reject if PUBLISHED with ready PDF" — regeneration must be
         refused outright, not silently no-op'd, once a report is immutable."""
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)

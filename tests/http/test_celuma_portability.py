@@ -1,4 +1,4 @@
-"""HTTP integration tests for `.celuma` export/import — post-Fase-2
+"""HTTP integration tests for `.celuma` export/import — post-Phase-2
 remediation, R12/R15."""
 import base64
 import hashlib
@@ -86,10 +86,10 @@ class TestRoundTrip:
         assert imported.status_code == 200, imported.text
         body = imported.json()
         assert body["configuration"]["style"]["primary_color"] == "#654321"
-        # Tercera remediación: el import deja la versión ACTIVE para que el
-        # membrete sea inmediatamente visible y editable (antes nacía
-        # PUBLISHED y `GET .../versions/active` devolvía 404, que es lo que
-        # hacía parecer que el import "perdía" logo, color y layout).
+        # Third remediation: import leaves the version ACTIVE so the
+        # letterhead is immediately visible and editable (previously it was
+        # born PUBLISHED and `GET .../versions/active` returned 404, which
+        # made it look like import "lost" logo, color, and layout).
         assert body["status"] == "ACTIVE"
         # Never reuses the source letterhead/version id.
         assert body["report_letterhead_id"] != str(letterhead.id)
@@ -114,8 +114,8 @@ class TestRoundTrip:
         letterheads = client.get("/api/v1/report-letterheads/", headers=auth_headers(user)).json()
         new_letterhead = next(l for l in letterheads["letterheads"] if l["id"] == imported["report_letterhead_id"])
         assert new_letterhead["is_default"] is False
-        # Activa (usable de inmediato) pero NUNCA predeterminada del tenant:
-        # marcar el predeterminado sigue siendo una decisión explícita.
+        # Active (immediately usable) but NEVER the tenant default:
+        # marking the default remains an explicit decision.
         assert imported["status"] == "ACTIVE"
 
 

@@ -4,11 +4,11 @@ Revision ID: v1_5_0
 Revises: v1_4_0
 Create Date: 2026-07-29
 
-Céluma 1.3 Fase 2, Bloque B, Historia B5. Purely additive:
+Céluma 1.3 Phase 2, Block B, Story B5. Purely additive:
 
   - `schema_version` (nullable int): NULL for every existing row (legacy).
     Only ever written as 2 for reports created while
-    `Tenant.reports_v2_enabled` is true (Historia B6). Never backfilled.
+    `Tenant.reports_v2_enabled` is true (Story B6). Never backfilled.
   - `template_version_id` (nullable FK -> report_template_version.id):
     required in application code whenever schema_version = 2, enforced here
     additionally with a CHECK constraint. ON DELETE is intentionally left

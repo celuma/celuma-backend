@@ -1,11 +1,11 @@
-"""Segunda remediación post-Fase 2 (UX): auto-versionamiento de plantillas.
+"""Second post-Phase-2 remediation (UX): template auto-versioning.
 
-Antes de esta remediación, guardar `template_json` (estructura clínica) y
-publicar una `ReportTemplateVersion` (que además debía activarse a mano)
-eran dos flujos completamente separados en dos pantallas distintas — ver
-internal-versioning-contract.md. Esto convierte el guardado clínico normal
-en la única acción que el usuario necesita: internamente sigue creando una
-revisión inmutable y activándola, pero nunca lo pide explícitamente.
+Before this remediation, saving `template_json` (clinical structure) and
+publishing a `ReportTemplateVersion` (which also had to be activated by
+hand) were two completely separate flows on two different screens — see
+internal-versioning-contract.md. This turns the normal clinical save into
+the only action the user needs: internally it still creates an immutable
+revision and activates it, but never asks for that explicitly.
 """
 from __future__ import annotations
 
@@ -38,19 +38,19 @@ def _hash_template_block(template_block: Optional[Dict[str, Any]]) -> str:
 def snapshot_and_activate_template_version(
     session: Session, template: ReportTemplate, actor_id: Optional[UUID]
 ) -> Optional[ReportTemplateVersion]:
-    """Crea y activa una `ReportTemplateVersion` reflejando el
-    `template_json` actual, si cambió respecto a la versión ACTIVE actual.
+    """Create and activate a `ReportTemplateVersion` reflecting the current
+    `template_json`, if it changed relative to the current ACTIVE version.
 
-    No-op (devuelve la versión ACTIVE existente sin tocar nada) si el
-    `template_json` es idéntico al ya reflejado en esa versión — evita
-    ensuciar el historial en guardados de nombre/descripción u otros
-    guardados sin cambio clínico real.
+    No-op (returns the existing ACTIVE version untouched) if `template_json`
+    is identical to what that version already reflects — avoids polluting
+    history on name/description saves or other saves with no real clinical
+    change.
 
-    Devuelve `None` sin crear nada si no hay ningún membrete resoluble
-    (`resolve_effective_letterhead_version`) — el guardado clínico en sí
-    sigue funcionando con normalidad; la creación de reportes V2 permanece
-    bloqueada hasta que se configure un membrete, exactamente como antes de
-    esta remediación (ver remaining-release-risks.md).
+    Returns `None` without creating anything if there is no resolvable
+    letterhead (`resolve_effective_letterhead_version`) — the clinical save
+    itself still works normally; V2 report creation remains blocked until a
+    letterhead is configured, exactly as before this remediation (see
+    remaining-release-risks.md).
     """
     active_version = session.exec(
         select(ReportTemplateVersion).where(
@@ -65,12 +65,12 @@ def snapshot_and_activate_template_version(
         if _hash_template_block(existing_block) == new_hash:
             return active_version
 
-    # Tercera remediación: la resolución es determinista y reporta su fuente.
-    # Un tenant mal configurado (dos versiones ACTIVE, default sin activa)
-    # levanta `LetterheadResolutionError` en vez de devolver una versión al
-    # azar; aquí eso NO puede romper un guardado clínico, así que se degrada
-    # a "no auto-versionar" y se registra — la creación V2 sí bloqueará con
-    # el mismo mensaje, que es donde el usuario debe verlo.
+    # Third remediation: resolution is deterministic and reports its source.
+    # A misconfigured tenant (two ACTIVE versions, default with none active)
+    # raises `LetterheadResolutionError` instead of returning a random
+    # version; here that MUST NOT break a clinical save, so it degrades to
+    # "do not auto-version" and is logged — V2 creation will block with the
+    # same message, which is where the user should see it.
     try:
         resolved = resolve_effective_letterhead_version(
             session, str(template.tenant_id), template=template

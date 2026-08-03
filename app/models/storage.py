@@ -19,7 +19,7 @@ class StorageObject(BaseModel, TimestampMixin, table=True):
     content_type: Optional[str] = Field(max_length=255, default=None)
     size_bytes: Optional[int] = Field(default=None)
     created_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
-    # Céluma 1.3 Fase 2, Bloque C, Historia C1: nullable tenant ownership tag.
+    # Céluma 1.3 Phase 2, Block C, Story C1: nullable tenant ownership tag.
     # NULL for every object created before this block (sample images, PDFs,
     # signatures — those are already tenant-scoped indirectly through their
     # parent entity). Only set going forward for objects that need to be

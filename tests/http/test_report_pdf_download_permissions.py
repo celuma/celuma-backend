@@ -1,4 +1,4 @@
-"""PDF download authorization matrix — post-Fase-2 remediation, R14/R15.
+"""PDF download authorization matrix — post-Phase-2 remediation, R14/R15.
 
 Confirms the real root cause found while reproducing bug 4: the backend
 was already correct (both GET .../pdf endpoints require only
@@ -109,7 +109,7 @@ class TestDownloadPermissionMatrix:
         assert resp.status_code == 403
 
     def test_cross_tenant_is_not_found_not_forbidden(self, client, session, stub_pdf_render):
-        """Post-Fase-2 remediation: both GET pdf endpoints now consistently
+        """Post-Phase-2 remediation: both GET pdf endpoints now consistently
         404 on tenant mismatch (previously the specific-version endpoint
         alone leaked existence via a 403)."""
         tenant_a = create_tenant(session, name="Tenant A")
@@ -129,20 +129,21 @@ class TestDownloadPermissionMatrix:
     def test_payment_locked_order_does_not_block_internal_download(
         self, client, session, stub_pdf_render
     ):
-        """Quinta remediación post-Fase 2 — INVERSIÓN DELIBERADA de esta
-        prueba.
+        """Fifth post-Phase-2 remediation — DELIBERATE INVERSION of this
+        test.
 
-        Antes afirmaba `403`. Esa aserción es justamente lo que dejó pasar el
-        bug real: `Order.billed_lock` es la compuerta de entrega a TERCEROS
-        (paciente y médico solicitante, `app/api/v1/portal.py`), y se había
-        colado también en los endpoints internos del PDF, donde `/full` —
-        mismo permiso, mismo reporte, contenido clínico completo — nunca la
-        aplicó. El resultado en producción: la patóloga firmaba su reporte y
-        recibía `{"detail":"Report access blocked due to pending payment"}`
-        al intentar descargarlo.
+        Previously it asserted `403`. That assertion is exactly what let the
+        real bug through: `Order.billed_lock` is the delivery gate for THIRD
+        PARTIES (patient and requesting physician, `app/api/v1/portal.py`),
+        and it had also slipped into the internal PDF endpoints, where
+        `/full` — same permission, same report, full clinical content —
+        never applied it. The production result: the pathologist signed
+        their report and received
+        `{"detail":"Report access blocked due to pending payment"}` when
+        trying to download it.
 
-        La prueba se conserva (no se borra) con la afirmación correcta: el
-        personal interno descarga, y `portal.py` sigue bloqueando. Ver
+        The test is kept (not deleted) with the correct assertion: internal
+        staff downloads, and `portal.py` still blocks. See
         official-pdf-download-root-cause.md.
         """
         tenant = create_tenant(session)

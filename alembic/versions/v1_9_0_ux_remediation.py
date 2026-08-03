@@ -4,7 +4,7 @@ Revision ID: v1_9_0
 Revises: v1_8_0
 Create Date: 2026-08-01
 
-Segunda remediación post-Fase 2 (UX). Purely additive:
+Second post-Phase-2 remediation (UX). Purely additive:
   - `report_template.preferred_letterhead_id`: nullable FK to
     `report_letterhead.id` (the logical letterhead, NOT a specific version).
     Sibling of the existing `preferred_letterhead_version_id` (kept, now

@@ -1,5 +1,5 @@
 """HTTP integration tests for the report-template logo upload endpoint
-(Céluma 1.3, Fase 2, Bloque D, Historia D2)."""
+(Céluma 1.3, Phase 2, Block D, Story D2)."""
 from io import BytesIO
 
 from PIL import Image

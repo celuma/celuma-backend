@@ -292,7 +292,7 @@ class OrderUnifiedCreate(BaseModel):
     patient_id: Optional[str] = None
     requesting_physician_id: Optional[str] = None
     study_type_id: str  # Obligatorio
-    order_code: Optional[str] = None  # Opcional, se genera automáticamente
+    order_code: Optional[str] = None  # Optional, generated automatically
     requested_by: Optional[str] = None
     notes: Optional[str] = None
     created_by: Optional[str] = None

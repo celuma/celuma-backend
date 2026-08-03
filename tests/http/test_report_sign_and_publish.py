@@ -1,11 +1,11 @@
-"""HTTP integration tests for `POST /{report_id}/sign-and-publish` — segunda
-remediación post-Fase 2 (UX). Ver signed-pdf-publication-workflow.md.
+"""HTTP integration tests for `POST /{report_id}/sign-and-publish` — second
+post-Phase-2 remediation (UX). See signed-pdf-publication-workflow.md.
 
-Cubre: una sola acción produce READY+PUBLISHED sin necesidad de un
-`generate-pdf` previo; el claim (`publish_started_at`/`publish_started_by`)
-rechaza un segundo intento concurrente con 409 pero recupera un claim
-"stale" (huérfano); una generación fallida deja el reporte APPROVED y
-reintentable, sin signed_by/signed_at ni PUBLISHED.
+Covers: a single action produces READY+PUBLISHED without a prior
+`generate-pdf`; the claim (`publish_started_at`/`publish_started_by`)
+rejects a concurrent second attempt with 409 but recovers a "stale"
+(orphaned) claim; a failed generation leaves the report APPROVED and
+retryable, without signed_by/signed_at or PUBLISHED.
 """
 from datetime import datetime, timedelta
 

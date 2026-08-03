@@ -1,4 +1,4 @@
-"""Céluma 1.3 Fase 2, Bloque E: internal report-render data endpoint.
+"""Céluma 1.3 Phase 2, Block E: internal report-render data endpoint.
 
 Serves the exact JSON envelope the frontend's `/internal/report-render/...`
 route needs to reproduce a report with `ReportRendererResolver`, for a

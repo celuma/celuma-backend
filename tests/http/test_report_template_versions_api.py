@@ -1,5 +1,5 @@
 """HTTP integration tests for the ReportTemplateVersion endpoints (Céluma
-1.3, Fase 2, Bloque B, Historia B3 + B10)."""
+1.3, Phase 2, Block B, Story B3 + B10)."""
 from sqlmodel import Session
 
 from app.models.report import ReportTemplate
@@ -141,7 +141,7 @@ class TestCreateVersion:
     def test_unowned_logo_reference_is_rejected(self, client, session):
         """A StorageObject with no tenant_id (untagged — e.g. predates this
         scoping, or belongs to an unrelated flow) must not be usable as a
-        report-template logo, same as a cross-tenant one (Historia C1)."""
+        report-template logo, same as a cross-tenant one (Story C1)."""
         tenant = create_tenant(session)
         user = create_user(session, tenant, email="admin@t1.example")
         template = _create_template(session, tenant)
@@ -158,8 +158,8 @@ class TestCreateVersion:
 
     def test_cross_tenant_logo_reference_is_rejected(self, client, session):
         """A StorageObject owned by a different tenant must be rejected at
-        publish time — this is the exact gap Bloque B left open (existence-only
-        check) and Bloque C closes. See report-resource-resolution-contract.md."""
+        publish time — this is the exact gap Block B left open (existence-only
+        check) and Block C closes. See report-resource-resolution-contract.md."""
         tenant_a = create_tenant(session, name="Tenant A")
         tenant_b = create_tenant(session, name="Tenant B")
         user_a = create_user(session, tenant_a, email="admin@a.example")

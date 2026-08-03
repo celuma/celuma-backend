@@ -1,43 +1,43 @@
-# Scripts de Verificación
+# Verification Scripts
 
-Este directorio contiene scripts para verificar funcionalidad del sistema.
+This directory contains scripts to verify system functionality.
 
 ## verify_billing_flow.sh
 
-Script para verificar el flujo completo de facturación: orden → factura automática con precio del catálogo → pago → balance.
+Script to verify the full billing flow: order → automatic invoice with catalog price → payment → balance.
 
-### Requisitos
+### Requirements
 
-- Backend corriendo (Docker o local)
-- Token de autenticación válido
-- `jq` instalado (para procesar JSON)
-- `bc` instalado (para cálculos decimales)
+- Backend running (Docker or local)
+- Valid authentication token
+- `jq` installed (for JSON processing)
+- `bc` installed (for decimal math)
 
-### Uso
+### Usage
 
 ```bash
-# Con token por defecto (incluido en el script)
+# With the default token (embedded in the script)
 ./verify_billing_flow.sh
 
-# Con token personalizado
+# With a custom token
 ./verify_billing_flow.sh "Bearer YOUR_TOKEN_HERE"
 
-# Con URL personalizada
+# With a custom URL
 BASE_URL=http://localhost:8000 ./verify_billing_flow.sh "Bearer YOUR_TOKEN"
 ```
 
-### ¿Qué hace el script?
+### What does the script do?
 
-1. **Obtiene tipos de estudio activos** y selecciona uno para la prueba
-2. **Verifica precios en catálogo** para el tipo de estudio seleccionado
-3. **Obtiene pacientes** y selecciona uno para la prueba
-4. **Crea una orden** sin especificar `order_code` (se genera automáticamente: ej. IHQ-1)
-5. **Verifica factura auto-generada** con el precio correcto del catálogo
-6. **Registra pago parcial** y verifica el balance
-7. **Completa el pago** restante
-8. **Verifica estado final**: balance 0, factura PAID, orden desbloqueada
+1. **Fetches active study types** and picks one for the test
+2. **Checks catalog prices** for the selected study type
+3. **Fetches patients** and picks one for the test
+4. **Creates an order** without specifying `order_code` (auto-generated, e.g. IHQ-1)
+5. **Verifies the auto-generated invoice** has the correct catalog price
+6. **Records a partial payment** and checks the balance
+7. **Completes the remaining payment**
+8. **Verifies final state**: balance 0, invoice PAID, order unlocked
 
-### Ejemplo de salida
+### Sample output
 
 ```
 =====================================
@@ -94,9 +94,9 @@ Resumen:
   - Balance: $0.00 MXN
 ```
 
-### Notas
+### Notes
 
-- El script crea datos de prueba (orden, muestras, pagos) en el sistema
-- Útil para verificar que todo el flujo funciona correctamente después de cambios
-- Se puede ejecutar en cualquier momento contra un sistema funcional
-- Los datos creados permanecen en la base de datos (no son borrados automáticamente)
+- The script creates test data (order, samples, payments) in the system
+- Useful to verify the full flow still works after changes
+- Can be run at any time against a working system
+- Created data remains in the database (not deleted automatically)

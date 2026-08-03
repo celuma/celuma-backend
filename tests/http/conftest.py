@@ -1,8 +1,8 @@
-"""Shared fixtures for HTTP integration tests (Céluma 1.3, Fase 2, Bloque B,
-Historia B10).
+"""Shared fixtures for HTTP integration tests (Céluma 1.3, Phase 2, Block B,
+Story B10).
 
 The project had no HTTP integration tests before this block (confirmed in
-phase-2-block-a-implementation-summary.md, "Dependencias para el Bloque B").
+phase-2-block-a-implementation-summary.md, "Dependencias para el Block B").
 This uses an in-memory SQLite database — the same pattern already
 established by tests/test_rbac_phase2.py — plus FastAPI's TestClient, with
 `S3Service` replaced by an in-memory fake so these tests never touch the
@@ -23,7 +23,7 @@ from app.core.db import get_session
 from app.main import app, rate_limit_storage
 
 
-# Céluma 1.3 Fase 2, Bloque B, Historia B10: HTTP tests run against a real,
+# Céluma 1.3 Phase 2, Block B, Story B10: HTTP tests run against a real,
 # ephemeral Postgres database (dropped and recreated per test function) on
 # the same local Postgres server already used by `docker compose`, rather
 # than SQLite in-memory. This repo's models rely on native Postgres UUID/JSON
@@ -58,7 +58,7 @@ class FakeS3Service:
 
     Keeps uploaded bytes in memory (so tests can assert on what was
     persisted) and can be told to fail on the next upload, to exercise the
-    Historia B8 atomicity/compensation path without a real S3 outage.
+    Story B8 atomicity/compensation path without a real S3 outage.
     """
 
     store: dict = {}
@@ -114,30 +114,30 @@ def _reset_fake_s3():
 def _patch_s3(monkeypatch):
     monkeypatch.setattr("app.api.v1.reports.S3Service", FakeS3Service)
     monkeypatch.setattr("app.api.v1.portal.S3Service", FakeS3Service)
-    # Céluma 1.3 Fase 2, Bloque E: ReportPdfGenerationService uploads the
+    # Céluma 1.3 Phase 2, Block E: ReportPdfGenerationService uploads the
     # generated PDF via its own S3Service import — never the real AWS
     # bucket in tests, same as every other flow above.
     monkeypatch.setattr("app.services.report_pdf_generation.S3Service", FakeS3Service)
-    # Post-Fase-2 remediation: ManagedTenantImageService (shared by
+    # Post-Phase-2 remediation: ManagedTenantImageService (shared by
     # template-logo, tenant-logo, and letterhead-logo endpoints) has its
     # own S3Service import, patched independently of the callers above.
     monkeypatch.setattr(
         "app.services.managed_tenant_image_service.S3Service", FakeS3Service
     )
-    # Tercera remediación post-Fase 2: `letterhead_portability` descarga los
-    # bytes del logo para embeberlos en el `.cell`, y `letterhead_resources`
-    # firma las URLs efímeras del editor — ambos con su propio import de
-    # S3Service. Sin estos dos parches, cualquier prueba de round-trip CON
-    # logo golpeaba el bucket real (y fallaba con NoSuchKey), que es la razón
-    # por la que el camino "exportar/importar un membrete con logo" nunca
-    # llegó a estar cubierto antes de esta remediación.
+    # Third post-Phase-2 remediation: `letterhead_portability` downloads
+    # logo bytes to embed them in the `.cell`, and `letterhead_resources`
+    # signs the editor's ephemeral URLs — both with their own S3Service
+    # import. Without these two patches, any round-trip test WITH a logo
+    # hit the real bucket (and failed with NoSuchKey), which is why the
+    # "export/import a letterhead with logo" path was never covered before
+    # this remediation.
     monkeypatch.setattr("app.services.letterhead_portability.S3Service", FakeS3Service)
     monkeypatch.setattr("app.services.letterhead_resources.S3Service", FakeS3Service)
 
 
 def make_pdf_bytes(num_pages: int = 1) -> bytes:
     """A genuinely valid, parseable PDF (built with pypdf, not a hand-rolled
-    byte string) — Céluma 1.3 Fase 2, Bloque E tests feed this through the
+    byte string) — Céluma 1.3 Phase 2, Block E tests feed this through the
     *real* validation/hash/page-count logic in ReportPdfGenerationService;
     only the headless-Chromium render step itself is stubbed (see
     `stub_pdf_render` below), so E5 (byte validation) is exercised for real."""
@@ -194,7 +194,7 @@ def _reset_rate_limit_storage():
     is not test-aware. TestClient requests all share the same synthetic
     client IP, so without resetting this between test functions, the whole
     HTTP suite shares one 60s window and later tests start failing with 429
-    once enough earlier tests have run (Céluma 1.3 Fase 2, Bloque D —
+    once enough earlier tests have run (Céluma 1.3 Phase 2, Block D —
     surfaced when this block's new HTTP tests pushed the full-suite request
     count over the limit)."""
     rate_limit_storage.clear()

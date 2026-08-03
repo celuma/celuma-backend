@@ -33,7 +33,7 @@ class TestTenantSchemas:
         assert tenant_response.name == "Test Tenant"
 
     def test_tenant_response_reports_v2_enabled_defaults_false(self):
-        """Céluma 1.3 Fase 2, Bloque A / Historia A6."""
+        """Céluma 1.3 Phase 2, Block A / Story A6."""
         tenant_response = TenantResponse(id="test-id", name="Test Tenant")
         assert tenant_response.reports_v2_enabled is False
 

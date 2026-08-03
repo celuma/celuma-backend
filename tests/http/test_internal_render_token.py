@@ -1,5 +1,5 @@
 """HTTP integration tests for the internal render-data endpoint and its
-render-token authorization (Céluma 1.3, Fase 2, Bloque E, Historia E3).
+render-token authorization (Céluma 1.3, Phase 2, Block E, Story E3).
 
 This endpoint is deliberately NOT protected by `current_user` — a headless
 browser rendering one report_version_id has no user session — so these

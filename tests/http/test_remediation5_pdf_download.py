@@ -1,17 +1,18 @@
-"""Quinta remediación post-Fase 2 — el `403` real de la descarga del PDF
-oficial (Observación B).
+"""Fifth post-Phase-2 remediation — the real `403` on official PDF
+download (Observation B).
 
-Causa raíz confirmada por reproducción, no por inspección: el endpoint
-`GET /reports/{id}/versions/{n}/pdf` aplicaba `Order.billed_lock` — la
-compuerta de entrega a terceros de `portal.py` — mientras
-`GET /reports/{id}/full` no la aplicaba. El cuerpo capturado en Safari,
-`{"detail":"Report access blocked due to pending payment"}`, mide
-exactamente los 57 bytes del `content-length` del log. Ver
+Root cause confirmed by reproduction, not by inspection: the endpoint
+`GET /reports/{id}/versions/{n}/pdf` applied `Order.billed_lock` — the
+third-party delivery gate from `portal.py` — while
+`GET /reports/{id}/full` did not. The body captured in Safari,
+`{"detail":"Report access blocked due to pending payment"}`, measures
+exactly the 57 bytes of the log's `content-length`. See
 official-pdf-download-root-cause.md.
 
-La prueba crítica de este archivo es `test_full_implies_pdf_*`: expresa el
-invariante que la suite anterior nunca comprobó — si un usuario puede leer
-legítimamente `/full` y el PDF oficial existe, puede descargarlo.
+The critical test in this file is `test_full_implies_pdf_*`: it expresses
+the invariant the previous suite never checked — if a user can
+legitimately read `/full` and the official PDF exists, they can download
+it.
 """
 import pytest
 
@@ -62,7 +63,7 @@ def published_world(client, session, stub_pdf_render):
 
 
 class TestFullImpliesPdf:
-    """El invariante central del brief §10."""
+    """The central invariant of brief §10."""
 
     @pytest.mark.parametrize(
         "role",
@@ -85,9 +86,9 @@ class TestFullImpliesPdf:
         assert latest.status_code == 200, f"{role}: {latest.text}"
 
     def test_full_implies_pdf_with_payment_locked_order(self, client, session, published_world):
-        """Reproducción exacta del fallo manual: la orden está bloqueada por
-        pago pendiente y el usuario interno puede leer `/full`. Antes,
-        `/pdf` respondía 403 con 57 bytes."""
+        """Exact reproduction of the manual failure: the order is locked for
+        pending payment and the internal user can read `/full`. Previously,
+        `/pdf` responded 403 with 57 bytes."""
         order = published_world["order"]
         order.billed_lock = True
         session.add(order)
@@ -102,8 +103,8 @@ class TestFullImpliesPdf:
         assert resp.json()["pdf_url"]
 
     def test_portal_still_blocks_on_payment_lock(self, client, session, published_world):
-        """La compuerta de negocio NO se eliminó: sigue viva donde de verdad
-        importa — la entrega al médico solicitante a través del portal."""
+        """The business gate was NOT removed: it remains where it truly
+        matters — delivery to the requesting physician via the portal."""
         import inspect
 
         from app.api.v1 import portal
@@ -115,11 +116,11 @@ class TestFullImpliesPdf:
 
 class TestReadAuthorizationParity:
     def test_user_without_reports_read_gets_403(self, client, session, published_world):
-        """Nótese que TODOS los roles sembrados incluyen `reports:read`
-        (incluido `billing`), así que el único usuario sin lectura es uno
-        sin rol alguno — lo cual refuerza el invariante de arriba: en la
-        práctica, quien está dentro del laboratorio y puede abrir el reporte
-        puede descargar su PDF."""
+        """Note that ALL seeded roles include `reports:read` (including
+        `billing`), so the only user without read is one with no role at
+        all — which reinforces the invariant above: in practice, anyone
+        inside the laboratory who can open the report can download its
+        PDF."""
         outsider = create_user(
             session, published_world["tenant"], email="noroles@t1.example", roles=()
         )
@@ -130,7 +131,7 @@ class TestReadAuthorizationParity:
         specific = client.get(f"/api/v1/reports/{report_id}/versions/1/pdf", headers=headers)
         latest = client.get(f"/api/v1/reports/{report_id}/pdf", headers=headers)
 
-        # Misma política en las tres rutas: sin reports:read, 403 en todas.
+        # Same policy on all three routes: without reports:read, 403 on all.
         assert full.status_code == 403
         assert specific.status_code == 403
         assert latest.status_code == 403
@@ -160,8 +161,8 @@ class TestReadAuthorizationParity:
         assert resp.status_code == 404
 
     def test_version_without_pdf_is_404(self, client, session, published_world):
-        """Una versión sin artefacto PDF responde 404, no 403 — "no está
-        listo" nunca debe presentarse como "no tienes permiso"."""
+        """A version without a PDF artifact responds 404, not 403 — "not
+        ready" must never be presented as "you do not have permission"."""
         report = published_world["report"]
         session.add(ReportVersion(report_id=report.id, version_no=2, is_current=False))
         session.commit()
@@ -175,7 +176,7 @@ class TestReadAuthorizationParity:
 
 class TestSignAndPublishResponseContract:
     def test_response_carries_version_and_pdf_metadata(self, client, session, stub_pdf_render):
-        """§8: la UI no debe adivinar qué versión descargar."""
+        """§8: the UI must not guess which version to download."""
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
@@ -212,7 +213,7 @@ class TestSignAndPublishResponseContract:
         assert body["pdf_sha256"]
         assert body["pdf_page_count"] == 2
 
-        # La versión que anuncia la respuesta es descargable de inmediato.
+        # The version announced by the response is immediately downloadable.
         download = client.get(
             f"/api/v1/reports/{report.id}/versions/{body['version_no']}/pdf",
             headers=auth_headers(signer),
@@ -221,9 +222,9 @@ class TestSignAndPublishResponseContract:
         assert download.json()["version_no"] == body["version_no"]
 
     def test_announced_version_matches_full(self, client, session, stub_pdf_render):
-        """La versión que anuncia sign-and-publish y la que `/full` devuelve
-        tras refrescar deben coincidir — si divergieran, la UI descargaría
-        una versión equivocada."""
+        """The version announced by sign-and-publish and the one `/full`
+        returns after refresh must match — if they diverged, the UI would
+        download the wrong version."""
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)

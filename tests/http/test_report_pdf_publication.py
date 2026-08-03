@@ -1,5 +1,5 @@
 """HTTP integration tests for the PDF-ready publication gate (Céluma 1.3,
-Fase 2, Bloque E, Historia E8): a report can never be signed/published
+Phase 2, Block E, Story E8): a report can never be signed/published
 without a READY official PDF for the version being published.
 """
 from sqlmodel import Session

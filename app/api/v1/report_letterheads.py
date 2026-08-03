@@ -1,5 +1,5 @@
 """Administration endpoints for the shared, tenant-owned letterhead
-("membrete") domain — post-Fase-2 remediation, R6.
+domain — post-Phase-2 remediation, R6.
 
 Mirrors the existing report-template-version pattern (`reports.py`'s
 `/templates/{id}/versions...` endpoints) exactly: an append-only, immutable
@@ -101,13 +101,13 @@ def _get_owned_letterhead_version(
 
 
 def _blocking_references(session: Session, letterhead: ReportLetterhead) -> list[str]:
-    """Motivos por los que este membrete NO puede eliminarse físicamente.
+    """Reasons why this letterhead cannot be physically deleted.
 
-    Tercera remediación post-Fase 2 — política de eliminación segura (ver
-    letterhead-delete-deactivate-contract.md). Se comprueban TODAS las
-    referencias, no solo la primera, para poder decirle al usuario todo lo
-    que tendría que resolver antes. Nunca se hace cascade sobre reportes ni
-    snapshots: si algo lo referencia, el membrete se conserva.
+    Third post-Phase-2 remediation — safe-deletion policy (see
+    letterhead-delete-deactivate-contract.md). ALL references are checked,
+    not just the first, so the user can be told everything they would need
+    to resolve first. Never cascades over reports or snapshots: if anything
+    references it, the letterhead is kept.
     """
     reasons: list[str] = []
 
@@ -180,13 +180,13 @@ def _letterhead_response(
 def _validate_logo_references(
     configuration, letterhead: ReportLetterhead, session: Session
 ) -> None:
-    """Ambos `logo_storage_id` deben existir y pertenecer a este tenant.
+    """Both `logo_storage_id` values must exist and belong to this tenant.
 
-    Tercera remediación: antes solo se validaba el del encabezado en
-    `POST .../versions` — el del pie entraba sin comprobar, de modo que un
-    id inexistente o de otro tenant se persistía y luego no resolvía a
-    ninguna URL, dando el síntoma "aparece la opción Quitar pero no se ve
-    el logo" (problema C).
+    Third remediation: previously only the header one was validated on
+    `POST .../versions` — the footer one was persisted unchecked, so a
+    missing or cross-tenant id was stored and later resolved to no URL,
+    producing the symptom "Remove appears but the logo is not shown"
+    (problem C).
     """
     for slot, label in (("header", "logo_storage_id"), ("footer", "footer.logo_storage_id")):
         storage_id = getattr(getattr(configuration, slot), "logo_storage_id", None)
@@ -204,9 +204,9 @@ def _validate_logo_references(
 def _version_detail_response(
     version: ReportLetterheadVersion, session: Session
 ) -> ReportLetterheadVersionDetailResponse:
-    """Detalle de versión + URLs efímeras de sus logos. Único constructor de
-    esta respuesta, para que ningún endpoint pueda olvidarse de
-    `resolved_resources` (los problemas B y C nacieron justo de eso)."""
+    """Version detail + ephemeral URLs for its logos. Sole constructor of
+    this response, so no endpoint can forget `resolved_resources`
+    (problems B and C were born exactly from that)."""
     resolved = resolve_letterhead_resources(
         version.configuration, str(version.tenant_id), session
     )
@@ -315,21 +315,21 @@ def update_letterhead(
 
     if data.name is not None:
         letterhead.name = data.name
-    # Cuarta remediación post-Fase 2 (Observación 2) — CAUSA RAÍZ de "la
-    # descripción no se puede limpiar": este bloque era
-    # `if data.description is not None`, de modo que enviar `null` (o `""`,
-    # que el schema normaliza a `null`) se interpretaba como "no tocar" y el
-    # texto anterior sobrevivía para siempre. `model_fields_set` es lo único
-    # que distingue "campo omitido" de "campo enviado como null" — ver
+    # Fourth post-Phase-2 remediation (Observation 2) — ROOT CAUSE of
+    # "description cannot be cleared": this block was
+    # `if data.description is not None`, so sending `null` (or `""`, which
+    # the schema normalizes to `null`) was treated as "do not touch" and
+    # the previous text survived forever. `model_fields_set` is the only
+    # way to distinguish "field omitted" from "field sent as null" — see
     # optional-letterhead-description-contract.md.
     if "description" in data.model_fields_set:
         letterhead.description = data.description
     if data.is_active is not None:
         if not data.is_active and letterhead.is_default:
-            # Tercera remediación: un membrete desactivado no puede ser el
-            # predeterminado (la resolución lo trataría como "sin default" y
-            # bloquearía V2 sin que nadie lo hubiera pedido). Se exige elegir
-            # otro predeterminado primero — nunca se reasigna uno al azar.
+            # Third remediation: a deactivated letterhead cannot be the
+            # default (resolution would treat it as "no default" and block
+            # V2 without anyone asking). Another default must be chosen
+            # first — never reassign one at random.
             raise HTTPException(
                 409,
                 "No se puede desactivar el membrete predeterminado. "
@@ -360,30 +360,30 @@ def delete_letterhead(
     user: AppUser = Depends(current_user),
     hard_delete: bool = False,
 ):
-    """Eliminar (`hard_delete=true`) o desactivar (por defecto) un membrete
-    — requiere reports:manage_templates.
+    """Delete (`hard_delete=true`) or deactivate (default) a letterhead
+    — requires reports:manage_templates.
 
-    Tercera remediación post-Fase 2 — política de integridad (ver
+    Third post-Phase-2 remediation — integrity policy (see
     letterhead-delete-deactivate-contract.md):
 
-      * Borrado FÍSICO solo cuando NADA lo referencia: no es el
-        predeterminado del tenant, ninguna plantilla lo tiene como
-        preferido, y ningún `ReportVersion` lo usa. Sus versiones se borran
-        con él (son suyas y nadie más las mira); los `StorageObject` de los
-        logos NO se tocan — pueden estar compartidos y su ciclo de vida es
-        de storage, no de este dominio.
-      * Si hay referencias -> 409 con el detalle de qué lo bloquea. Nunca
-        cascade destructivo sobre reportes o snapshots.
-      * Desactivar es la salida cuando hay historial: deja de ofrecerse
-        para reportes nuevos, conserva versiones y logos, y no altera
-        ningún reporte existente. Desactivar el predeterminado se rechaza
-        (hay que elegir otro primero).
+      * PHYSICAL delete only when NOTHING references it: it is not the
+        tenant default, no template has it as preferred, and no
+        `ReportVersion` uses it. Its versions are deleted with it (they
+        belong to it and nobody else looks at them); logo `StorageObject`s
+        are NOT touched — they may be shared and their lifecycle is
+        storage's, not this domain's.
+      * If there are references -> 409 with detail of what blocks it.
+        Never a destructive cascade over reports or snapshots.
+      * Deactivate is the exit when there is history: it stops being
+        offered for new reports, keeps versions and logos, and does not
+        alter any existing report. Deactivating the default is rejected
+        (another must be chosen first).
 
-    Cambio respecto a la remediación anterior: tener versiones publicadas ya
-    NO bloquea el borrado. Aquello hacía indeleble cualquier membrete que se
-    hubiera guardado alguna vez — es decir, todos — que es exactamente el
-    problema D del brief. Lo que importa es quién lo referencia, no cuántas
-    revisiones internas acumuló.
+    Change vs the previous remediation: having published versions no
+    longer blocks deletion. That made any letterhead that had ever been
+    saved undeletable — i.e. all of them — which is exactly brief problem
+    D. What matters is who references it, not how many internal revisions
+    it accumulated.
     """
     _require(user.id, "reports:manage_templates", session)
     letterhead = _get_owned_letterhead(letterhead_id, ctx, session)
@@ -409,8 +409,8 @@ def delete_letterhead(
         ).all()
         for version in versions:
             session.delete(version)
-        # Flush explícito: sin él SQLAlchemy puede emitir el DELETE del
-        # padre antes que el de sus versiones y la FK lo rechaza.
+        # Explicit flush: without it SQLAlchemy may emit the parent DELETE
+        # before its versions and the FK rejects it.
         session.flush()
         session.delete(letterhead)
         session.commit()
@@ -459,10 +459,11 @@ def duplicate_letterhead(
     none, latest PUBLISHED) version as a fresh ACTIVE version under the
     new shell (requires reports:manage_templates).
 
-    Tercera remediación: la copia nace ACTIVE, no PUBLISHED, por la misma
-    razón que el import (ver `import_letterhead_version`) — un membrete sin
-    versión ACTIVE es invisible para el editor (`GET .../versions/active`
-    responde 404) y parece haber perdido toda su configuración."""
+    Third remediation: the copy is born ACTIVE, not PUBLISHED, for the
+    same reason as import (see `import_letterhead_version`) — a letterhead
+    without an ACTIVE version is invisible to the editor
+    (`GET .../versions/active` returns 404) and appears to have lost all
+    its configuration."""
     _require(user.id, "reports:manage_templates", session)
     source = _get_owned_letterhead(letterhead_id, ctx, session)
 
@@ -526,10 +527,10 @@ def set_default_letterhead(
     at the database level). Does not modify published versions, existing
     reports, or snapshots — see template-letterhead-association-contract.md.
 
-    Tercera remediación: se exige que el membrete esté activo y tenga
-    exactamente una versión ACTIVE. Marcar como predeterminado algo que la
-    resolución no puede resolver era una de las formas de acabar con
-    "predeterminado configurado pero V2 bloqueado / sale otro membrete".
+    Third remediation: the letterhead must be active and have exactly one
+    ACTIVE version. Marking as default something resolution cannot resolve
+    was one way to end up with "default configured but V2 blocked /
+    another letterhead comes out".
     """
     _require(user.id, "reports:manage_templates", session)
     letterhead = _get_owned_letterhead(letterhead_id, ctx, session)
@@ -613,25 +614,25 @@ def get_active_letterhead_version(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Segunda remediación post-Fase 2 (UX): la configuración ACTIVE actual
-    de un membrete, para precargar el editor visual en modo "Editar". 404 si
-    el membrete no tiene ninguna versión ACTIVE todavía (recién creado).
+    """Second post-Phase-2 remediation (UX): a letterhead's current ACTIVE
+    configuration, to preload the visual editor in "Edit" mode. 404 if the
+    letterhead has no ACTIVE version yet (just created).
 
-    Registrado ANTES de `GET /{letterhead_id}/versions/{version_id}` a
-    propósito: FastAPI/Starlette resuelve rutas en orden de registro, y
-    "active" también matchea el patrón `{version_id}` — si este endpoint se
-    registrara después, quedaría inalcanzable (la ruta paramétrica lo
-    interceptaría primero, intentando usar el string "active" como UUID).
+    Registered BEFORE `GET /{letterhead_id}/versions/{version_id}` on
+    purpose: FastAPI/Starlette resolves routes in registration order, and
+    "active" also matches the `{version_id}` pattern — if this endpoint
+    were registered later it would be unreachable (the parametric route
+    would intercept first, trying to use the string "active" as a UUID).
     """
     _require(user.id, "reports:manage_templates", session)
     letterhead = _get_owned_letterhead(letterhead_id, ctx, session)
     try:
         active = sole_active_version(session, letterhead)
     except LetterheadConfigurationError as exc:
-        # Cero versiones ACTIVE es el caso normal de un membrete recién
-        # creado -> 404, que el editor traduce a "empieza en blanco".
-        # Más de una es corrupción de datos -> 409 explícito, nunca elegir
-        # una al azar (problema E del brief).
+        # Zero ACTIVE versions is the normal case for a freshly created
+        # letterhead -> 404, which the editor translates to "start blank".
+        # More than one is data corruption -> explicit 409, never pick one
+        # at random (brief problem E).
         if _has_active_version(session, letterhead):
             raise HTTPException(409, exc.message) from None
         raise HTTPException(404, "This letterhead has no active version yet") from None
@@ -649,20 +650,20 @@ def save_current_letterhead_version(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Segunda remediación post-Fase 2 (UX): "Guardar cambios" del editor
-    visual de membretes — el reemplazo de "Publicar versión" (que se
-    quedaba en PUBLISHED sin activar). Crea una `ReportLetterheadVersion`
-    nueva y la activa atómicamente, archivando la anterior ACTIVE. No-op
-    (devuelve la versión ACTIVE existente sin crear nada) si la
-    configuración enviada es idéntica a la ya activa — evita ruido de
-    historial en un "Guardar" sin cambios reales.
+    """Second post-Phase-2 remediation (UX): letterhead visual editor
+    "Save changes" — replacement for "Publish version" (which stayed
+    PUBLISHED without activating). Creates a new `ReportLetterheadVersion`
+    and activates it atomically, archiving the previous ACTIVE. No-op
+    (returns the existing ACTIVE version without creating anything) if the
+    sent configuration is identical to the already-active one — avoids
+    history noise on a "Save" with no real changes.
 
-    `POST .../versions` + `POST .../{id}/activate` (abajo) siguen
-    existiendo tal cual para el flujo secundario de historial/rollback
-    ("Nueva versión desde esta", "Restaurar"). Registrado antes de
-    `GET .../versions/{version_id}` por la misma razón de orden de rutas
-    explicada arriba (el método PUT no colisiona con esa ruta GET, pero se
-    mantiene junto a su endpoint hermano por claridad).
+    `POST .../versions` + `POST .../{id}/activate` (below) remain as-is
+    for the secondary history/rollback flow ("New version from this",
+    "Restore"). Registered before `GET .../versions/{version_id}` for the
+    same route-order reason explained above (PUT does not collide with
+    that GET route, but it is kept next to its sibling endpoint for
+    clarity).
     """
     _require(user.id, "reports:manage_templates", session)
     letterhead = _get_owned_letterhead(letterhead_id, ctx, session)
@@ -681,7 +682,7 @@ def save_current_letterhead_version(
 
     if active is not None:
         # Demote before promoting — mismo orden que activate_letterhead_version,
-        # necesario por el índice único parcial "una ACTIVE por membrete".
+        # required by the partial unique index "one ACTIVE per letterhead".
         active.status = ReportLetterheadVersionStatus.PUBLISHED
         session.add(active)
         session.flush()
@@ -946,7 +947,7 @@ def upload_letterhead_logo(
 
 
 # ============================================================================
-# .celuma portable file format — post-Fase-2 remediation, R12/R13
+# .celuma portable file format — post-Phase-2 remediation, R12/R13
 # ============================================================================
 
 MAX_CELUMA_FILE_BYTES = 8 * 1024 * 1024  # dominated by the base64 logo asset
@@ -973,9 +974,9 @@ def export_letterhead_version_endpoint(
     try:
         envelope = export_letterhead_version(letterhead, version, session)
     except CelumaPortabilityError as exc:
-        # Tercera remediación: un logo referenciado pero irrecuperable ya no
-        # produce un `.cell` "a medias" sin logo — falla con un mensaje que
-        # dice qué reparar. Ver cell-roundtrip-contract.md.
+        # Third remediation: a referenced but unrecoverable logo no longer
+        # produces a half `.cell` without a logo — fails with a message that
+        # says what to repair. See cell-roundtrip-contract.md.
         raise HTTPException(409, exc.message) from None
 
     logger.info(
@@ -988,13 +989,12 @@ def export_letterhead_version_endpoint(
         },
     )
 
-    # Cuarta remediación (hallazgo lateral): los nombres de membrete llevan
-    # acentos con toda naturalidad ("Membrete Anatomía Patológica"), y una
-    # cabecera HTTP solo admite latin-1. Meter el nombre crudo en
-    # `filename="..."` rompía la respuesta ENTERA con un error de
-    # codificación — el export ni siquiera llegaba al navegador. Se sigue
-    # RFC 6266: `filename` con un ASCII seguro para clientes antiguos, y
-    # `filename*` con el nombre real percent-encoded en UTF-8.
+    # Fourth remediation (side finding): letterhead names naturally carry
+    # accents ("Membrete Anatomía Patológica"), and an HTTP header only
+    # accepts latin-1. Putting the raw name in `filename="..."` broke the
+    # ENTIRE response with an encoding error — the export never even
+    # reached the browser. Follow RFC 6266: `filename` with safe ASCII for
+    # old clients, and `filename*` with the real name percent-encoded UTF-8.
     raw_name = f"{letterhead.name.replace(' ', '-')}-v{version.version_number}.cell"
     ascii_name = unicodedata.normalize("NFKD", raw_name).encode("ascii", "ignore").decode("ascii")
     ascii_name = re.sub(r'[^A-Za-z0-9._-]', "", ascii_name) or f"membrete-v{version.version_number}.cell"
@@ -1043,10 +1043,10 @@ def import_letterhead_endpoint(
     on the JSON body's `format`/`format_version` fields, never the filename.
     Never reuses ids from the source tenant.
 
-    Tercera remediación: el membrete importado nace con su versión ACTIVE
-    (antes nacía PUBLISHED y quedaba invisible para el editor — ver
-    `import_letterhead_version`), pero NUNCA como predeterminado del
-    tenant: eso sigue siendo una decisión explícita del administrador."""
+    Third remediation: the imported letterhead is born with its ACTIVE
+    version (previously it was born PUBLISHED and stayed invisible to the
+    editor — see `import_letterhead_version`), but NEVER as the tenant
+    default: that remains an explicit administrator decision."""
     _require(user.id, "reports:manage_templates", session)
 
     file_bytes = file.file.read()

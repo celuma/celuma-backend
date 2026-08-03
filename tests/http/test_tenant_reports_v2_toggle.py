@@ -1,5 +1,5 @@
 """HTTP integration tests for the `reports_v2_enabled` tenant toggle
-(Céluma 1.3, Fase 2, Bloque D, Historia D9).
+(Céluma 1.3, Phase 2, Block D, Story D9).
 
 There is no dedicated endpoint for this flag — it is exposed as an optional
 field on the existing `PATCH /api/v1/tenants/{id}` (see

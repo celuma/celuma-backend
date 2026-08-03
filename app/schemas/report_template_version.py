@@ -1,4 +1,4 @@
-"""Report rendering snapshot contract (Céluma 1.3, Fase 2, Bloque B — Historia B1).
+"""Report rendering snapshot contract (Céluma 1.3, Phase 2, Block B — Story B1).
 
 `ReportRenderingSnapshotV2` is the strict contract for everything a report
 needs, besides its clinical content, to be reconstructed identically forever:
@@ -8,7 +8,7 @@ presentation and branding (`presentation`, strictly validated here because it
 is new surface area with real security/consistency requirements).
 
 This module also defines the request/response schemas for the
-`ReportTemplateVersion` endpoints (Historia B3). See
+`ReportTemplateVersion` endpoints (Story B3). See
 report-template-snapshot-contract.md for the full rationale, and
 report-template-version-contract.md for the entity built from this schema.
 """
@@ -67,16 +67,16 @@ class ReportPaperConfig(BaseModel):
     size: Literal["LETTER"] = "LETTER"
     orientation: Literal["PORTRAIT"] = "PORTRAIT"
     margins_cm: ReportMarginsCm
-    # Cuarta remediación post-Fase 2 (paridad Legacy, aditivo/opcional):
-    # relleno interior SUPERIOR de la caja de contenido, dentro del área
-    # paginable (`box-sizing: border-box`, igual que Legacy). `None` = 0mm,
-    # que es exactamente el comportamiento actual de V2 — Legacy usa 4mm.
-    # Es distinto de `header.content_gap_mm`: el gap desplaza el borde
-    # superior del cuerpo (y por tanto reduce su altura antes del redondeo
-    # a píxeles), mientras que este relleno vive DENTRO de la caja. Ambos
-    # existen porque solo así se reproduce la aritmética exacta de Legacy y
-    # la de los snapshots V2 históricos sin desviarse un píxel en ninguna
-    # de las dos. Ver v2-legacy-parity-capabilities.md.
+    # Fourth post-Phase-2 remediation (Legacy parity, additive/optional):
+    # SUPERIOR inner padding of the content box, inside the pageable area
+    # (`box-sizing: border-box`, same as Legacy). `None` = 0mm, which is
+    # exactly current V2 behavior — Legacy uses 4mm.
+    # Distinct from `header.content_gap_mm`: the gap shifts the body's top
+    # edge (and therefore reduces its height before pixel rounding), while
+    # this padding lives INSIDE the box. Both exist because only then is
+    # Legacy's exact arithmetic and that of historical V2 snapshots
+    # reproduced without shifting a pixel in either. See
+    # v2-legacy-parity-capabilities.md.
     body_padding_top_mm: Optional[float] = Field(default=None, ge=0.0, le=40.0)
 
 
@@ -93,21 +93,21 @@ def _valid_storage_id(v: Optional[str]) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Segunda remediación post-Fase 2 (UX): extensión aditiva del contrato de
-# presentación para paridad visual con el membrete Legacy. Todos los campos
-# son opcionales con defaults que reproducen EXACTAMENTE el comportamiento
-# actual de `VersionedReportRendererV2` (Arial 10pt, línea única de 1px en
-# el color primario bajo el header y sobre el footer, sin logo de pie) — un
-# snapshot V2 ya persistido, sin estos campos, debe seguir renderizando
-# idéntico. Ver legacy-parity-contract.md.
+# Second post-Phase-2 remediation (UX): additive extension of the
+# presentation contract for visual parity with the Legacy letterhead. All
+# fields are optional with defaults that reproduce EXACTLY the current
+# behavior of `VersionedReportRendererV2` (Arial 10pt, single 1px line in
+# the primary color under the header and above the footer, no footer logo)
+# — an already-persisted V2 snapshot without these fields must keep
+# rendering identically. See legacy-parity-contract.md.
 # ---------------------------------------------------------------------------
 
 class DividerConfig(BaseModel):
-    """Línea divisoria bajo el header / sobre el footer. El default
-    reproduce la línea sólida de 1px en el color primario que el renderer
-    ya dibuja hoy incondicionalmente (`border-bottom`/`border-top`).
-    `style="DOUBLE"` agrega una segunda línea (necesario para paridad
-    Legacy con doble filete) separada por `gap_mm`."""
+    """Divider line under the header / above the footer. The default
+    reproduces the solid 1px primary-color line the renderer already draws
+    unconditionally today (`border-bottom`/`border-top`).
+    `style="DOUBLE"` adds a second line (needed for Legacy parity with a
+    double rule) separated by `gap_mm`."""
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
@@ -128,25 +128,24 @@ class DividerConfig(BaseModel):
 
 
 class ReportTypographyConfig(BaseModel):
-    """Defaults calcados de la tipografía fija actual de
-    `VersionedReportRendererV2`: Arial en todo el documento, cuerpo/header a
-    10pt (institución en negrita), pie a 7pt.
+    """Defaults copied from the current fixed typography of
+    `VersionedReportRendererV2`: Arial throughout, body/header at 10pt
+    (institution in bold), footer at 7pt.
 
-    Cuarta remediación post-Fase 2 — pesos y tamaño secundario del header.
-    Todos `Optional` con `None` = "conserva el comportamiento por línea que
-    el renderer ya tenía" (institución 700 / resto 400; subtítulo 8pt,
-    dirección y contacto 7pt; pie 400). Solo cuando se envía un valor
-    explícito el renderer unifica esa propiedad en TODAS las líneas de la
-    banda — que es justo lo que exige el pie Legacy (7pt en negrita) y su
-    encabezado (4 líneas idénticas a 8pt en negrita). No se admite CSS
-    libre: el peso es un enum cerrado."""
+    Fourth post-Phase-2 remediation — header weights and secondary size.
+    All `Optional` with `None` = "keep the per-line behavior the renderer
+    already had" (institution 700 / rest 400; subtitle 8pt, address and
+    contact 7pt; footer 400). Only when an explicit value is sent does the
+    renderer unify that property across ALL band lines — exactly what the
+    Legacy footer (7pt bold) and its header (4 identical 8pt bold lines)
+    require. Free-form CSS is not accepted: weight is a closed enum."""
     model_config = ConfigDict(extra="forbid")
 
     font_family: Literal["ARIAL", "HELVETICA", "TIMES", "CALIBRI"] = "ARIAL"
     base_font_size_pt: float = Field(default=10.0, ge=6.0, le=24.0)
     header_font_size_pt: float = Field(default=10.0, ge=6.0, le=32.0)
     footer_font_size_pt: float = Field(default=7.0, ge=6.0, le=18.0)
-    # Cuarta remediación (aditivos/opcionales — `None` = comportamiento actual):
+    # Fourth remediation (additive/optional — `None` = current behavior):
     header_secondary_font_size_pt: Optional[float] = Field(default=None, ge=6.0, le=32.0)
     header_font_weight: Optional[Literal[400, 500, 600, 700]] = None
     footer_font_weight: Optional[Literal[400, 500, 600, 700]] = None
@@ -166,46 +165,47 @@ class ReportHeaderConfig(BaseModel):
     address: Optional[str] = Field(default=None, max_length=500)
     phone: Optional[str] = Field(default=None, max_length=50)
     email: Optional[EmailStr] = None
-    # Segunda remediación UX — paridad Legacy (todos opcionales/aditivos):
+    # Second remediation UX — Legacy parity (all optional/additive):
     logo_position: Literal["LEFT", "CENTER", "RIGHT"] = "LEFT"
     content_alignment: Literal["TOP", "CENTER", "BOTTOM"] = "CENTER"
     height_mm: Optional[float] = Field(default=None, ge=5.0, le=100.0)
     divider: DividerConfig = Field(default_factory=DividerConfig)
     # ------------------------------------------------------------------
-    # Cuarta remediación post-Fase 2 — paridad Legacy (aditivos/opcionales).
+    # Fourth post-Phase-2 remediation — Legacy parity (additive/optional).
     #
-    # `logo_mode` gobierna si el encabezado dibuja una imagen y si reserva
-    # espacio para ella:
-    #   NONE           -> ninguna imagen, ningún espacio reservado
-    #   CUSTOM         -> el logo resuelto de `logo_storage_id`; si no se
-    #                     resuelve, no se dibuja nada (nunca un sustituto)
-    #   CELUMA_DEFAULT -> el isotipo neutral de Céluma
-    #   None (ausente) -> COMPATIBILIDAD: exactamente lo que el renderer
-    #                     hacía antes de esta remediación, es decir
-    #                     "logo resuelto si lo hay, isotipo neutral si no".
-    #                     Los snapshots V2 ya persistidos no llevan este
-    #                     campo y deben seguir renderizando igual.
-    # El membrete Legacy exporta NONE (su logo vive en el pie), y todo
-    # membrete nuevo creado en el editor escribe un valor explícito.
-    # Ver v2-legacy-parity-capabilities.md, sección "logo_mode".
+    # `logo_mode` controls whether the header draws an image and whether it
+    # reserves space for it:
+    #   NONE           -> no image, no reserved space
+    #   CUSTOM         -> the resolved logo from `logo_storage_id`; if it
+    #                     does not resolve, nothing is drawn (never a
+    #                     substitute)
+    #   CELUMA_DEFAULT -> Céluma's neutral isotype
+    #   None (absent)  -> COMPATIBILITY: exactly what the renderer did
+    #                     before this remediation, i.e.
+    #                     "resolved logo if present, neutral isotype if not".
+    #                     Already-persisted V2 snapshots lack this field
+    #                     and must keep rendering the same.
+    # The Legacy letterhead exports NONE (its logo lives in the footer),
+    # and every new letterhead created in the editor writes an explicit
+    # value. See v2-legacy-parity-capabilities.md, "logo_mode" section.
     logo_mode: Optional[Literal["NONE", "CUSTOM", "CELUMA_DEFAULT"]] = None
-    # Distancia del borde superior de la hoja al borde superior de la banda.
-    # `None` = `paper.margins_cm.top` (comportamiento actual). Legacy usa 0.
+    # Distance from the page top edge to the band top edge.
+    # `None` = `paper.margins_cm.top` (current behavior). Legacy uses 0.
     offset_mm: Optional[float] = Field(default=None, ge=0.0, le=100.0)
-    # Separación entre la banda y el borde superior del cuerpo. `None` = 4mm
-    # (comportamiento actual). Legacy usa 0 y compensa con
+    # Gap between the band and the body top edge. `None` = 4mm
+    # (current behavior). Legacy uses 0 and compensates with
     # `paper.body_padding_top_mm`.
     content_gap_mm: Optional[float] = Field(default=None, ge=0.0, le=40.0)
-    # `padding-bottom` de la banda. `None` = 3mm (actual). Legacy usa 4mm.
+    # Band `padding-bottom`. `None` = 3mm (current). Legacy uses 4mm.
     padding_mm: Optional[float] = Field(default=None, ge=0.0, le=40.0)
-    # Dónde se imprimen las credenciales del firmante institucional:
-    #   RIGHT  -> bloque propio a la derecha (actual, y `None` lo reproduce)
-    #   INLINE -> como líneas más del bloque institucional izquierdo, con la
-    #             misma tipografía — la forma del encabezado Legacy
-    #   HIDDEN -> no se imprimen en el encabezado
+    # Where institutional signer credentials are printed:
+    #   RIGHT  -> own block on the right (current, and `None` reproduces it)
+    #   INLINE -> as extra lines of the left institutional block, with the
+    #             same typography — the Legacy header shape
+    #   HIDDEN -> not printed in the header
     signer_placement: Optional[Literal["RIGHT", "INLINE", "HIDDEN"]] = None
-    # Caja del logo del encabezado. `None` = alto de banda − 6mm y ancho
-    # máximo 32mm (actual).
+    # Header logo box. `None` = band height − 6mm and max width
+    # 32mm (current).
     logo_height_mm: Optional[float] = Field(default=None, ge=1.0, le=100.0)
     logo_max_width_mm: Optional[float] = Field(default=None, ge=1.0, le=200.0)
 
@@ -235,37 +235,37 @@ class ReportFooterConfig(BaseModel):
     enabled: bool = True
     custom_text: Optional[str] = Field(default=None, max_length=1000)
     show_page_number: bool = True
-    # Segunda remediación UX — paridad Legacy (todos opcionales/aditivos):
-    # Legacy coloca su logo en el PIE, no en el header — de ahí el valor de
-    # este campo (ver legacy-parity-contract.md).
+    # Second remediation UX — Legacy parity (all optional/additive):
+    # Legacy places its logo in the FOOTER, not the header — hence this
+    # field's value (see legacy-parity-contract.md).
     logo_storage_id: Optional[str] = Field(default=None, max_length=64)
     logo_position: Literal["LEFT", "CENTER", "RIGHT"] = "LEFT"
     content_alignment: Literal["LEFT", "CENTER", "RIGHT"] = "CENTER"
     height_mm: Optional[float] = Field(default=None, ge=5.0, le=100.0)
     divider: DividerConfig = Field(default_factory=DividerConfig)
     # ------------------------------------------------------------------
-    # Cuarta remediación post-Fase 2 — paridad Legacy (aditivos/opcionales).
+    # Fourth post-Phase-2 remediation — Legacy parity (additive/optional).
     #
-    # `logo_mode`: mismo enum que el encabezado. `None` (ausente) reproduce
-    # el comportamiento actual del PIE, que NO es el del encabezado: el pie
-    # nunca cayó al isotipo neutral, así que ausente = "logo resuelto si lo
-    # hay, nada si no".
+    # `logo_mode`: same enum as the header. `None` (absent) reproduces
+    # current FOOTER behavior, which is NOT the header's: the footer never
+    # fell back to the neutral isotype, so absent = "resolved logo if
+    # present, nothing if not".
     logo_mode: Optional[Literal["NONE", "CUSTOM", "CELUMA_DEFAULT"]] = None
-    # `SPLIT` coloca logo y texto como hermanos directos separados por
-    # `justify-content: space-between` (la forma del pie Legacy). `None` /
-    # `GROUPED` conserva la agrupación actual (logo y texto juntos en una
-    # caja con `gap`, alineada según `content_alignment`).
+    # `SPLIT` places logo and text as direct siblings separated by
+    # `justify-content: space-between` (the Legacy footer shape). `None` /
+    # `GROUPED` keeps the current grouping (logo and text together in a
+    # box with `gap`, aligned per `content_alignment`).
     layout: Optional[Literal["GROUPED", "SPLIT"]] = None
     offset_mm: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     content_gap_mm: Optional[float] = Field(default=None, ge=0.0, le=40.0)
-    # `padding-top` de la banda. `None` = 2mm (actual). Legacy usa 0.
+    # Band `padding-top`. `None` = 2mm (current). Legacy uses 0.
     padding_mm: Optional[float] = Field(default=None, ge=0.0, le=40.0)
-    # Caja del logo del pie. `None` = alto de banda − 6mm y ancho máximo
-    # 28mm (actual). Legacy: alto de banda − 4mm y ancho máximo 35%.
+    # Footer logo box. `None` = band height − 6mm and max width
+    # 28mm (current). Legacy: band height − 4mm and max width 35%.
     logo_height_mm: Optional[float] = Field(default=None, ge=1.0, le=100.0)
     logo_max_width_pct: Optional[float] = Field(default=None, ge=1.0, le=100.0)
-    # Ancho máximo del bloque de texto, en % de la banda. `None` = sin tope
-    # (actual). Legacy: 65%.
+    # Max width of the text block, as % of the band. `None` = no cap
+    # (current). Legacy: 65%.
     text_max_width_pct: Optional[float] = Field(default=None, ge=1.0, le=100.0)
 
     @field_validator("custom_text")
@@ -283,8 +283,8 @@ class ReportStyleConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     primary_color: str = Field(default="#4A4A4A")
-    # Segunda remediación UX — paridad Legacy (opcional/aditivo): None
-    # conserva el comportamiento actual de un solo color.
+    # Second remediation UX — Legacy parity (optional/additive): None
+    # keeps the current single-color behavior.
     secondary_color: Optional[str] = Field(default=None, max_length=7)
     typography: ReportTypographyConfig = Field(default_factory=ReportTypographyConfig)
 
@@ -345,7 +345,7 @@ class ReportRenderingSnapshotV2(BaseModel):
 
     A unified object (rather than three independently-stored snapshots) was
     chosen specifically to avoid two sources of truth for the same document
-    — see phase-2-block-b-architecture-decision.md, "Por qué un único objeto".
+    — see phase-2-block-b-architecture-decision.md, "Why a single object".
     """
     model_config = ConfigDict(extra="forbid")
 
@@ -367,7 +367,7 @@ class ReportRenderingSnapshotV2(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# ReportTemplateVersion request/response schemas (Historia B3)
+# ReportTemplateVersion request/response schemas (Story B3)
 # ---------------------------------------------------------------------------
 
 class ReportTemplateVersionCreate(BaseModel):
@@ -399,7 +399,7 @@ class ReportTemplateVersionsListResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Template logo upload response (Céluma 1.3, Fase 2, Bloque D — Historia D2)
+# Template logo upload response (Céluma 1.3, Phase 2, Block D — Story D2)
 # ---------------------------------------------------------------------------
 
 class ReportTemplateLogoUploadResponse(BaseModel):

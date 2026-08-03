@@ -1,5 +1,5 @@
 """
-Regression tests for the report JSON contract (Céluma 1.3, Fase 1 — Workstream 5).
+Regression tests for the report JSON contract (Céluma 1.3, Phase 1 — Workstream 5).
 
 These protect the *current* behavior: the backend stores the report body as an
 opaque `Dict[str, Any]` (see app/schemas/report.py) and never validates its

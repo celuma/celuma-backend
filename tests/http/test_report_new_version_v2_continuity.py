@@ -1,5 +1,5 @@
 """HTTP integration tests for content-only new_version continuity on V2
-reports (Céluma 1.3, Fase 2, Bloque C, Historia C9).
+reports (Céluma 1.3, Phase 2, Block C, Story C9).
 
 Covers the gap found while exploring the frontend editor's buildEnvelope():
 it rebuilds `report` from the template definition and never includes
@@ -75,7 +75,7 @@ class TestV2ContentEditPreservesSnapshot:
         user = create_user(session, tenant, email="admin@t1.example")
         headers = auth_headers(user)
         template = _create_template(session, tenant)
-        # Tercera remediación: la creación V2 exige un membrete resoluble.
+        # Third remediation: V2 creation requires a resolvable letterhead.
         create_default_letterhead(session, tenant)
         report_id, version = self._create_v2_report(
             client, headers, tenant, branch, order, template.id
@@ -120,7 +120,7 @@ class TestV2ContentEditPreservesSnapshot:
         user = create_user(session, tenant, email="admin@t1.example")
         headers = auth_headers(user)
         template = _create_template(session, tenant)
-        # Tercera remediación: la creación V2 exige un membrete resoluble.
+        # Third remediation: V2 creation requires a resolvable letterhead.
         create_default_letterhead(session, tenant)
         report_id, _version = self._create_v2_report(
             client, headers, tenant, branch, order, template.id
@@ -162,7 +162,7 @@ class TestV2ContentEditPreservesSnapshot:
         )
 
     def test_legacy_report_new_version_is_unaffected(self, client, session):
-        """Historia B9's TestLegacyCreationUnaffected equivalent for
+        """Story B9's TestLegacyCreationUnaffected equivalent for
         new_version: a legacy report's content-only save must behave exactly
         as before this fix — no schema_version/rendering_snapshot appears."""
         tenant = create_tenant(session, reports_v2_enabled=False)

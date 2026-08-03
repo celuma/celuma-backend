@@ -1,5 +1,5 @@
 """HTTP integration tests for the ReportLetterhead/ReportLetterheadVersion
-endpoints — post-Fase-2 remediation, R6/R15."""
+endpoints — post-Phase-2 remediation, R6/R15."""
 from app.models.report_letterhead import ReportLetterhead
 from app.models.report_letterhead_version import ReportLetterheadVersion
 
@@ -58,11 +58,11 @@ class TestLetterheadCRUD:
     def test_hard_delete_allowed_when_versions_exist_but_nothing_references_it(
         self, client, session
     ):
-        """Tercera remediación: tener versiones ya NO bloquea el borrado.
-        Bloqueaba a TODO membrete que se hubiera guardado alguna vez, es
-        decir a todos — el problema D del brief. Lo que bloquea ahora son
-        las referencias reales (default, preferencia de plantilla, reportes),
-        cubiertas en test_letterhead_remediation3.py."""
+        """Third remediation: having versions no longer blocks deletion.
+        It blocked EVERY letterhead that had ever been saved — i.e. all of
+        them — brief problem D. What blocks now are real references
+        (default, template preference, reports), covered in
+        test_letterhead_remediation3.py."""
         tenant = create_tenant(session)
         user = create_user(session, tenant, email="admin@t1.example")
         letterhead = create_letterhead(session, tenant)
@@ -191,9 +191,9 @@ class TestTenantDefaultLetterhead:
         user = create_user(session, tenant, email="admin@t1.example")
         lh1 = create_letterhead(session, tenant, name="Membrete 1")
         lh2 = create_letterhead(session, tenant, name="Membrete 2")
-        # Tercera remediación: solo un membrete con configuración guardada
-        # (versión ACTIVE) puede ser predeterminado — si no, la resolución no
-        # podría resolverlo y V2 quedaría bloqueado sin que nadie lo pidiera.
+        # Third remediation: only a letterhead with saved configuration
+        # (ACTIVE version) can be default — otherwise resolution could not
+        # resolve it and V2 would be blocked without anyone asking.
         create_letterhead_version(session, tenant, lh1, status="ACTIVE")
         create_letterhead_version(session, tenant, lh2, status="ACTIVE")
 

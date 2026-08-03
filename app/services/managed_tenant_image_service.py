@@ -1,6 +1,6 @@
 """Shared validation + upload logic for tenant-owned images (logos).
 
-Post-Fase-2 remediation, R5/R9 (managed-logo-upload-contract.md). Before
+Post-Phase-2 remediation, R5/R9 (managed-logo-upload-contract.md). Before
 this service existed, the same MIME/size/dimension validation and
 StorageObject-creation dance was hand-duplicated across the template-logo
 endpoint (strict) and the tenant-logo endpoint (weaker: no Pillow

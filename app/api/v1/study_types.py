@@ -330,13 +330,13 @@ def get_study_type_report_defaults(
     """Resolve everything the report editor needs to bootstrap a brand-new
     V2 report in one round trip (requires lab:read).
 
-    Post-Fase-2 remediation, R7; resolución determinista y presentación
-    incluida en la tercera remediación. Usa el mismo
-    `resolve_effective_letterhead_version` que `create_report`, así que lo
-    que muestre el editor y lo que acabe embebido en el reporte no pueden
-    divergir. Nunca levanta por un tenant sin configurar: en su lugar
-    devuelve `v2_blocked_reason` con el motivo exacto, para que la UI
-    muestre un estado bloqueado accionable en vez de caer a Legacy.
+    Post-Phase-2 remediation, R7; deterministic resolution and presentation
+    included in the third remediation. Uses the same
+    `resolve_effective_letterhead_version` as `create_report`, so what the
+    editor shows and what ends up embedded in the report cannot diverge.
+    Never raises for an unconfigured tenant: instead returns
+    `v2_blocked_reason` with the exact reason, so the UI can show an
+    actionable blocked state instead of falling back to Legacy.
     """
     if not has_permission(user.id, "lab:read", session):
         raise HTTPException(403, "Permission required: lab:read")

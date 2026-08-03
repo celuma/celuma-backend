@@ -124,7 +124,7 @@ def get_physician_report(
     if not storage:
         raise HTTPException(404, "Storage object not found")
     
-    # Generate presigned URL (short expiration). Céluma 1.3 Fase 2, Bloque E:
+    # Generate presigned URL (short expiration). Céluma 1.3 Phase 2, Block E:
     # was previously calling generate_presigned_url(..., expiration=600) —
     # `expiration` is not a real parameter of that method (it's `expires_in`),
     # so this call would have raised a TypeError at runtime the first time a

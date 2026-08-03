@@ -4,7 +4,7 @@ Revision ID: v1_3_0
 Revises: v1_2_0
 Create Date: 2026-07-29
 
-Céluma 1.3 Fase 2, Bloque A, Historia A6. Purely additive: introduces a
+Céluma 1.3 Phase 2, Block A, Story A6. Purely additive: introduces a
 tenant-level flag that will gate CREATION of new V2 reports in a later
 block. It does not affect how existing reports are rendered (see
 report-schema-versioning.md) and does not change report creation in this

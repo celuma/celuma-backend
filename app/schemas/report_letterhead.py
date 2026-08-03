@@ -1,5 +1,5 @@
 """Request/response schemas for the shared, tenant-owned letterhead
-("membrete") domain — post-Fase-2 remediation.
+("membrete") domain — post-Phase-2 remediation.
 
 `ReportLetterheadVersionCreate.configuration` reuses
 `ReportPresentationSnapshotV2` verbatim from
@@ -16,22 +16,22 @@ from app.schemas.report_template_version import ReportPresentationSnapshotV2
 
 
 # ---------------------------------------------------------------------------
-# Cuarta remediación post-Fase 2 — descripción opcional (Observación 2).
+# Fourth post-Phase-2 remediation — optional description (Observation 2).
 #
-# `ReportLetterhead.description` es opcional en TODAS las operaciones y debe
-# poder quedar vacía. La normalización es única y compartida para que
-# create/update/import/export no puedan divergir:
+# `ReportLetterhead.description` is optional in ALL operations and must be
+# allowed to be empty. Normalization is single and shared so
+# create/update/import/export cannot diverge:
 #
-#     None      -> None      (limpiar, o "no había nada")
+#     None      -> None      (clear, or "there was nothing")
 #     ""        -> None
 #     "   "     -> None
 #     " Texto " -> "Texto"
 #
-# Lo que NO normaliza este validador es la diferencia entre "campo omitido"
-# y "campo enviado como null": eso solo se puede distinguir con
-# `model_fields_set` en el endpoint PUT/PATCH (ver
-# `update_letterhead` en app/api/v1/report_letterheads.py) —
-# ver optional-letterhead-description-contract.md.
+# What this validator does NOT normalize is the difference between "field
+# omitted" and "field sent as null": that can only be distinguished with
+# `model_fields_set` in the PUT/PATCH endpoint (see `update_letterhead` in
+# app/api/v1/report_letterheads.py) — see
+# optional-letterhead-description-contract.md.
 # ---------------------------------------------------------------------------
 
 def normalize_optional_description(value: Optional[str]) -> Optional[str]:
@@ -75,15 +75,15 @@ class ReportLetterheadResponse(BaseModel):
     is_default: bool
     is_active: bool
     created_at: datetime
-    # Tercera remediación post-Fase 2: la UI debe mostrar SOLO las acciones
-    # válidas ("Eliminar" únicamente cuando es seguro; "Desactivar" cuando
-    # hay historial que conservar), en vez de ofrecer Eliminar siempre y
-    # dejar que el backend responda 409 después del clic. Ver
+    # Third post-Phase-2 remediation: the UI must show ONLY the valid
+    # actions ("Eliminar" only when safe; "Desactivar" when there is
+    # history to keep), instead of always offering Delete and letting the
+    # backend respond 409 after the click. See
     # letterhead-delete-deactivate-contract.md.
     has_active_version: bool = False
     can_hard_delete: bool = False
-    # Motivos legibles por los que NO puede borrarse físicamente; vacío
-    # cuando `can_hard_delete` es true.
+    # Human-readable reasons why it cannot be physically deleted; empty
+    # when `can_hard_delete` is true.
     blocking_references: List[str] = []
 
 
@@ -121,12 +121,12 @@ class ReportLetterheadVersionResponse(BaseModel):
 class ReportLetterheadVersionDetailResponse(ReportLetterheadVersionResponse):
     """Full version detail, including the immutable configuration.
 
-    Tercera remediación post-Fase 2: `resolved_resources` acompaña ahora a
-    `configuration` con las URLs efímeras de los logos referenciados por
-    `header.logo_storage_id`/`footer.logo_storage_id`. Sin esto el editor
-    no tenía forma de previsualizar un logo ya persistido al reabrirse, y
-    siempre caía al logo neutral de Céluma (problemas B y C del brief).
-    `None` cuando no hay ningún logo configurado — mismo contrato que
+    Third post-Phase-2 remediation: `resolved_resources` now accompanies
+    `configuration` with ephemeral URLs for logos referenced by
+    `header.logo_storage_id`/`footer.logo_storage_id`. Without this the
+    editor had no way to preview an already-persisted logo on reopen, and
+    always fell back to Céluma's neutral logo (brief problems B and C).
+    `None` when no logo is configured — same contract as
     `ReportDetailResponse.resolved_resources`.
     """
     configuration: Dict[str, Any]
@@ -150,8 +150,8 @@ class ReportLetterheadLogoUploadResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Archivo portable `.cell`/`.clm`/`.celuma` — post-Fase-2 remediation,
-# R12/R13; extensión y formato v2 en la segunda remediación (UX).
+# Portable `.cell`/`.clm`/`.celuma` file — post-Phase-2 remediation,
+# R12/R13; v2 extension and format in the second remediation (UX).
 #
 # Deliberately excludes tenant_id, StorageObject id, bucket/key, and any
 # presigned/public URL — the envelope must be portable between tenants and
@@ -165,8 +165,8 @@ class ReportLetterheadLogoUploadResponse(BaseModel):
 # only — the original shape, still importable forever (`.celuma` legacy).
 # `format_version` 2: `assets.header_logo`/`assets.footer_logo` (both
 # independently optional) -> `header.logo_storage_id`/`footer.logo_storage_id`
-# — needed since a membrete can now carry a footer logo too (paridad
-# Legacy). Export always writes the CURRENT version (2); `.clm` is an
+# — needed since a letterhead can now carry a footer logo too (Legacy
+# parity). Export always writes the CURRENT version (2); `.clm` is an
 # import-only extension alias, never an export target.
 # ---------------------------------------------------------------------------
 
@@ -195,9 +195,9 @@ class CelumaLetterheadPayload(BaseModel):
     @field_validator("description")
     @classmethod
     def _normalize_description(cls, v: Optional[str]) -> Optional[str]:
-        # Cuarta remediación: un `.cell` puede traer `"description": null`,
-        # `""` o solo espacios; el round-trip debe conservar la MISMA
-        # semántica ("sin descripción") en los tres casos.
+        # Fourth remediation: a `.cell` may carry `"description": null`,
+        # `""`, or whitespace only; the round-trip must keep the SAME
+        # semantics ("no description") in all three cases.
         return normalize_optional_description(v)
 
 

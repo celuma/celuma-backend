@@ -1,5 +1,5 @@
-"""Schema tests for the V2 rendering snapshot contract (Céluma 1.3, Fase 2,
-Bloque B, Historia B1).
+"""Schema tests for the V2 rendering snapshot contract (Céluma 1.3, Phase 2,
+Block B, Story B1).
 
 `ReportRenderingSnapshotV2` is the strict contract backing
 `ReportTemplateVersion.configuration`. These tests protect its validation

@@ -1,7 +1,7 @@
 """Exports the frozen Legacy renderer's hardcoded letterhead as a portable
-`.cell` file — post-Fase-2 remediation, R13; extendido en la segunda
-remediación (UX) con paridad visual (logo de pie, sin divisores, alineación
-inferior del header).
+`.cell` file — post-Phase-2 remediation, R13; extended in the second
+remediation (UX) with visual parity (footer logo, no dividers, bottom
+header alignment).
 
 These constants are a MANUAL, VERBATIM copy of
 celuma-frontend/src/components/report/legacy/legacy_letterhead_config.ts —
@@ -16,18 +16,18 @@ logo, no separate institution name) and its logo actually lives in the
 FOOTER (left-aligned, next to a right-aligned address+contact block) — the
 exact inverse of V2's default header-identity/footer-text layout.
 
-Hasta la tercera remediación esto era una traducción "best-effort": el
-membrete transportaba los datos, pero el renderer V2 no sabía expresar
-varias de esas decisiones visuales (reservaba caja de logo en el
-encabezado aunque no hubiera logo, usaba alturas de banda fijas, y no
-tenía peso tipográfico para el pie). La CUARTA remediación conectó esas
-capacidades — `logo_mode`, `offset_mm`/`height_mm`/`content_gap_mm`/
-`padding_mm`, `signer_placement`, `layout=SPLIT` y los pesos de
-`ReportTypographyConfig` — de modo que cada campo que este adaptador emite
-hoy tiene un efecto real en `VersionedReportRendererV2`. Ver
-v2-legacy-parity-capabilities.md (capacidades), legacy-adapter-v2-contract.md
-(este mapeo campo a campo) y legacy-dom-parity-report.md /
-legacy-pdf-parity-report.md (diferencias residuales medidas).
+Until the third remediation this was a "best-effort" translation: the
+letterhead carried the data, but the V2 renderer could not express several
+of those visual decisions (it reserved a logo box in the header even when
+there was no logo, used fixed band heights, and had no typographic weight
+for the footer). The FOURTH remediation connected those capabilities —
+`logo_mode`, `offset_mm`/`height_mm`/`content_gap_mm`/`padding_mm`,
+`signer_placement`, `layout=SPLIT`, and `ReportTypographyConfig` weights —
+so every field this adapter emits today has a real effect in
+`VersionedReportRendererV2`. See v2-legacy-parity-capabilities.md
+(capabilities), legacy-adapter-v2-contract.md (this field-by-field
+mapping), and legacy-dom-parity-report.md / legacy-pdf-parity-report.md
+(measured residual differences).
 
 Legacy itself is never rendered from this data; only
 LegacyReportRendererV1's own hardcoded constants render Legacy reports,
@@ -92,24 +92,24 @@ def build_legacy_letterhead_export() -> CelumaLetterheadEnvelope:
 
     presentation = ReportPresentationSnapshotV2(
         # ------------------------------------------------------------------
-        # Cuarta remediación post-Fase 2. Cada valor de aquí abajo es una
-        # lectura DIRECTA de las constantes y estilos de
-        # legacy_report_renderer_v1.tsx, no una aproximación:
+        # Fourth post-Phase-2 remediation. Every value below is a DIRECT
+        # reading of the constants and styles in
+        # legacy_report_renderer_v1.tsx, not an approximation:
         #
         #   MARGIN_L_MM / MARGIN_R_MM = 18   -> margins_cm.left/right = 1.8
         #   HEADER_H_MM = 28                 -> header.height_mm = 28
         #   FOOTER_H_MM = 20                 -> footer.height_mm = 20
-        #   header.top = 0 / footer.bottom=0 -> offset_mm = 0 en ambas bandas
+        #   header.top = 0 / footer.bottom=0 -> offset_mm = 0 on both bands
         #   body.top = HEADER_H_MM           -> header.content_gap_mm = 0
         #   body.bottom = FOOTER_H_MM        -> footer.content_gap_mm = 0
         #   body.paddingTop = 4mm            -> paper.body_padding_top_mm = 4
         #   header.paddingBottom = 4mm       -> header.padding_mm = 4
-        #   (el pie no declara padding)      -> footer.padding_mm = 0
+        #   (footer declares no padding)     -> footer.padding_mm = 0
         #
-        # margins_cm.top/bottom quedan fuera del cálculo (los `offset_mm`
-        # explícitos los sustituyen); se dejan en el valor que describe la
-        # banda para que la ficha del membrete siga siendo legible.
-        # Ver legacy-adapter-v2-contract.md.
+        # margins_cm.top/bottom stay out of the layout math (explicit
+        # `offset_mm` replaces them); they are left at the value that
+        # describes the band so the letterhead card remains readable.
+        # See legacy-adapter-v2-contract.md.
         # ------------------------------------------------------------------
         paper=ReportPaperConfig(
             size="LETTER",
@@ -120,17 +120,17 @@ def build_legacy_letterhead_export() -> CelumaLetterheadEnvelope:
         header=ReportHeaderConfig(
             enabled=True,
             logo_storage_id=None,
-            # El encabezado Legacy NO tiene logo y NO reserva espacio para
-            # uno: su logotipo vive en el pie. `NONE` es lo que impide que
-            # V2 dibuje el isotipo neutral de Céluma en su lugar.
+            # The Legacy header has NO logo and does NOT reserve space for
+            # one: its logotype lives in the footer. `NONE` is what stops
+            # V2 from drawing Céluma's neutral isotype in its place.
             logo_mode="NONE",
-            # Las cuatro líneas del encabezado Legacy son, en este orden,
-            # nombre / especialidad / adscripción / cédulas — es decir, el
-            # bloque del firmante institucional completo, con una sola
-            # tipografía. Se emiten con `signer_placement="INLINE"` en vez
-            # de repartirlas entre institution_name/subtitle/address, porque
-            # esos campos tienen tamaños distintos por línea y la dirección
-            # postal de Legacy pertenece al PIE, no al encabezado.
+            # The four Legacy header lines are, in order, name / specialty /
+            # affiliation / licenses — i.e. the full institutional signer
+            # block, with a single typography. They are emitted with
+            # `signer_placement="INLINE"` instead of splitting them across
+            # institution_name/subtitle/address, because those fields have
+            # different sizes per line and Legacy's postal address belongs
+            # to the FOOTER, not the header.
             institution_name=None,
             subtitle=None,
             address=None,
@@ -148,18 +148,17 @@ def build_legacy_letterhead_export() -> CelumaLetterheadEnvelope:
         ),
         footer=ReportFooterConfig(
             enabled=True,
-            # Dirección y contacto son DOS renglones en Legacy (`<br/>`). El
-            # contrato prohíbe markup en texto libre, así que viajan como un
-            # salto de línea real y el renderer los imprime con
+            # Address and contact are TWO lines in Legacy (`<br/>`). The
+            # contract forbids markup in free text, so they travel as a
+            # real newline and the renderer prints them with
             # `white-space: pre-line`.
             custom_text=f"{_FOOTER_ADDRESS}\n{_FOOTER_CONTACT}",
-            # Legacy nunca imprimió número de página.
+            # Legacy never printed a page number.
             show_page_number=False,
             # Legacy's logo is footer-left, address+contact text footer-right,
-            # no divider line above the footer. `logo_storage_id` se rellena
-            # en el import a partir de `assets.footer_logo`; `CUSTOM`
-            # garantiza que, si no se resolviera, no se dibuje ningún
-            # sustituto.
+            # no divider line above the footer. `logo_storage_id` is filled
+            # on import from `assets.footer_logo`; `CUSTOM` guarantees that
+            # if it does not resolve, no substitute is drawn.
             logo_storage_id=None,
             logo_mode="CUSTOM",
             logo_position="LEFT",
@@ -169,8 +168,8 @@ def build_legacy_letterhead_export() -> CelumaLetterheadEnvelope:
             offset_mm=0.0,
             content_gap_mm=0.0,
             padding_mm=0.0,
-            # `height: calc(20mm - 4mm)`, `max-width: 35%` en el logo y
-            # `max-width: 65%` en el texto — literal de Legacy.
+            # `height: calc(20mm - 4mm)`, `max-width: 35%` on the logo and
+            # `max-width: 65%` on the text — literal from Legacy.
             logo_height_mm=16.0,
             logo_max_width_pct=35.0,
             text_max_width_pct=65.0,
@@ -181,9 +180,9 @@ def build_legacy_letterhead_export() -> CelumaLetterheadEnvelope:
             typography=ReportTypographyConfig(
                 font_family="ARIAL",
                 base_font_size_pt=10.0,
-                # El encabezado Legacy es 8pt en negrita en sus CUATRO
-                # líneas (`fontSize: 8pt` + `fontWeight: bold` en la banda);
-                # el pie, 7pt también en negrita.
+                # The Legacy header is 8pt bold on all FOUR lines
+                # (`fontSize: 8pt` + `fontWeight: bold` on the band);
+                # the footer is 7pt also bold.
                 header_font_size_pt=8.0,
                 header_secondary_font_size_pt=8.0,
                 header_font_weight=700,

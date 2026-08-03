@@ -4,7 +4,7 @@ Revision ID: v1_6_0
 Revises: v1_5_0
 Create Date: 2026-07-29
 
-Céluma 1.3 Fase 2, Bloque C, Historia C1. Purely additive:
+Céluma 1.3 Phase 2, Block C, Story C1. Purely additive:
 
   - `tenant_id` (nullable FK -> tenant.id): NULL for every existing row and
     for every object created by flows that don't set it (sample images,

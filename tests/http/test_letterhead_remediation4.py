@@ -1,15 +1,15 @@
-"""Cuarta remediación post-Fase 2 — pruebas de reproducción y regresión.
+"""Fourth post-Phase-2 remediation — reproduction and regression tests.
 
-Cubre las dos observaciones con superficie de backend, más el contrato del
-adaptador Legacy del que depende la paridad visual del frontend:
+Covers the two observations with backend surface, plus the Legacy adapter
+contract the frontend visual parity depends on:
 
-  Observación 2 — la descripción de un membrete no se puede dejar vacía
-  Observación 3 — el membrete Legacy exportado no expresa el diseño Legacy
+  Observation 2 — a letterhead description cannot be left empty
+  Observation 3 — the exported Legacy letterhead does not express Legacy design
 
-La Observación 1 (impresión local) no tiene backend a propósito: imprimir
-es una acción del navegador sobre el renderer ya montado, y esta suite
-incluye una prueba que fija justamente eso — que no se añadió ningún
-endpoint ni se tocó el flujo del PDF oficial.
+Observation 1 (local print) deliberately has no backend: printing is a
+browser action on the already-mounted renderer, and this suite includes a
+test that pins exactly that — that no endpoint was added and the official
+PDF flow was not touched.
 """
 import base64
 import json
@@ -63,12 +63,12 @@ def _import_envelope(client, user, envelope: dict, filename: str = "membrete.cel
 
 
 # ===========================================================================
-# Observación 2 — descripción opcional
+# Observation 2 — optional description
 # ===========================================================================
 
 class TestOptionalDescriptionNormalization:
-    """El normalizador compartido es el único sitio donde se decide qué
-    significa "vacío"; create/update/import/export lo reutilizan."""
+    """The shared normalizer is the only place that decides what "empty"
+    means; create/update/import/export reuse it."""
 
     def test_none_stays_none(self):
         assert normalize_optional_description(None) is None
@@ -116,9 +116,9 @@ class TestOptionalDescriptionCreate:
 
 
 class TestOptionalDescriptionUpdate:
-    """CAUSA RAÍZ de la Observación 2: el endpoint usaba
-    `if data.description is not None`, así que enviar `null` (o `""`, que el
-    schema normaliza a `null`) se interpretaba como "no tocar"."""
+    """ROOT CAUSE of Observation 2: the endpoint used
+    `if data.description is not None`, so sending `null` (or `""`, which
+    the schema normalizes to `null`) was treated as "do not touch"."""
 
     def test_description_can_be_cleared_with_null(self, client, session):
         tenant = create_tenant(session)
@@ -130,7 +130,7 @@ class TestOptionalDescriptionUpdate:
         assert resp.status_code == 200, resp.text
         assert resp.json()["description"] is None
 
-        # Y sigue vacía al releer (no era solo la respuesta del PUT).
+        # And it stays empty on reread (it was not just the PUT response).
         assert _get(client, user, created["id"]).json()["description"] is None
 
     def test_description_can_be_cleared_with_empty_string(self, client, session):
@@ -153,8 +153,8 @@ class TestOptionalDescriptionUpdate:
         assert resp.json()["description"] is None
 
     def test_omitting_description_leaves_it_untouched(self, client, session):
-        """La otra mitad del contrato: "campo omitido" NO es "campo vacío".
-        Renombrar sin mandar `description` no debe borrar la que hubiera."""
+        """The other half of the contract: "field omitted" is NOT "field empty".
+        Renaming without sending `description` must not clear any existing one."""
         tenant = create_tenant(session)
         user = create_user(session, tenant, email="admin@a.example")
         created = _create(client, user, name="Original", description="No me borres").json()
@@ -190,10 +190,10 @@ class TestOptionalDescriptionDuplicateAndPortability:
     def test_export_of_a_letterhead_without_description_is_null(self, client, session):
         tenant = create_tenant(session)
         user = create_user(session, tenant, email="admin@a.example")
-        # El nombre lleva acento a propósito: al escribir esta prueba salió
-        # a la luz que `Content-Disposition` metía el nombre crudo en una
-        # cabecera HTTP (latin-1), y el export entero fallaba con un error
-        # de codificación. Ver `export_letterhead_version` en
+        # The name carries an accent on purpose: writing this test
+        # uncovered that `Content-Disposition` put the raw name in an HTTP
+        # header (latin-1), and the whole export failed with an encoding
+        # error. See `export_letterhead_version` in
         # app/api/v1/report_letterheads.py.
         letterhead = create_letterhead(session, tenant, name="Sin descripción")
         version = create_letterhead_version(
@@ -233,9 +233,9 @@ class TestOptionalDescriptionDuplicateAndPortability:
         assert detail.json()["description"] is None
 
     def test_import_of_a_cell_whose_description_is_blank_text(self, client, session):
-        """Un `.cell` escrito a mano (o por otra herramienta) puede traer
-        `""` o espacios: el import debe darles la MISMA semántica que
-        `null`, no crear un membrete con una descripción invisible."""
+        """A hand-written `.cell` (or one from another tool) may carry `""` or
+        whitespace: import must give them the SAME semantics as `null`, not
+        create a letterhead with an invisible description."""
         tenant_a = create_tenant(session, name="A")
         tenant_b = create_tenant(session, name="B")
         user_a = create_user(session, tenant_a, email="admin@a.example")
@@ -257,14 +257,14 @@ class TestOptionalDescriptionDuplicateAndPortability:
 
 
 # ===========================================================================
-# Observación 3 — capacidades de paridad Legacy en el contrato
+# Observation 3 — Legacy parity capabilities in the contract
 # ===========================================================================
 
 class TestPresentationContractCompatibility:
-    """Los campos nuevos son ADITIVOS: un `configuration` anterior a esta
-    remediación (sin ninguno de ellos) debe seguir siendo válido, y sus
-    valores deben quedar en `None` — nunca en un default que cambie cómo se
-    ve un reporte V2 ya publicado."""
+    """New fields are ADDITIVE: a `configuration` from before this
+    remediation (without any of them) must remain valid, and their values
+    must stay `None` — never a default that would change how an already-
+    published V2 report looks."""
 
     def test_pre_remediation_configuration_is_still_accepted(self, client, session):
         tenant = create_tenant(session)
@@ -278,9 +278,9 @@ class TestPresentationContractCompatibility:
         )
         assert resp.status_code == 200, resp.text
         config = resp.json()["configuration"]
-        # Ausentes en la entrada -> `None` en la salida: sin `logo_mode` el
-        # renderer conserva su comportamiento anterior, y sin
-        # `offset_mm`/`content_gap_mm`/`padding_mm` conserva su geometría.
+        # Absent on input -> `None` on output: without `logo_mode` the
+        # renderer keeps its previous behavior, and without
+        # `offset_mm`/`content_gap_mm`/`padding_mm` it keeps its geometry.
         assert config["header"]["logo_mode"] is None
         assert config["header"]["offset_mm"] is None
         assert config["header"]["content_gap_mm"] is None
@@ -385,13 +385,13 @@ class TestPresentationContractCompatibility:
 
 
 class TestLegacyAdapterContract:
-    """Fija el mapeo campo a campo del adaptador. La suite visual del
-    frontend (`tests-visual/legacy_v2_parity.visual.spec.ts`) copia estos
-    mismos valores en su fixture; si el adaptador cambia sin actualizar
-    aquélla, esta prueba lo delata primero.
+    """Pins the adapter's field-by-field mapping. The frontend visual suite
+    (`tests-visual/legacy_v2_parity.visual.spec.ts`) copies these same
+    values in its fixture; if the adapter changes without updating that
+    one, this test catches it first.
 
-    Cada aserción corresponde a una constante real de
-    `legacy_report_renderer_v1.tsx` — ver legacy-adapter-v2-contract.md."""
+    Each assertion corresponds to a real constant from
+    `legacy_report_renderer_v1.tsx` — see legacy-adapter-v2-contract.md."""
 
     def test_paper_matches_legacy_geometry(self):
         p = build_legacy_letterhead_export().letterhead.presentation
@@ -420,8 +420,8 @@ class TestLegacyAdapterContract:
     def test_header_renders_the_physician_block_inline(self):
         header = build_legacy_letterhead_export().letterhead.presentation.header
         assert header.signer_placement == "INLINE"
-        # Las cuatro líneas vienen del firmante institucional, no de
-        # institution_name/subtitle/address (que tienen tamaños distintos).
+        # The four lines come from the institutional signer, not from
+        # institution_name/subtitle/address (which have different sizes).
         assert header.institution_name is None
         assert header.subtitle is None
         assert header.address is None
@@ -467,7 +467,7 @@ class TestLegacyAdapterContract:
         assert typo.font_family == "ARIAL"
         assert typo.base_font_size_pt == 10.0            # body 10pt
         assert typo.header_font_size_pt == 8.0           # header 8pt
-        assert typo.header_secondary_font_size_pt == 8.0  # las CUATRO líneas
+        assert typo.header_secondary_font_size_pt == 8.0  # all FOUR lines
         assert typo.header_font_weight == 700            # fontWeight: bold
         assert typo.footer_font_size_pt == 7.0           # footer 7pt
         assert typo.footer_font_weight == 700            # fontWeight: bold
@@ -482,8 +482,8 @@ class TestLegacyAdapterContract:
         assert a.letterhead.model_dump(mode="json") == b.letterhead.model_dump(mode="json")
 
     def test_the_adapter_emits_no_field_the_contract_ignores(self):
-        """`extra="forbid"` en todos los modelos: si el adaptador emitiera
-        una clave inventada, esto fallaría al reconstruir el modelo."""
+        """`extra="forbid"` on all models: if the adapter emitted an invented
+        key, reconstructing the model would fail."""
         envelope = build_legacy_letterhead_export()
         from app.schemas.report_template_version import ReportPresentationSnapshotV2
 
@@ -539,8 +539,8 @@ class TestLegacyExportImportRoundTrip:
             "/api/v1/report-letterheads/legacy/export",
             headers=auth_headers(user),
         ).json()
-        # El logotipo viaja como asset del PIE; si el repositorio no lleva el
-        # bitmap, el export sale sin él y esta comprobación no aplica.
+        # The logotype travels as a FOOTER asset; if the repo does not
+        # ship the bitmap, export omits it and this check does not apply.
         if "footer_logo" not in envelope.get("assets", {}):
             return
 
@@ -558,15 +558,15 @@ class TestLegacyExportImportRoundTrip:
 
 
 # ===========================================================================
-# Observación 1 — la impresión local no toca el backend
+# Observation 1 — local print does not touch the backend
 # ===========================================================================
 
 class TestLocalPrintHasNoBackendSurface:
     def test_no_local_print_endpoint_was_added(self, client, session):
-        """La copia local se compone en el navegador a partir del renderer
-        ya montado. Si alguna vez apareciera un endpoint "de impresión",
-        habría dos caminos de generación de documentos y el artefacto
-        oficial dejaría de ser el único — ver local-print-contract.md."""
+        """The local copy is composed in the browser from the already-mounted
+        renderer. If a "print" endpoint ever appeared, there would be two
+        document-generation paths and the official artifact would no longer
+        be the only one — see local-print-contract.md."""
         from app.main import app
 
         paths = {route.path for route in app.routes if hasattr(route, "path")}

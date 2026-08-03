@@ -1,57 +1,54 @@
-# Fixtures de reportes (Céluma 1.3, Fase 1 — Workstream 5)
+# Report fixtures (Céluma 1.3, Phase 1 — Workstream 5)
 
-Fixtures JSON anonimizados que representan el body de un reporte tal como se
-persiste en S3 (`reports/{tenant}/{branch}/{report}/versions/{n}/report.json`).
-Ninguno contiene datos reales de pacientes, diagnósticos identificables ni
-archivos médicos reales — todos los nombres, cédulas y URLs de imagen son
-sintéticos (`https://cdn.example.invalid/...` nunca se resuelve ni se
-descarga en las pruebas).
+Anonymized JSON fixtures that represent a report body as persisted in S3
+(`reports/{tenant}/{branch}/{report}/versions/{n}/report.json`). None contain
+real patient data, identifiable diagnoses, or real medical files — all names,
+license numbers, and image URLs are synthetic (`https://cdn.example.invalid/...`
+is never resolved or downloaded in tests).
 
-Cada archivo trae un campo `_fixture_meta` (ignorado por el código de
-producción, solo para este documento) indicando qué caso(s) de la matriz del
-Workstream 5 cubre.
+Each file carries a `_fixture_meta` field (ignored by production code, only
+for this document) indicating which Workstream 5 matrix case(s) it covers.
 
-## Mapeo a la matriz de `Céluma1.3-Fase1.md`
+## Mapping to the `Céluma1.3-Fase1.md` matrix
 
-| Caso requerido | Fixture(s) |
+| Required case | Fixture(s) |
 |---|---|
-| 1. Una muestra | `draft_single_sample_no_images.json` |
-| 2. Varias muestras | `published_multi_sample_with_images_all_sections.json` |
-| 3. Reporte con imágenes | `published_multi_sample_with_images_all_sections.json` |
-| 4. Reporte sin imágenes | `draft_single_sample_no_images.json` |
-| 5. Contenido corto | `draft_single_sample_no_images.json` |
-| 6. Contenido de varias páginas | `long_content_multipage.json` |
-| 7. Secciones opcionales vacías | `empty_optional_sections.json` |
-| 8. Todas las secciones completas | `published_multi_sample_with_images_all_sections.json` |
-| 9. Reporte sin paciente | `no_patient_report.json` |
-| 10. Reporte liberado | `published_multi_sample_with_images_all_sections.json` (`status: PUBLISHED`) |
-| 11. Reporte en borrador | `draft_single_sample_no_images.json` (`status: DRAFT`) |
-| 12. Caracteres especiales y acentos | `special_characters_accents.json` |
-| 13. Textos largos que provocan saltos de página | `long_content_multipage.json` |
-| 14. Reporte histórico con estructura más antigua | `legacy_oldest_structure.json` |
+| 1. One sample | `draft_single_sample_no_images.json` |
+| 2. Multiple samples | `published_multi_sample_with_images_all_sections.json` |
+| 3. Report with images | `published_multi_sample_with_images_all_sections.json` |
+| 4. Report without images | `draft_single_sample_no_images.json` |
+| 5. Short content | `draft_single_sample_no_images.json` |
+| 6. Multi-page content | `long_content_multipage.json` |
+| 7. Empty optional sections | `empty_optional_sections.json` |
+| 8. All sections complete | `published_multi_sample_with_images_all_sections.json` |
+| 9. Report without patient | `no_patient_report.json` |
+| 10. Released report | `published_multi_sample_with_images_all_sections.json` (`status: PUBLISHED`) |
+| 11. Draft report | `draft_single_sample_no_images.json` (`status: DRAFT`) |
+| 12. Special characters and accents | `special_characters_accents.json` |
+| 13. Long texts that force page breaks | `long_content_multipage.json` |
+| 14. Historical report with older structure | `legacy_oldest_structure.json` |
 
-`legacy_oldest_structure.json` es el único fixture sin `base_order`,
-`section_order` ni `signatureMetadata`, y sin el campo base
-`requesting_physician` (agregado después — ver
-`LEGACY_PREDEFINED_BASE_HIDDEN` en `celuma-frontend/src/models/report.ts`).
-Ningún fixture incluye `schema_version` porque ese campo no existe hoy en
-producción — ver `report-compatibility-strategy.md`.
+`legacy_oldest_structure.json` is the only fixture without `base_order`,
+`section_order`, or `signatureMetadata`, and without the base field
+`requesting_physician` (added later — see
+`LEGACY_PREDEFINED_BASE_HIDDEN` in `celuma-frontend/src/models/report.ts`).
+No fixture includes `schema_version` because that field does not exist in
+production today — see `report-compatibility-strategy.md`.
 
-## Uso
+## Usage
 
-- Backend: `celuma-backend/tests/test_report_json_contract.py` carga estos
-  archivos y valida que deserializan contra los schemas Pydantic actuales
-  (`app/schemas/report.py`) sin necesitar base de datos.
-- Frontend: copias equivalentes en
-  `celuma-frontend/src/test/fixtures/reports/` (mismo contenido, importado
-  como módulos TS) se usan para probar `src/models/report.ts` y el renderer
-  `ReportPreviewPages`.
+- Backend: `celuma-backend/tests/test_report_json_contract.py` loads these
+  files and validates they deserialize against the current Pydantic schemas
+  (`app/schemas/report.py`) without needing a database.
+- Frontend: equivalent copies in
+  `celuma-frontend/src/test/fixtures/reports/` (same content, imported as
+  TS modules) are used to test `src/models/report.ts` and the
+  `ReportPreviewPages` renderer.
 
-## Actualizar fixtures / snapshots
+## Updating fixtures / snapshots
 
-Estos fixtures representan el comportamiento **actual** y no deben
-modificarse para que una prueba "pase" — si una prueba falla después de un
-cambio de código, primero hay que determinar si el cambio de comportamiento
-es intencional. Si lo es, actualizar el fixture y la prueba en el mismo
-commit, explicando el motivo en el mensaje de commit. No se aprobaron
-snapshots nuevos automáticamente en esta fase.
+These fixtures represent **current** behavior and must not be changed just
+so a test "passes" — if a test fails after a code change, first determine
+whether the behavior change is intentional. If it is, update the fixture
+and the test in the same commit, explaining why in the commit message. New
+snapshots were not auto-approved in this phase.

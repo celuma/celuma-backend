@@ -55,7 +55,7 @@ def get_token_expiration(token: str) -> datetime:
     return datetime.fromtimestamp(exp_timestamp)
 
 
-# Céluma 1.3 Fase 2, Bloque E: PDF render tokens. Deliberately separate from
+# Céluma 1.3 Phase 2, Block E: PDF render tokens. Deliberately separate from
 # `create_jwt`/`decode_jwt` (user session tokens): different secret
 # (`settings.effective_pdf_render_token_secret`), different, narrower payload
 # shape (`type`, `report_version_id`, `tenant_id`), and never checked against

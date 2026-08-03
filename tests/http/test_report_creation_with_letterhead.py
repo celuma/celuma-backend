@@ -1,5 +1,5 @@
-"""HTTP integration tests for membrete (letterhead) resolution during V2
-report creation — post-Fase-2 remediation, R7/R15.
+"""HTTP integration tests for letterhead resolution during V2
+report creation — post-Phase-2 remediation, R7/R15.
 
 Resolution order under test: explicit letterhead_version_id -> template's
 preferred_letterhead_version_id -> tenant's default letterhead's ACTIVE
@@ -186,17 +186,17 @@ class TestAutomaticLetterheadResolution:
         assert detail["report"]["rendering_snapshot"]["presentation"]["style"]["primary_color"] == "#333333"
 
     def test_no_letterhead_resolvable_blocks_v2_creation_explicitly(self, client, session):
-        """REVERSIÓN DELIBERADA de la segunda remediación (ver
-        deterministic-letterhead-resolution-contract.md, "Cambio de
-        comportamiento").
+        """DELIBERATE REVERSAL of the second remediation (see
+        deterministic-letterhead-resolution-contract.md, "Behavior
+        change").
 
-        Antes, un tenant sin ningún membrete creaba el reporte V2 en
-        silencio con la `presentation` embebida en la versión de plantilla.
-        Ese silencio era el mecanismo exacto detrás de dos síntomas del
-        brief: reportes V2 con un membrete que el usuario nunca eligió, y un
-        editor que, al no tener membrete que resolver, montaba Legacy. Ahora
-        se bloquea con 409 y un mensaje accionable — nunca Legacy, nunca un
-        membrete elegido por defecto implícito.
+        Previously, a tenant with no letterhead silently created the V2
+        report with the `presentation` embedded in the template version.
+        That silence was the exact mechanism behind two brief symptoms: V2
+        reports with a letterhead the user never chose, and an editor that,
+        with no letterhead to resolve, mounted Legacy. Now it blocks with
+        409 and an actionable message — never Legacy, never an implicitly
+        chosen default letterhead.
         """
         tenant = create_tenant(session, reports_v2_enabled=True)
         branch = create_branch(session, tenant)

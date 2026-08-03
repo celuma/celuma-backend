@@ -1,5 +1,5 @@
-"""HTTP integration tests for report resource resolution (Céluma 1.3, Fase
-2, Bloque C, Historia C1). Covers turning a V2 report's
+"""HTTP integration tests for report resource resolution (Céluma 1.3, Phase
+2, Block C, Story C1). Covers turning a V2 report's
 `rendering_snapshot.presentation.header.logo_storage_id` into a URL exposed
 via `ReportDetailResponse.resolved_resources`, without ever writing that URL
 back into the snapshot, and without ever exposing a cross-tenant object.
@@ -58,12 +58,12 @@ class TestLogoResolutionOnRead:
         headers = auth_headers(user)
         logo = create_storage_object(session, key="logos/t1-logo.png", tenant=tenant)
 
-        # Tercera remediación: el logo vive en el MEMBRETE, no en la versión
-        # de plantilla — la `presentation` del reporte la aporta ahora
-        # siempre el membrete resuelto (ver
-        # deterministic-letterhead-resolution-contract.md). Lo que esta
-        # prueba cubre, resolver `logo_storage_id` -> URL sin escribirla en
-        # el snapshot, es idéntico.
+        # Third remediation: the logo lives on the LETTERHEAD, not the
+        # template version — the report's `presentation` is now always
+        # supplied by the resolved letterhead (see
+        # deterministic-letterhead-resolution-contract.md). What this test
+        # covers, resolving `logo_storage_id` -> URL without writing it into
+        # the snapshot, is identical.
         create_default_letterhead(
             session,
             tenant,
@@ -192,7 +192,7 @@ class TestLogoResolutionOnRead:
 
 
 class TestCrossTenantLogoNeverLeaks:
-    """Defense in depth (Historia C1): even if a cross-tenant
+    """Defense in depth (Story C1): even if a cross-tenant
     `logo_storage_id` ended up embedded in a snapshot (e.g. a row that
     predates the publish-time tenant check, or a future regression in that
     check), reading the report must never resolve or expose that object's

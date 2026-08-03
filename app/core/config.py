@@ -18,8 +18,8 @@ class Settings(BaseSettings):
     media_public_base_url: str | None = None  # Optional CDN/base URL for public access
     media_presigned_expire_seconds: int = 3600
 
-    # Céluma 1.3 Fase 2, Bloque D, Historia D1: the CORS origin list used to
-    # be a literal hardcoded in app/main.py (Bloque C, Historia C11 — see the
+    # Céluma 1.3 Phase 2, Block D, Story D1: the CORS origin list used to
+    # be a literal hardcoded in app/main.py (Block C, Story C11 — see the
     # comment there for why a bare "*" cannot be one of the origins while
     # `allow_credentials=True`). Moved here so the production frontend origin
     # can be configured without a code change. Comma-separated, no bare "*".
@@ -28,17 +28,16 @@ class Settings(BaseSettings):
         "http://localhost:4173,http://127.0.0.1:4173"
     )
 
-    # Tercera remediación post-Fase 2: el limitador de peticiones en memoria
-    # de app/main.py tenía sus dos números escritos a mano. El default
-    # (100/60s por IP) es el mismo de siempre, así que producción no cambia;
-    # se vuelve configurable porque la suite E2E real dispara todo su tráfico
-    # desde una sola IP y agotaba la ventana a mitad de la corrida — daba
-    # 429 en pruebas que no tenían nada malo. Ver
-    # remediation-3-e2e-report.md.
+    # Third post-Phase-2 remediation: the in-memory rate limiter in
+    # app/main.py had its two numbers hardcoded. The default (100/60s per
+    # IP) is unchanged, so production behavior does not change; it becomes
+    # configurable because the real E2E suite fires all its traffic from a
+    # single IP and exhausted the window mid-run — producing 429s on tests
+    # that had nothing wrong. See remediation-3-e2e-report.md.
     rate_limit_max_requests: int = 100
     rate_limit_window_seconds: int = 60
 
-    # Céluma 1.3 Fase 2, Bloque E: official PDF generation. `pdf_generator_base_url`
+    # Céluma 1.3 Phase 2, Block E: official PDF generation. `pdf_generator_base_url`
     # is the origin of the frontend the headless browser navigates to render
     # `/internal/report-render/...` — intentionally has no localhost default so an
     # environment can never silently fall back to the wrong origin; it must be set
@@ -52,7 +51,7 @@ class Settings(BaseSettings):
     pdf_max_size_bytes: int = 25 * 1024 * 1024  # 25 MB
     pdf_max_page_count: int = 100
 
-    # Segunda remediación post-Fase 2 (UX): staleness window for the
+    # Second post-Phase-2 remediation (UX): staleness window for the
     # sign-and-publish claim (publish_started_at/by on ReportVersion),
     # mirroring pdf_generation_timeout_seconds's `* 3` staleness pattern.
     # Larger than pure PDF generation because the claim also spans the

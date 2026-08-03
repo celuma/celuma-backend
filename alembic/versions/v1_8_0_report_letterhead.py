@@ -4,7 +4,7 @@ Revision ID: v1_8_0
 Revises: v1_7_0
 Create Date: 2026-08-01
 
-Post-Fase-2 remediation. Purely additive: creates `report_letterhead` and
+Post-Phase-2 remediation. Purely additive: creates `report_letterhead` and
 `report_letterhead_version`, and adds two nullable FK columns
 (`report_template.preferred_letterhead_version_id`,
 `report_version.letterhead_version_id`). No existing table's data is

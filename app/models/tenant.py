@@ -14,7 +14,7 @@ class Tenant(BaseModel, TimestampMixin, table=True):
     tax_id: Optional[str] = Field(max_length=50, default=None)
     logo_url: Optional[str] = Field(max_length=500, default=None)
     is_active: bool = Field(default=True)
-    # Céluma 1.3 Fase 2, Bloque A: gates creation of new V2 reports only.
+    # Céluma 1.3 Phase 2, Block A: gates creation of new V2 reports only.
     # Does not affect rendering of existing reports (schema_version-based,
     # see report-schema-versioning.md) and is not read anywhere in this block.
     reports_v2_enabled: bool = Field(default=False)

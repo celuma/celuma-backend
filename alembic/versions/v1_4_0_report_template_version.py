@@ -4,10 +4,10 @@ Revision ID: v1_4_0
 Revises: v1_3_0
 Create Date: 2026-07-29
 
-Céluma 1.3 Fase 2, Bloque B, Historia B2. Purely additive: creates the
+Céluma 1.3 Phase 2, Block B, Story B2. Purely additive: creates the
 `report_template_version` table. No existing table is modified. No report is
 created with a reference to this table in this migration (`reports_v2_enabled`
-stays false for every tenant — see database-migration-notes.md, Bloque B).
+stays false for every tenant — see database-migration-notes.md, Block B).
 
 Design notes (see report-template-version-contract.md for the full rationale):
   - `status` is stored as a plain VARCHAR + CHECK constraint, not a Postgres

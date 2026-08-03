@@ -94,14 +94,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reports")
 
-# Céluma 1.3 Fase 2, Bloque B: identifies which backend logic produced a V2
+# Céluma 1.3 Phase 2, Block B: identifies which backend logic produced a V2
 # report's rendering snapshot (there is no VersionedReportRendererV2 yet —
 # this only audits the *persistence* path, see
 # phase-2-block-b-architecture-decision.md).
 SNAPSHOT_BUILDER_VERSION = "block-b/1.0.0"
 
 # Statuses in which a report's content/template/branding must never change
-# again through the normal creation/versioning/PDF-upload flow (Historia B9).
+# again through the normal creation/versioning/PDF-upload flow (Story B9).
 # RETRACTED is included deliberately: retraction ends the normal editing
 # lifecycle and this block does not implement a formal amendment flow — see
 # block-c-dependencies.md.
@@ -117,33 +117,33 @@ def _require(user_id, code: str, session: Session) -> None:
 def authorize_report_read_access(
     session: Session, ctx: AuthContext, user: AppUser, report_id: str
 ) -> Report:
-    """Quinta remediación post-Fase 2 — contrato ÚNICO de lectura de un
-    reporte por parte del personal interno del laboratorio.
+    """Fifth post-Phase-2 remediation — SINGLE read-access contract for a
+    report by internal laboratory staff.
 
-    Antes de esta remediación cada ruta de solo lectura repetía sus propios
-    checks a mano, y ahí se coló la divergencia que produjo el `403` real
-    reportado: `GET /{id}/full` devolvía 200 mientras
-    `GET /{id}/versions/{n}/pdf` devolvía
+    Before this remediation every read-only route repeated its own checks
+    by hand, and that is where the divergence that produced the real
+    reported `403` slipped in: `GET /{id}/full` returned 200 while
+    `GET /{id}/versions/{n}/pdf` returned
     `{"detail":"Report access blocked due to pending payment"}` (57 bytes,
-    byte a byte el cuerpo capturado en Safari) para el MISMO usuario, el
-    MISMO reporte y el MISMO permiso. Ver
-    official-pdf-download-root-cause.md y
+    byte-for-byte the body captured in Safari) for the SAME user, the
+    SAME report, and the SAME permission. See
+    official-pdf-download-root-cause.md and
     report-read-authorization-contract.md.
 
-    La política, ahora en un solo sitio:
+    The policy, now in one place:
 
-      * `reports:read`            -> 403 si falta (aunque conozca el id).
-      * reporte inexistente       -> 404.
-      * reporte de otro tenant    -> 404, NUNCA 403: un 403 confirmaría que
-                                     ese id existe en otro laboratorio.
+      * `reports:read`            -> 403 if missing (even if the id is known).
+      * missing report            -> 404.
+      * report from another tenant -> 404, NEVER 403: a 403 would confirm
+                                     that id exists in another laboratory.
 
-    `Order.billed_lock` deliberadamente NO participa aquí. Es la compuerta
-    de entrega a terceros (paciente y médico solicitante) y se sigue
-    aplicando, sin cambios, en `app/api/v1/portal.py`. Aplicarla también al
-    personal interno no protegía nada — `/full` ya devuelve el contenido
-    clínico completo y el botón "Imprimir copia local" ya imprime desde
-    ahí — y sí rompía el flujo real: el patólogo firmaba su propio reporte
-    y no podía descargar el PDF que acababa de generar.
+    `Order.billed_lock` deliberately does NOT participate here. It is the
+    delivery gate for third parties (patient and requesting physician) and
+    continues to apply, unchanged, in `app/api/v1/portal.py`. Applying it
+    to internal staff protected nothing — `/full` already returns the full
+    clinical content and the "Imprimir copia local" button already prints
+    from there — and it did break the real flow: the pathologist signed
+    their own report and could not download the PDF they had just generated.
     """
     _require(user.id, "reports:read", session)
     report = session.get(Report, report_id)
@@ -158,7 +158,7 @@ _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
 
 
 def official_pdf_filename(order_code: str, version_no: int) -> str:
-    """Céluma 1.3 Fase 2, Bloque E, Historia E10: the download filename for
+    """Céluma 1.3 Phase 2, Block E, Story E10: the download filename for
     an official report PDF. Deliberately never derived from a patient name —
     only the order's human-readable code, which is already shown in the lab
     UI and is not more sensitive than the case itself."""
@@ -275,7 +275,7 @@ def list_reports(
 
 def _compensate_failed_v2_report_creation(report_id, session: Session) -> None:
     """Best-effort compensation when a V2 report's S3/version write fails
-    after its `Report` row was already committed (Historia B8).
+    after its `Report` row was already committed (Story B8).
 
     This is NOT a distributed transaction: there is a real (narrow) window
     where a process crash between the two commits below could still leave an
@@ -334,7 +334,7 @@ def create_report(
 ):
     """Create a new report (requires reports:create).
 
-    Céluma 1.3 Fase 2, Bloque B: when the tenant has
+    Céluma 1.3 Phase 2, Block B: when the tenant has
     `reports_v2_enabled=true` AND the caller explicitly selects a
     `template_version_id`, the report is created as schema_version=2 with a
     backend-built, backend-validated rendering snapshot embedded in its JSON
@@ -377,7 +377,7 @@ def create_report(
         raise HTTPException(400, "Report already exists for this order")
 
     # ------------------------------------------------------------------
-    # Céluma 1.3 Fase 2, Bloque B, Historia B6 — resolve V2 vs legacy BEFORE
+    # Céluma 1.3 Phase 2, Block B, Story B6 — resolve V2 vs legacy BEFORE
     # writing anything to the database, so an invalid V2 request never
     # creates a partial Report row.
     # ------------------------------------------------------------------
@@ -415,19 +415,19 @@ def create_report(
             raise HTTPException(500, "Template version configuration is invalid") from exc
 
         # ------------------------------------------------------------------
-        # Post-Fase-2 remediation, R7; resolución determinista + bloqueo
-        # explícito en la tercera remediación. `resolve_effective_letterhead_version`
-        # es el ÚNICO punto de verdad (compartido con
-        # `GET /study-types/{id}/report-defaults`): explícito -> preferido de
-        # la plantilla -> default del tenant, con invariantes estrictas
-        # (mismo tenant, membrete activo, EXACTAMENTE una versión ACTIVE).
+        # Post-Phase-2 remediation, R7; deterministic resolution + explicit
+        # block in the third remediation. `resolve_effective_letterhead_version`
+        # is the ONLY source of truth (shared with
+        # `GET /study-types/{id}/report-defaults`): explicit -> template
+        # preferred -> tenant default, with strict invariants
+        # (same tenant, active letterhead, EXACTLY one ACTIVE version).
         #
-        # Cambio de comportamiento deliberado: si no resuelve NINGÚN
-        # membrete, la creación V2 se bloquea con 409 en vez de quedarse en
-        # silencio con la `presentation` embebida en la versión de plantilla.
-        # Aquel silencio era justamente lo que producía reportes V2 con un
-        # membrete que el usuario nunca eligió (y, en el editor, el fallback
-        # a Legacy). Ver deterministic-letterhead-resolution-contract.md.
+        # Deliberate behavior change: if NO letterhead resolves, V2 creation
+        # is blocked with 409 instead of silently keeping the `presentation`
+        # embedded in the template version. That silence is exactly what
+        # produced V2 reports with a letterhead the user never chose (and,
+        # in the editor, the fallback to Legacy). See
+        # deterministic-letterhead-resolution-contract.md.
         # ------------------------------------------------------------------
         try:
             resolved_letterhead = resolve_effective_letterhead_version(
@@ -532,7 +532,7 @@ def create_report(
         if is_v2:
             # Backend-authoritative: the client's `report_data.report` never
             # carries its own snapshot — only the validated, server-resolved
-            # one is embedded (Historia B6, "el frontend puede seleccionar
+            # one is embedded (Story B6, "el frontend puede seleccionar
             # template_version_id, pero no debe poder suministrar
             # arbitrariamente el snapshot final").
             body["schema_version"] = 2
@@ -586,7 +586,7 @@ def create_report(
         except Exception as exc:
             session.rollback()
             if is_v2:
-                # Historia B8: a V2 report is all-or-nothing. Compensate the
+                # Story B8: a V2 report is all-or-nothing. Compensate the
                 # already-committed Report row rather than leave it orphaned
                 # with no content and no snapshot anywhere.
                 _compensate_failed_v2_report_creation(report.id, session)
@@ -606,7 +606,7 @@ def create_report(
             # Legacy path: this failure mode (Report row committed, content
             # upload then fails) pre-dates this block and is not changed
             # here — see phase-2-block-b-architecture-decision.md, B8, for
-            # why fixing it is out of scope for Bloque B.
+            # why fixing it is out of scope for Block B.
             logger.error(
                 "Report content upload failed after the Report row was already committed",
                 extra={
@@ -631,7 +631,7 @@ def _carry_forward_v2_metadata(
     report_body: dict | None,
     session: Session,
 ) -> tuple[dict | None, int | None, str | None, str | None, str | None]:
-    """Céluma 1.3 Fase 2, Bloque C, Historia C9.
+    """Céluma 1.3 Phase 2, Block C, Story C9.
 
     `create_report_new_version` only ever changes clinical content — it must
     never let a content-only save silently degrade a V2 report to legacy.
@@ -641,26 +641,26 @@ def _carry_forward_v2_metadata(
     the editor (whose `buildEnvelope()` rebuilds `report` from the template
     definition) would silently strip the snapshot and every later read would
     resolve the report as legacy. See versioned-renderer-v2-contract.md,
-    "Continuidad del snapshot entre versiones de contenido", and
+    "Snapshot continuity across content versions", and
     phase-2-block-c-architecture-decision.md.
 
     Always re-attaches the FROZEN snapshot already stored on the current
     version — this never re-resolves or re-validates against a live
-    ReportTemplateVersion (that would violate "no reconsultar la plantilla
-    administrativa"), and never trusts a `rendering_snapshot` the client may
-    have sent, only ever the one already persisted for this report.
+    ReportTemplateVersion (that would violate "do not re-query the
+    administrative template"), and never trusts a `rendering_snapshot` the
+    client may have sent, only ever the one already persisted for this report.
 
-    Post-Fase-2 remediation: also carries forward `letterhead_version_id`,
-    the administrative twin of `template_version_id` — the membrete
+    Post-Phase-2 remediation: also carries forward `letterhead_version_id`,
+    the administrative twin of `template_version_id` — the letterhead
     selector is only ever shown before a report's first save (D10), so a
     content-only save on an existing report must never change which
     letterhead produced its frozen `presentation` block.
 
-    Quinta remediación post-Fase 2: ese "solo antes del primer guardado" era
-    precisamente la frontera equivocada (Observación A). Esta función SIGUE
-    siendo carry-forward puro — nunca cambia de membrete por su cuenta — y
-    el cambio explícito y validado se aplica encima, en
-    `_apply_draft_letterhead_change`. Ver
+    Fifth post-Phase-2 remediation: that "only before the first save"
+    boundary was precisely the wrong one (Observation A). This function
+    REMAINS pure carry-forward — it never changes letterhead on its own —
+    and the explicit, validated change is applied on top in
+    `_apply_draft_letterhead_change`. See
     draft-letterhead-change-contract.md.
     """
     if current_version is None or current_version.schema_version != 2:
@@ -705,10 +705,10 @@ def _carry_forward_v2_metadata(
     return carried_body, *carried_metadata
 
 
-# Estados en los que el membrete ya forma parte de la versión sometida a
-# revisión y no puede cambiarse (quinta remediación post-Fase 2,
-# Observación A). La frontera NO es "el reporte ya tiene id" — es "el
-# reporte ya salió de DRAFT". Ver letterhead-freeze-at-review-contract.md.
+# Statuses where the letterhead is already part of the version submitted
+# for review and cannot be changed (fifth post-Phase-2 remediation,
+# Observation A). The boundary is NOT "the report already has an id" — it
+# is "the report has left DRAFT". See letterhead-freeze-at-review-contract.md.
 _LETTERHEAD_EDITABLE_STATUSES = (ReportStatus.DRAFT,)
 
 
@@ -721,37 +721,37 @@ def _apply_draft_letterhead_change(
     carried_letterhead_version_id: str | None,
     requested_letterhead_version_id: str | None,
 ) -> tuple[dict | None, str | None, ReportLetterheadVersion | None]:
-    """Quinta remediación post-Fase 2 — cambio de membrete en un DRAFT ya
-    persistido (Observación A).
+    """Fifth post-Phase-2 remediation — letterhead change on an already
+    persisted DRAFT (Observation A).
 
-    Sustituye EXCLUSIVAMENTE `rendering_snapshot.presentation` y
-    `ReportVersion.letterhead_version_id`. Nunca toca
-    `rendering_snapshot.template`, `template_version_id`, campos base,
-    secciones, valores clínicos, imágenes, datos del paciente o de la orden,
-    firma, historial ni PDFs ya generados: el `carried_body` que entra aquí
-    ya es el contenido clínico definitivo y de él solo se reemplaza una
-    clave.
+    Replaces EXCLUSIVELY `rendering_snapshot.presentation` and
+    `ReportVersion.letterhead_version_id`. Never touches
+    `rendering_snapshot.template`, `template_version_id`, base fields,
+    sections, clinical values, images, patient or order data, signature,
+    history, or already-generated PDFs: the incoming `carried_body` is
+    already the definitive clinical content and only one key is replaced
+    in it.
 
-    La presentación se obtiene SIEMPRE del servidor a partir del id de
-    versión de membrete (vía `resolve_effective_letterhead_version`, el
-    único punto de verdad desde la tercera remediación). Un `presentation`
-    que venga en el cuerpo del cliente jamás se usa — el cliente solo
-    elige, no dicta el diseño.
+    Presentation is ALWAYS obtained server-side from the letterhead
+    version id (via `resolve_effective_letterhead_version`, the only
+    source of truth since the third remediation). A `presentation` that
+    arrives in the client body is never used — the client only chooses,
+    it does not dictate the design.
 
-    Devuelve `(body, letterhead_version_id, resolved_version|None)`; la
-    tercera posición es no-nula solo cuando hubo un cambio real, para que el
-    caller pueda auditarlo.
+    Returns `(body, letterhead_version_id, resolved_version|None)`; the
+    third position is non-null only when a real change happened, so the
+    caller can audit it.
     """
-    # Sin petición explícita, o si es exactamente el membrete que la versión
-    # ya tiene, esto es un guardado de contenido normal: carry-forward puro.
+    # No explicit request, or it is exactly the letterhead the version
+    # already has: this is a normal content save — pure carry-forward.
     if requested_letterhead_version_id is None:
         return carried_body, carried_letterhead_version_id, None
     if str(requested_letterhead_version_id) == str(carried_letterhead_version_id or ""):
         return carried_body, carried_letterhead_version_id, None
 
-    # Un reporte legacy (o V2 sin snapshot) no tiene bloque `presentation`
-    # que sustituir; cambiar el membrete ahí no significa nada y se ignora
-    # en silencio, exactamente como antes de esta remediación.
+    # A legacy report (or V2 without a snapshot) has no `presentation`
+    # block to replace; changing the letterhead there means nothing and is
+    # ignored silently, exactly as before this remediation.
     if carried_schema_version != 2:
         return carried_body, carried_letterhead_version_id, None
 
@@ -763,7 +763,7 @@ def _apply_draft_letterhead_change(
             f"puede cambiarse (estado actual: {report.status}).",
         )
 
-    # --- Validación del membrete solicitado -------------------------------
+    # --- Validation of the requested letterhead ---------------------------
     try:
         resolved = resolve_effective_letterhead_version(
             session,
@@ -771,21 +771,21 @@ def _apply_draft_letterhead_change(
             letterhead_version_id=requested_letterhead_version_id,
         )
     except LetterheadNotFoundError as exc:
-        # Incluye el caso cross-tenant: el resolver no distingue "no existe"
-        # de "es de otro laboratorio", justamente para no confirmar ids
-        # ajenos.
+        # Includes the cross-tenant case: the resolver does not distinguish
+        # "does not exist" from "belongs to another laboratory", precisely
+        # so foreign ids are never confirmed.
         raise HTTPException(404, exc.message) from None
     except (LetterheadArchivedError, LetterheadConfigurationError) as exc:
         raise HTTPException(409, exc.message) from None
 
-    if resolved is None:  # pragma: no cover - la rama explícita nunca da None
+    if resolved is None:  # pragma: no cover - explicit branch never returns None
         raise HTTPException(404, "Letterhead version not found")
 
-    # `resolve_effective_letterhead_version` valida tenant, archivado y
-    # configuración de la VERSIÓN, pero por la rama explícita no comprueba
-    # que el membrete lógico siga activo. Un membrete desactivado sigue
-    # siendo legible para los reportes históricos que ya lo usan, pero no
-    # debe poder elegirse de nuevo.
+    # `resolve_effective_letterhead_version` validates tenant, archived, and
+    # VERSION configuration, but the explicit branch does not check that
+    # the logical letterhead is still active. A deactivated letterhead
+    # remains readable for historical reports that already use it, but
+    # must not be selectable again.
     if not resolved.letterhead.is_active:
         raise HTTPException(
             409,
@@ -799,10 +799,10 @@ def _apply_draft_letterhead_change(
             f"(la versión indicada está en estado {resolved.version.status}).",
         )
 
-    # --- Sustitución quirúrgica de `presentation` -------------------------
+    # --- Surgical replacement of `presentation` ---------------------------
     if not isinstance(carried_body, dict):
-        # Un guardado sin cuerpo JSON no puede reescribir el snapshot; se
-        # cambia solo el vínculo administrativo, que es lo único que hay.
+        # A save without a JSON body cannot rewrite the snapshot; only the
+        # administrative link is changed, which is all there is.
         return carried_body, str(resolved.version.id), resolved.version
 
     snapshot = carried_body.get("rendering_snapshot")
@@ -811,8 +811,9 @@ def _apply_draft_letterhead_change(
 
     new_body = dict(carried_body)
     new_snapshot = dict(snapshot)
-    # `template` se conserva byte a byte: el membrete es presentación, la
-    # plantilla clínica es otra cosa (separación de la primera remediación).
+    # `template` is preserved byte-for-byte: letterhead is presentation,
+    # the clinical template is something else (separation from the first
+    # remediation).
     new_snapshot["presentation"] = resolved.presentation.model_dump(mode="json")
     new_body["rendering_snapshot"] = new_snapshot
 
@@ -852,7 +853,7 @@ def create_report_new_version(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
-    # Céluma 1.3 Fase 2, Bloque B, Historia B9: a published (or retracted)
+    # Céluma 1.3 Phase 2, Block B, Story B9: a published (or retracted)
     # report's content/template/branding is frozen. This moves the
     # protection from the frontend (which already disables the relevant
     # buttons) into the API itself — see phase-2-block-b-architecture-decision.md.
@@ -875,13 +876,13 @@ def create_report_new_version(
         carried_letterhead_version_id,
     ) = _carry_forward_v2_metadata(current_version, report_data.report, session)
 
-    # Quinta remediación post-Fase 2 (Observación A): el guardado normal de
-    # un DRAFT acepta ahora `letterhead_version_id`. Se eligió extender este
-    # endpoint en vez de crear uno nuevo (brief §5, "opción preferida")
-    # porque el cambio de membrete SIEMPRE viaja junto al contenido que el
-    # usuario tiene en pantalla: un endpoint aparte obligaría a dos
-    # llamadas no atómicas y abriría la puerta a guardar el membrete nuevo
-    # con el contenido viejo. Ver remediation-5-architecture-decision.md.
+    # Fifth post-Phase-2 remediation (Observation A): a normal DRAFT save
+    # now accepts `letterhead_version_id`. Extending this endpoint was
+    # preferred over creating a new one (brief §5, "preferred option")
+    # because the letterhead change ALWAYS travels with the content the
+    # user has on screen: a separate endpoint would force two non-atomic
+    # calls and open the door to saving the new letterhead with the old
+    # content. See remediation-5-architecture-decision.md.
     (
         carried_report_body,
         carried_letterhead_version_id,
@@ -971,10 +972,10 @@ def create_report_new_version(
     )
     session.add(version_event)
 
-    # Quinta remediación (§3.4.8): un cambio de membrete en DRAFT queda
-    # auditado por separado del guardado de contenido — es una decisión
-    # administrativa sobre cómo se va a ver el documento oficial, no una
-    # edición clínica más.
+    # Fifth remediation (§3.4.8): a DRAFT letterhead change is audited
+    # separately from the content save — it is an administrative decision
+    # about how the official document will look, not just another clinical
+    # edit.
     if changed_letterhead_version is not None:
         _create_audit_log(
             session=session,
@@ -1194,8 +1195,9 @@ def create_template(
     session.commit()
     session.refresh(template)
 
-    # Segunda remediación post-Fase 2 (UX): crea y activa la primera
-    # revisión clínica interna de una vez, si ya hay un membrete resoluble.
+    # Second post-Phase-2 remediation (UX): create and activate the first
+    # internal clinical revision at once, if a letterhead is already
+    # resolvable.
     snapshot_and_activate_template_version(session, template, user.id)
 
     logger.info(
@@ -1244,7 +1246,7 @@ def update_template(
         flag_modified(template, "template_json")
     if template_data.is_active is not None:
         template.is_active = template_data.is_active
-    # Post-Fase-2 remediation: unlike the fields above, an explicit null is
+    # Post-Phase-2 remediation: unlike the fields above, an explicit null is
     # meaningful here ("no preference, use the tenant default") — so this
     # checks `model_fields_set` instead of `is not None`.
     if "preferred_letterhead_version_id" in template_data.model_fields_set:
@@ -1263,10 +1265,10 @@ def update_template(
                 )
         template.preferred_letterhead_version_id = new_pref
 
-    # Segunda remediación post-Fase 2 (UX): el campo que la app escribe
-    # desde ahora es el membrete lógico, no una versión concreta. Mismo
-    # patrón `model_fields_set` que el campo legado de arriba: un `null`
-    # explícito limpia la preferencia (cae al default del tenant).
+    # Second post-Phase-2 remediation (UX): the field the app writes from
+    # now on is the logical letterhead, not a concrete version. Same
+    # `model_fields_set` pattern as the legacy field above: an explicit
+    # `null` clears the preference (falls back to the tenant default).
     if "preferred_letterhead_id" in template_data.model_fields_set:
         new_letterhead_pref = template_data.preferred_letterhead_id
         if new_letterhead_pref is not None:
@@ -1282,12 +1284,12 @@ def update_template(
     session.commit()
     session.refresh(template)
 
-    # Segunda remediación post-Fase 2 (UX): re-snapshotea/activa la revisión
-    # clínica interna solo si `template_json` cambió (hash-diff interno).
-    # Un cambio de `preferred_letterhead_id` por sí solo no dispara una
-    # revisión nueva: el membrete se resuelve en fresco en cada creación de
-    # reporte (resolve_effective_letterhead_version), nunca desde la
-    # `presentation` embebida en esta versión — ver
+    # Second post-Phase-2 remediation (UX): re-snapshot/activate the
+    # internal clinical revision only if `template_json` changed (internal
+    # hash-diff). A `preferred_letterhead_id` change alone does not trigger
+    # a new revision: the letterhead is resolved fresh on every report
+    # creation (resolve_effective_letterhead_version), never from the
+    # `presentation` embedded in this version — see
     # report-letterhead-selection-ux.md.
     snapshot_and_activate_template_version(session, template, user.id)
 
@@ -1336,7 +1338,7 @@ def delete_template(
         raise HTTPException(403, "Template does not belong to your tenant")
     
     if hard_delete:
-        # Céluma 1.3 Fase 2, Bloque B: a template with published versions can
+        # Céluma 1.3 Phase 2, Block B: a template with published versions can
         # never be hard-deleted — those versions may still be referenced by
         # report_version rows and must remain reconstructible. Soft-delete
         # (deactivate) instead. The FK itself already blocks this at the DB
@@ -1386,7 +1388,7 @@ def delete_template(
 
 
 # ============================================================================
-# Report Template Version Endpoints (append-only, immutable) — Bloque B
+# Report Template Version Endpoints (append-only, immutable) — Block B
 #
 # These publish/activate/archive immutable snapshots of a template's
 # rendering configuration for administration and audit. They are NEVER
@@ -1500,7 +1502,7 @@ def create_template_version(
         logo_object = session.get(StorageObject, logo_storage_id)
         if not logo_object:
             raise HTTPException(400, "logo_storage_id does not reference an existing object")
-        # Céluma 1.3 Fase 2, Bloque C, Historia C1: a logo referenced by a
+        # Céluma 1.3 Phase 2, Block C, Story C1: a logo referenced by a
         # published template version must be explicitly owned by the same
         # tenant that publishes it. `StorageObject.tenant_id` is nullable
         # (most objects predate this scoping and are tenant-scoped
@@ -1656,7 +1658,7 @@ def archive_template_version(
 
 
 # ============================================================================
-# Report Template Logo Upload — Bloque D, Historia D2
+# Report Template Logo Upload — Block D, Story D2
 #
 # Uploads a logo image to be referenced (by StorageObject id) as
 # `presentation.header.logo_storage_id` when publishing a
@@ -1688,7 +1690,7 @@ def upload_template_logo(
     separate, explicit step (create_template_version).
 
     Validation/upload delegated to `ManagedTenantImageService`, shared with
-    the letterhead-logo endpoint and the tenant-logo endpoint (post-Fase-2
+    the letterhead-logo endpoint and the tenant-logo endpoint (post-Phase-2
     remediation R5/R9 — see managed-logo-upload-contract.md).
     """
     _require(user.id, "reports:manage_templates", session)
@@ -1732,7 +1734,7 @@ def _resolve_report_resources(
     report_json: dict | None,
     session: Session,
 ) -> ReportResolvedResources | None:
-    """Céluma 1.3 Fase 2, Bloque C, Historia C1.
+    """Céluma 1.3 Phase 2, Block C, Story C1.
 
     Resolves ephemeral, request-scoped resources referenced by a V2 report's
     `rendering_snapshot` (currently: `presentation.header.logo_storage_id`)
@@ -1918,11 +1920,11 @@ def get_pdf_of_latest_version(
 ):
     """Return a presigned URL to download the PDF for the newest report version (requires reports:read).
 
-    Quinta remediación post-Fase 2: comparte `authorize_report_read_access`
-    con `/full` — ver report-read-authorization-contract.md. El check de
-    `Order.billed_lock` que vivía aquí se retiró: es la compuerta de
-    entrega a terceros y sigue vigente en `portal.py`, no en el flujo
-    interno del laboratorio.
+    Fifth post-Phase-2 remediation: shares `authorize_report_read_access`
+    with `/full` — see report-read-authorization-contract.md. The
+    `Order.billed_lock` check that lived here was removed: it is the
+    third-party delivery gate and remains in force in `portal.py`, not in
+    the internal laboratory flow.
     """
     report = authorize_report_read_access(session, ctx, user, report_id)
     order = session.get(Order, report.order_id)
@@ -2051,7 +2053,7 @@ def upload_pdf_to_specific_version(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
-    # Céluma 1.3 Fase 2, Bloque B, Historia B9: never silently replace the
+    # Céluma 1.3 Phase 2, Block B, Story B9: never silently replace the
     # PDF of a published/retracted report.
     if report.status in _IMMUTABLE_REPORT_STATUSES:
         raise HTTPException(
@@ -2098,7 +2100,7 @@ def upload_pdf_to_specific_version(
     session.flush()
 
     version.pdf_storage_id = storage.id
-    # Céluma 1.3 Fase 2, Bloque E: this manual endpoint bypasses
+    # Céluma 1.3 Phase 2, Block E: this manual endpoint bypasses
     # ReportPdfGenerationService entirely (no render, no validation, no
     # hash). Any generation metadata a prior official generation left behind
     # must never keep claiming READY for bytes that were never validated —
@@ -2151,7 +2153,7 @@ def upload_pdf_to_latest_version(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
-    # Céluma 1.3 Fase 2, Bloque B, Historia B9: never silently replace the
+    # Céluma 1.3 Phase 2, Block B, Story B9: never silently replace the
     # PDF of a published/retracted report.
     if report.status in _IMMUTABLE_REPORT_STATUSES:
         raise HTTPException(
@@ -2230,14 +2232,14 @@ def get_pdf_of_specific_version(
 ):
     """Return a presigned URL to download the PDF for a specific report version (requires reports:read).
 
-    Quinta remediación post-Fase 2 — ESTE es el endpoint del `403` real
-    reportado. Ahora comparte literalmente la misma función de autorización
-    que `GET /{id}/full`, así que "puedo abrir el reporte pero no puedo
-    descargar su PDF" deja de ser representable. El tenant cruzado sigue
-    siendo 404 (tercera remediación, bug 4), y el check de
-    `Order.billed_lock` — la causa raíz — se retiró de aquí: sigue vigente
-    en `portal.py`, que es donde el laboratorio realmente retiene un
-    reporte hasta que le paguen. Ver official-pdf-download-root-cause.md.
+    Fifth post-Phase-2 remediation — THIS is the endpoint of the real
+    reported `403`. It now literally shares the same authorization
+    function as `GET /{id}/full`, so "I can open the report but cannot
+    download its PDF" is no longer representable. Cross-tenant remains
+    404 (third remediation, bug 4), and the `Order.billed_lock` check —
+    the root cause — was removed from here: it remains in force in
+    `portal.py`, which is where the laboratory actually holds a report
+    until it is paid for. See official-pdf-download-root-cause.md.
     """
     report = authorize_report_read_access(session, ctx, user, report_id)
     order = session.get(Order, report.order_id)
@@ -2297,22 +2299,22 @@ def _create_audit_log(
 
 
 def _validate_letterhead_before_review(session: Session, report: Report) -> None:
-    """Quinta remediación post-Fase 2 (§3.5) — comprobaciones justo antes de
-    congelar el membrete al enviar a revisión.
+    """Fifth post-Phase-2 remediation (§3.5) — checks just before freezing
+    the letterhead when submitting for review.
 
-    Deliberadamente NO exige `letterhead_version_id`. Existen versiones V2
-    históricas anteriores a la primera remediación cuyo `presentation` se
-    congeló directamente desde la versión de plantilla, sin vínculo
-    administrativo; ese campo nunca se rellenó hacia atrás (ver
-    `ReportDetailResponse.letterhead_version_id`). Exigirlo aquí dejaría
-    esos borradores imposibles de enviar a revisión, que es exactamente el
-    tipo de regresión que §14 prohíbe. Lo que sí se exige es lo que de
-    verdad determina cómo se imprimirá el documento oficial: que la versión
-    congelada tenga un bloque `presentation` válido, y que — si hay vínculo
-    administrativo — siga apuntando a un membrete de este tenant.
+    Deliberately does NOT require `letterhead_version_id`. There are
+    historical V2 versions from before the first remediation whose
+    `presentation` was frozen directly from the template version, with no
+    administrative link; that field was never backfilled (see
+    `ReportDetailResponse.letterhead_version_id`). Requiring it here would
+    leave those drafts impossible to submit for review, which is exactly
+    the kind of regression §14 forbids. What IS required is what truly
+    determines how the official document will print: that the frozen
+    version has a valid `presentation` block, and that — if there is an
+    administrative link — it still points at a letterhead of this tenant.
 
-    Los reportes legacy (schema_version != 2) no tienen `presentation` y se
-    omiten por completo: su rama no cambia en esta remediación.
+    Legacy reports (schema_version != 2) have no `presentation` and are
+    skipped entirely: their branch does not change in this remediation.
     """
     current_version = session.exec(
         select(ReportVersion).where(
@@ -2323,7 +2325,7 @@ def _validate_letterhead_before_review(session: Session, report: Report) -> None
     if current_version is None or current_version.schema_version != 2:
         return
 
-    # 1. El snapshot congelado debe traer una presentación válida.
+    # 1. The frozen snapshot must carry a valid presentation.
     presentation = None
     if current_version.json_storage_id:
         storage = session.get(StorageObject, current_version.json_storage_id)
@@ -2342,10 +2344,10 @@ def _validate_letterhead_before_review(session: Session, report: Report) -> None
                         "report_version_id": str(current_version.id),
                     },
                 )
-                # Un fallo de red/almacenamiento no es evidencia de que el
-                # reporte esté mal configurado: no se bloquea el envío por
-                # ello (habría sido convertir una incidencia transitoria en
-                # un error de negocio).
+                # A network/storage failure is not evidence that the report
+                # is misconfigured: submission is not blocked for it (that
+                # would have turned a transient incident into a business
+                # error).
                 return
 
     if presentation is None:
@@ -2364,7 +2366,7 @@ def _validate_letterhead_before_review(session: Session, report: Report) -> None
             "enviarlo a revisión.",
         ) from None
 
-    # 2. Si hay vínculo administrativo, debe seguir siendo de este tenant.
+    # 2. If there is an administrative link, it must still belong to this tenant.
     if current_version.letterhead_version_id:
         lh_version = session.get(
             ReportLetterheadVersion, current_version.letterhead_version_id
@@ -2397,11 +2399,10 @@ def submit_report(
     if report.status != ReportStatus.DRAFT:
         raise HTTPException(400, f"Cannot submit report in {report.status} status")
 
-    # Quinta remediación post-Fase 2 (§3.5): enviar a revisión es el momento
-    # en que el membrete se CONGELA, así que es también el último momento
-    # en que se puede comprobar que lo que se congela es coherente. A partir
-    # de aquí ninguna ruta permite cambiarlo (ver
-    # letterhead-freeze-at-review-contract.md).
+    # Fifth post-Phase-2 remediation (§3.5): submit-for-review is the
+    # moment the letterhead is FROZEN, so it is also the last moment to
+    # check that what is being frozen is coherent. From here on no route
+    # allows changing it (see letterhead-freeze-at-review-contract.md).
     _validate_letterhead_before_review(session, report)
 
     # Get all reviewers for this order (regardless of current status)
@@ -2764,7 +2765,7 @@ def sign_report(
     if not current_version:
         raise HTTPException(404, "No current version found for this report")
 
-    # Céluma 1.3 Fase 2, Bloque E: a report cannot be published without a
+    # Céluma 1.3 Phase 2, Block E: a report cannot be published without a
     # validated, hashed, persisted official PDF for the version being
     # published — see pdf-publication-workflow.md. Generation is a separate,
     # explicit step (POST .../generate-pdf); signing never generates one
@@ -2777,18 +2778,18 @@ def sign_report(
             "Generate the official PDF before publishing.",
         )
 
-    # Segunda remediación post-Fase 2 (UX): mismo claim que
-    # sign_and_publish_report usa, como defensa en profundidad contra un
-    # doble-submit directo a este endpoint (el flujo principal de la UI ya
-    # no lo llama, pero sigue existiendo para compatibilidad). No se
-    # mantiene el lock durante la llamada — se libera al hacer commit.
+    # Second post-Phase-2 remediation (UX): same claim that
+    # sign_and_publish_report uses, as defense in depth against a direct
+    # double-submit to this endpoint (the main UI flow no longer calls it,
+    # but it remains for compatibility). The lock is not held during the
+    # call — it is released on commit.
     try:
         claim_publish(session, current_version, user.id)
     except ReportPublishAlreadyInProgressError as exc:
         raise HTTPException(409, exc.message) from None
 
-    # Si el reporte requiere firma digital, embebe la URL pública de la
-    # firma del usuario en el JSON persistido — ver report_publishing.py.
+    # If the report requires a digital signature, embed the user's public
+    # signature URL in the persisted JSON — see report_publishing.py.
     try:
         embed_signature_metadata_if_required(session, report_id, current_version, user)
     except ReportPublishError as exc:
@@ -2881,30 +2882,30 @@ def sign_and_publish_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Segunda remediación post-Fase 2 (UX): "Firmar y publicar" como una
-    sola acción de producto (requiere reports:sign + rol reviewer),
-    reemplazando el flujo de dos botones "Generar PDF oficial" -> "Firmar y
-    Publicar" en la UI normal.
+    """Second post-Phase-2 remediation (UX): "Sign and publish" as a
+    single product action (requires reports:sign + reviewer role),
+    replacing the two-button flow "Generate official PDF" -> "Sign and
+    Publish" in the normal UI.
 
-    Orquesta, bajo un claim que serializa intentos concurrentes
-    (`publish_started_at`/`publish_started_by` en `ReportVersion`, mismo
-    patrón de staleness que la generación de PDF):
-      1. Embebe la firma digital en el JSON persistido SI el reporte la
-         requiere (antes de generar el PDF, no después — ver
-         signed-pdf-publication-workflow.md sobre por qué el orden
-         anterior era un bug conceptual: el PDF "oficial" nunca reflejaba
-         el estado realmente firmado).
-      2. Genera (forzando regeneración: `force=True`) el PDF oficial
-         reflejando ya ese estado firmado.
-      3. Si ambos pasos tienen éxito, fija signed_by/signed_at y
-         report.status=PUBLISHED atómicamente. Si algo falla, el claim se
-         libera, el reporte permanece APPROVED, y la operación es
-         reintentable — nunca queda un reporte firmado sin publicar, ni un
-         PDF oficial sin la firma.
+    Orchestrates, under a claim that serializes concurrent attempts
+    (`publish_started_at`/`publish_started_by` on `ReportVersion`, same
+    staleness pattern as PDF generation):
+      1. Embeds the digital signature in the persisted JSON IF the report
+         requires it (before generating the PDF, not after — see
+         signed-pdf-publication-workflow.md on why the previous order was
+         a conceptual bug: the "official" PDF never reflected the truly
+         signed state).
+      2. Generates (forcing regeneration: `force=True`) the official PDF
+         already reflecting that signed state.
+      3. If both steps succeed, sets signed_by/signed_at and
+         report.status=PUBLISHED atomically. If anything fails, the claim
+         is released, the report stays APPROVED, and the operation is
+         retryable — never a signed-but-unpublished report, nor an
+         official PDF without the signature.
 
-    `POST .../generate-pdf` y `POST .../sign` (arriba) se mantienen intactos
-    para compatibilidad/uso interno — este endpoint es el único que la UI
-    principal invoca.
+    `POST .../generate-pdf` and `POST .../sign` (above) remain intact for
+    compatibility/internal use — this endpoint is the only one the main
+    UI invokes.
     """
     if not has_permission(user.id, "reports:sign", session):
         raise HTTPException(403, "Permission required: reports:sign")
@@ -3027,9 +3028,9 @@ def sign_and_publish_report(
         pdf_size_bytes=version.pdf_size_bytes,
         pdf_page_count=version.pdf_page_count,
         pdf_generated_at=version.pdf_generated_at,
-        # Quinta remediación: la versión EXACTA cuyo PDF oficial acaba de
-        # generarse, para que la UI no tenga que derivarla de un `/full`
-        # refrescado. Ver sign-and-publish-response-contract.md.
+        # Fifth remediation: the EXACT version whose official PDF was just
+        # generated, so the UI does not have to derive it from a refreshed
+        # `/full`. See sign-and-publish-response-contract.md.
         report_version_id=str(version.id),
         version_no=version.version_no,
         official_pdf_available=bool(

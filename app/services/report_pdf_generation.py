@@ -1,7 +1,7 @@
-"""Céluma 1.3 Fase 2, Bloque E: official PDF generation service.
+"""Céluma 1.3 Phase 2, Block E: official PDF generation service.
 
-Owns the whole reporte-aprobado -> PDF generado -> validado -> almacenado ->
-hasheado -> asociado-a-ReportVersion pipeline. See
+Owns the whole approved-report -> PDF generated -> validated -> stored ->
+hashed -> associated-to-ReportVersion pipeline. See
 pdf-generation-contract.md and pdf-storage-integrity-contract.md.
 """
 from __future__ import annotations
@@ -71,7 +71,7 @@ class ReportPdfGenerationService:
         rejection or failure; the caller (the HTTP endpoint) maps those to
         the appropriate status code.
 
-        `force=True` (segunda remediación post-Fase 2, UX) bypasses the
+        `force=True` (second post-Phase-2 remediation, UX) bypasses the
         READY short-circuit below — used exclusively by
         `report_publishing.sign_and_publish`, which may need to embed
         signature metadata into the report's JSON body immediately before
@@ -83,7 +83,7 @@ class ReportPdfGenerationService:
         """
         if report.status in _IMMUTABLE_REPORT_STATUSES:
             # Checked before the READY idempotency short-circuit below,
-            # deliberately: "Rechazar si está PUBLISHED con PDF listo" (E7) —
+            # deliberately: "Reject if PUBLISHED with ready PDF" (E7) —
             # a published report's PDF must never be touched again by this
             # endpoint, not even a no-op re-confirmation. Idempotency (below)
             # only applies pre-publish (e.g. a double-click on "Generar PDF"

@@ -1,5 +1,5 @@
 """HTTP integration tests for the letterhead logo upload endpoint —
-post-Fase-2 remediation, R6/R15. Mirrors test_report_template_logo_upload.py
+post-Phase-2 remediation, R6/R15. Mirrors test_report_template_logo_upload.py
 since both now share ManagedTenantImageService; this file focuses on what's
 specific to the letterhead endpoint (route, key prefix, tenant isolation)
 rather than re-proving every validation rule already covered there."""
@@ -37,7 +37,7 @@ class TestUploadLetterheadLogo:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["content_type"] == "image/png"
-        # Post-Fase-2 remediation: confirms the URL resolution path (which
+        # Post-Phase-2 remediation: confirms the URL resolution path (which
         # historically was hypothesized-but-not-verified to be broken for
         # BLOCK_ALL buckets) — in tests this is FakeS3Service.object_public_url,
         # proving the letterhead endpoint uses the same resolution call as
@@ -80,7 +80,7 @@ class TestUploadLetterheadLogo:
 
 
 class TestUploadTenantLogo:
-    """Post-Fase-2 remediation: tenant-logo upload had no dedicated test
+    """Post-Phase-2 remediation: tenant-logo upload had no dedicated test
     file before this remediation (confirmed during inventory) — it now
     shares ManagedTenantImageService with the same validation strength as
     template/letterhead logos, closing that gap."""

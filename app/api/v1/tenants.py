@@ -25,12 +25,12 @@ class TenantUpdate(BaseModel):
     name: Optional[str] = None
     legal_name: Optional[str] = None
     tax_id: Optional[str] = None
-    # Céluma 1.3 Fase 2, Bloque D, Historia D9: exposed here rather than a
+    # Céluma 1.3 Phase 2, Block D, Story D9: exposed here rather than a
     # dedicated endpoint, following the same "reuse the tenant update
     # pattern" recommendation as the other tenant-wide settings above.
     # Reuses the same admin:manage_tenant gate as the rest of this endpoint
     # (see block-c-dependencies.md — this was the open question it left for
-    # Bloque D: reuse admin:manage_tenant vs. a new permission).
+    # Block D: reuse admin:manage_tenant vs. a new permission).
     reports_v2_enabled: Optional[bool] = None
 
 @router.get("/")
@@ -162,7 +162,7 @@ def update_tenant(
     )
 
     if reports_v2_flag_changed:
-        # Céluma 1.3 Fase 2, Bloque D, Historia D9: separate audit line — this
+        # Céluma 1.3 Phase 2, Block D, Story D9: separate audit line — this
         # flag controls creation of new V2 reports (never reading/rendering
         # existing ones), so a distinct, greppable event is worth having
         # beyond the generic "tenant.updated" line above.

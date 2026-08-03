@@ -1,26 +1,26 @@
-"""Segunda remediación post-Fase 2 (UX): "Firmar y publicar" como una sola
-acción de producto — ver signed-pdf-publication-workflow.md.
+"""Second post-Phase-2 remediation (UX): "Sign and publish" as a single
+product action — see signed-pdf-publication-workflow.md.
 
-Antes de esta remediación, "Generar PDF oficial" y "Firmar y Publicar" eran
-dos botones/dos llamadas de red separadas, y la firma digital (cuando el
-reporte la requiere) se embebía en el JSON DESPUÉS de que el PDF ya se
-hubiera generado — es decir, el PDF "oficial" nunca reflejaba el estado
-realmente firmado. Este módulo corrige ambos problemas:
+Before this remediation, "Generate official PDF" and "Sign and Publish"
+were two buttons/two separate network calls, and the digital signature
+(when the report requires it) was embedded in the JSON AFTER the PDF had
+already been generated — i.e. the "official" PDF never reflected the
+truly signed state. This module fixes both problems:
 
-1. `embed_signature_metadata_if_required` se ejecuta ANTES de generar el
-   PDF (no después), para que la firma sea parte del contenido renderizado.
-2. `claim_publish`/`clear_publish_claim`/`finalize_publish` implementan un
-   claim ligero (columnas `publish_started_at`/`publish_started_by` en
-   `ReportVersion`) que serializa intentos concurrentes de firmar-y-publicar
-   sin mantener un row-lock de base de datos durante la generación lenta y
-   dirigida por navegador (Playwright/Chromium) — mismo patrón de
-   staleness que `ReportPdfGenerationService` ya usa para
+1. `embed_signature_metadata_if_required` runs BEFORE generating the PDF
+   (not after), so the signature is part of the rendered content.
+2. `claim_publish`/`clear_publish_claim`/`finalize_publish` implement a
+   light claim (`publish_started_at`/`publish_started_by` columns on
+   `ReportVersion`) that serializes concurrent sign-and-publish attempts
+   without holding a DB row-lock during slow browser-driven generation
+   (Playwright/Chromium) — same staleness pattern
+   `ReportPdfGenerationService` already uses for
    `pdf_generation_status == GENERATING`.
 
-No se elimina `sign_report` (`POST /{report_id}/sign`) ni `generate-pdf`
-(`POST .../generate-pdf`): siguen existiendo para compatibilidad y uso
-interno, pero el flujo principal de la UI pasa a usar exclusivamente
-`POST /{report_id}/sign-and-publish`, que orquesta ambos.
+`sign_report` (`POST /{report_id}/sign`) and `generate-pdf`
+(`POST .../generate-pdf`) are not removed: they remain for compatibility
+and internal use, but the main UI flow now exclusively uses
+`POST /{report_id}/sign-and-publish`, which orchestrates both.
 """
 from __future__ import annotations
 
@@ -67,16 +67,16 @@ class ReportPublishConflictError(ReportPublishError):
 def embed_signature_metadata_if_required(
     session: Session, report_id: str, current_version: ReportVersion, user: AppUser
 ) -> None:
-    """Si el reporte requiere firma digital, embebe la URL pública de la
-    firma del usuario en `signatureMetadata` dentro del JSON persistido —
-    ANTES de que se genere el PDF oficial, para que el PDF resultante
-    refleje el estado ya firmado. No-op si `require_digital_signature` es
-    falso o si el reporte no tiene JSON persistido.
+    """If the report requires a digital signature, embed the user's public
+    signature URL in `signatureMetadata` inside the persisted JSON —
+    BEFORE the official PDF is generated, so the resulting PDF reflects
+    the already-signed state. No-op if `require_digital_signature` is
+    false or the report has no persisted JSON.
 
-    Extraído verbatim de la lógica que antes vivía únicamente en
-    `sign_report` (donde corría DESPUÉS de generar el PDF — el bug
-    conceptual que esta remediación corrige). Ambos endpoints
-    (`sign_report` y `sign_and_publish_report`) lo reutilizan.
+    Extracted verbatim from the logic that previously lived only in
+    `sign_report` (where it ran AFTER generating the PDF — the conceptual
+    bug this remediation fixes). Both endpoints (`sign_report` and
+    `sign_and_publish_report`) reuse it.
     """
     if current_version.json_storage_id is None:
         return

@@ -1,4 +1,4 @@
-"""Model tests for `ReportTemplateVersion` (Céluma 1.3, Fase 2, Bloque B, Historia B2)."""
+"""Model tests for `ReportTemplateVersion` (Céluma 1.3, Phase 2, Block B, Story B2)."""
 import uuid
 
 from app.models.report_template_version import ReportTemplateVersion, ReportTemplateVersionStatus

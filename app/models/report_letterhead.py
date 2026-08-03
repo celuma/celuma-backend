@@ -7,7 +7,7 @@ from .base import BaseModel, TimestampMixin, TenantMixin
 class ReportLetterhead(BaseModel, TimestampMixin, TenantMixin, table=True):
     """Logical identity of a shared, tenant-owned letterhead ("membrete").
 
-    Post-Fase-2 remediation: separates page presentation (logo, header,
+    Post-Phase-2 remediation: separates page presentation (logo, header,
     footer, margins, color, institutional signer) from clinical structure
     (`ReportTemplate`). A letterhead is a mutable shell (name/description/
     default flag) — analogous to `ReportTemplate` — never the presentation

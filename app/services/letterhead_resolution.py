@@ -1,36 +1,37 @@
-"""Resolución determinista del membrete efectivo — tercera remediación
-post-Fase 2.
+"""Deterministic effective-letterhead resolution — third post-Phase-2
+remediation.
 
-Antes de esta remediación la resolución vivía en
-`resolve_fallback_letterhead_version`, que elegía la versión con
-`.first()` sin `ORDER BY` ni invariantes: con datos ligeramente
-inconsistentes (dos versiones ACTIVE por una restauración manual, un
-membrete default sin versión activa, una preferencia apuntando a otro
-tenant) devolvía una versión arbitraria o `None` en silencio. De ahí el
-síntoma "marco un membrete como predeterminado y a veces sale otro".
+Before this remediation, resolution lived in
+`resolve_fallback_letterhead_version`, which picked a version with
+`.first()` and no `ORDER BY` or invariants: with slightly inconsistent
+data (two ACTIVE versions from a manual restore, a default letterhead
+with no active version, a preference pointing at another tenant) it
+returned an arbitrary version or silent `None`. That produced the
+symptom "I mark a letterhead as default and sometimes another one
+comes out".
 
-`resolve_effective_letterhead_version` es ahora el ÚNICO punto de verdad;
-lo usan la creación de reportes, `GET /study-types/{id}/report-defaults`,
-el auto-versionado de plantillas y cualquier flujo futuro. Devuelve
-siempre de dónde salió el membrete (`resolution_source`), lo que hace
-diagnosticable el resultado y comprobable en pruebas.
+`resolve_effective_letterhead_version` is now the ONLY source of truth;
+it is used by report creation, `GET /study-types/{id}/report-defaults`,
+template auto-versioning, and any future flow. It always returns where
+the letterhead came from (`resolution_source`), which makes the result
+diagnosable and assertable in tests.
 
-Orden de precedencia (ver deterministic-letterhead-resolution-contract.md):
+Precedence order (see deterministic-letterhead-resolution-contract.md):
 
-    1. EXPLICIT           — `letterhead_version_id` o `letterhead_id` que
-                            venga en la request.
-    2. TEMPLATE_PREFERRED — `template.preferred_letterhead_id`, o el campo
-                            legado `preferred_letterhead_version_id` para
-                            filas antiguas.
-    3. TENANT_DEFAULT     — el único `ReportLetterhead.is_default=true`
-                            del tenant.
-    4. None               — nada resoluble; el caller BLOQUEA la creación
-                            V2 (nunca cae a Legacy).
+    1. EXPLICIT           — `letterhead_version_id` or `letterhead_id`
+                            from the request.
+    2. TEMPLATE_PREFERRED — `template.preferred_letterhead_id`, or the
+                            legacy `preferred_letterhead_version_id`
+                            field for old rows.
+    3. TENANT_DEFAULT     — the single `ReportLetterhead.is_default=true`
+                            for the tenant.
+    4. None               — nothing resolvable; the caller BLOCKS V2
+                            creation (never falls back to Legacy).
 
-Invariantes verificadas antes de devolver nada: mismo tenant, membrete
-activo, exactamente una versión ACTIVE, configuración válida. Una
-violación levanta `LetterheadConfigurationError` — nunca se elige
-arbitrariamente entre candidatos.
+Invariants checked before returning anything: same tenant, active
+letterhead, exactly one ACTIVE version, valid configuration. A
+violation raises `LetterheadConfigurationError` — candidates are never
+picked arbitrarily.
 """
 from __future__ import annotations
 
@@ -54,9 +55,9 @@ logger = logging.getLogger(__name__)
 
 
 class LetterheadResolutionSource(str, Enum):
-    """De dónde salió el membrete resuelto. Se expone en la API (y en la UI
-    en modo administrativo, traducido) para que "¿por qué salió este
-    membrete?" tenga siempre una respuesta."""
+    """Where the resolved letterhead came from. Exposed in the API (and in
+    the UI in admin mode, translated) so "why did this letterhead come
+    out?" always has an answer."""
 
     EXPLICIT = "EXPLICIT"
     TEMPLATE_PREFERRED = "TEMPLATE_PREFERRED"
@@ -64,7 +65,7 @@ class LetterheadResolutionSource(str, Enum):
 
 
 class LetterheadResolutionError(Exception):
-    """Base de los fallos de resolución. `message` es apto para el cliente."""
+    """Base for resolution failures. `message` is safe for the client."""
 
     def __init__(self, message: str):
         super().__init__(message)
@@ -72,28 +73,28 @@ class LetterheadResolutionError(Exception):
 
 
 class LetterheadNotFoundError(LetterheadResolutionError):
-    """Una referencia EXPLÍCITA de la request no existe, es de otro tenant o
-    está archivada. El caller la traduce a 404/409 — jamás se degrada
-    silenciosamente a la cadena de fallback: si el usuario pidió un membrete
-    concreto, usar otro sería peor que fallar."""
+    """An EXPLICIT request reference does not exist, belongs to another
+    tenant, or is archived. The caller maps it to 404/409 — never silently
+    degrade to the fallback chain: if the user asked for a specific
+    letterhead, using another would be worse than failing."""
 
 
 class LetterheadArchivedError(LetterheadResolutionError):
-    """La referencia explícita apunta a una versión archivada. Distinta de
-    "no existe": el recurso está ahí pero fue retirado a propósito, así que
-    el caller responde 409, no 404."""
+    """The explicit reference points at an archived version. Distinct from
+    "does not exist": the resource is there but was deliberately retired,
+    so the caller responds 409, not 404."""
 
 
 class LetterheadConfigurationError(LetterheadResolutionError):
-    """Los datos del tenant son inconsistentes y no existe una respuesta
-    correcta: más de una versión ACTIVE, un membrete default sin ninguna
-    ACTIVE, o una `configuration` que ya no valida contra el contrato. Se
-    falla explícitamente en vez de elegir al azar."""
+    """Tenant data is inconsistent and there is no correct answer: more
+    than one ACTIVE version, a default letterhead with no ACTIVE version,
+    or a `configuration` that no longer validates against the contract.
+    Fail explicitly instead of picking at random."""
 
 
 @dataclass(frozen=True)
 class ResolvedLetterhead:
-    """Todo lo que un caller necesita, resuelto de una vez."""
+    """Everything a caller needs, resolved in one shot."""
 
     letterhead: ReportLetterhead
     version: ReportLetterheadVersion
@@ -110,7 +111,7 @@ class ResolvedLetterhead:
 
 
 # ---------------------------------------------------------------------------
-# Helpers internos
+# Internal helpers
 # ---------------------------------------------------------------------------
 
 def _validated_presentation(
@@ -128,8 +129,8 @@ def _validated_presentation(
 def sole_active_version(
     session: Session, letterhead: ReportLetterhead
 ) -> ReportLetterheadVersion:
-    """La ÚNICA versión ACTIVE del membrete. Nunca `.first()`: si hay cero o
-    más de una, es un error de configuración explícito."""
+    """The ONLY ACTIVE version of the letterhead. Never `.first()`: zero or
+    more than one is an explicit configuration error."""
     actives = session.exec(
         select(ReportLetterheadVersion)
         .where(
@@ -157,10 +158,10 @@ def sole_active_version(
 def _usable_letterhead(
     session: Session, letterhead_id, tenant_id: str
 ) -> Optional[ReportLetterhead]:
-    """El membrete lógico si — y solo si — existe, es de este tenant y está
-    activo. `None` para cualquier otra cosa: una preferencia colgada nunca
-    debe hacer fallar la creación, solo dejar de aplicar (se cae al
-    siguiente escalón de la cadena)."""
+    """The logical letterhead if — and only if — it exists, belongs to this
+    tenant, and is active. `None` for anything else: a dangling preference
+    must never fail creation, only stop applying (fall through to the next
+    step in the chain)."""
     if letterhead_id is None:
         return None
     try:
@@ -191,7 +192,7 @@ def _resolve(
 
 
 # ---------------------------------------------------------------------------
-# Punto de entrada único
+# Single entry point
 # ---------------------------------------------------------------------------
 
 def resolve_effective_letterhead_version(
@@ -202,12 +203,12 @@ def resolve_effective_letterhead_version(
     letterhead_id: Optional[str] = None,
     letterhead_version_id: Optional[str] = None,
 ) -> Optional[ResolvedLetterhead]:
-    """Resuelve el membrete efectivo, o `None` si el tenant no tiene ninguno
-    utilizable (el caller debe bloquear la creación V2, nunca caer a Legacy).
+    """Resolve the effective letterhead, or `None` if the tenant has none
+    usable (the caller must block V2 creation, never fall back to Legacy).
 
-    Levanta `LetterheadNotFoundError` si una referencia explícita de la
-    request no es utilizable, y `LetterheadConfigurationError` si los datos
-    del tenant son inconsistentes.
+    Raises `LetterheadNotFoundError` if an explicit request reference is
+    not usable, and `LetterheadConfigurationError` if tenant data is
+    inconsistent.
     """
     # --- 1. EXPLICIT ------------------------------------------------------
     if letterhead_version_id is not None:
@@ -256,8 +257,8 @@ def resolve_effective_letterhead_version(
                 },
             )
 
-        # Campo legado: solo lectura, para filas anteriores a la segunda
-        # remediación. Nunca lo escribe la app.
+        # Legacy field: read-only, for rows from before the second
+        # remediation. The app never writes it.
         if template.preferred_letterhead_version_id is not None:
             legacy_version = session.get(
                 ReportLetterheadVersion, template.preferred_letterhead_version_id
@@ -295,9 +296,8 @@ def resolve_effective_letterhead_version(
     if defaults:
         default_letterhead = defaults[0]
         if not default_letterhead.is_active:
-            # Estado contradictorio pero recuperable por el usuario: se trata
-            # como "sin default" (V2 bloqueado con motivo accionable), no
-            # como un 500.
+            # Contradictory but user-recoverable state: treat as "no default"
+            # (V2 blocked with an actionable reason), not as a 500.
             logger.warning(
                 "Tenant default letterhead is deactivated — treating as no default",
                 extra={
@@ -308,5 +308,5 @@ def resolve_effective_letterhead_version(
             return None
         return _resolve(session, default_letterhead, LetterheadResolutionSource.TENANT_DEFAULT)
 
-    # --- 4. Nada resoluble ------------------------------------------------
+    # --- 4. Nothing resolvable --------------------------------------------
     return None

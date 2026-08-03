@@ -1,8 +1,8 @@
 """Plain (non-fixture) factory helpers for HTTP integration tests.
 
 Kept intentionally simple — direct SQLModel inserts, not a full factory
-framework — per Céluma1.3-Fase2.md §11 ("No construyas un framework de
-testing innecesariamente complejo").
+framework — per Céluma1.3-Fase2.md §11 ("Do not build an unnecessarily
+complex testing framework").
 """
 import uuid
 from datetime import datetime, timedelta
@@ -20,7 +20,7 @@ from app.models.tenant import Branch, Tenant
 from app.models.user import AppUser
 
 
-# Céluma 1.3 Fase 2, Bloque B, Historia B10: the RBAC catalog (permissions,
+# Céluma 1.3 Phase 2, Block B, Story B10: the RBAC catalog (permissions,
 # system roles, role<->permission links) is real seed data applied by
 # alembic/versions/v1_0_0_initial_schema.py — the HTTP test database is
 # built by running the actual migration chain (see conftest.py), so it is
@@ -107,7 +107,7 @@ def create_storage_object(
 
 
 def valid_presentation(**overrides) -> dict:
-    """A ReportPresentationSnapshotV2-shaped payload — post-Fase-2
+    """A ReportPresentationSnapshotV2-shaped payload — post-Phase-2
     remediation, used as the `configuration` of a
     ReportLetterheadVersionCreate request. Field-for-field the same shape
     as valid_rendering_snapshot()'s `presentation` key, kept separate so
@@ -175,14 +175,14 @@ def create_default_letterhead(
     configuration: Optional[dict] = None,
     name: str = "Membrete predeterminado",
 ) -> tuple["ReportLetterhead", "ReportLetterheadVersion"]:
-    """El membrete predeterminado del tenant, con su versión ACTIVE lista.
+    """The tenant's default letterhead, with its ACTIVE version ready.
 
-    Tercera remediación post-Fase 2: desde que la creación V2 exige un
-    membrete resoluble (y bloquea con 409 si no lo hay — ver
-    deterministic-letterhead-resolution-contract.md), cualquier prueba que
-    cree un reporte V2 necesita esto. `configuration` por defecto reproduce
-    el bloque `presentation` de `valid_rendering_snapshot()`, así que las
-    pruebas que ya afirmaban sobre esa presentación siguen valiendo tal cual.
+    Third post-Phase-2 remediation: since V2 creation requires a resolvable
+    letterhead (and blocks with 409 if there is none — see
+    deterministic-letterhead-resolution-contract.md), any test that creates
+    a V2 report needs this. Default `configuration` reproduces the
+    `presentation` block of `valid_rendering_snapshot()`, so tests that
+    already asserted on that presentation keep holding as-is.
     """
     from app.models.report_letterhead import ReportLetterhead
 
@@ -247,7 +247,7 @@ def create_published_v2_report_directly(
     """Insert a Report + ReportVersion directly at a given status, bypassing
     the submit/approve/sign HTTP lifecycle (which lives outside reports.py's
     template-version scope). Used only to test status-guard endpoints
-    (Historia B9), not to exercise the review workflow itself.
+    (Story B9), not to exercise the review workflow itself.
     """
     report = Report(
         tenant_id=tenant.id,

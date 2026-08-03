@@ -4,7 +4,7 @@ Revision ID: v1_7_0
 Revises: v1_6_0
 Create Date: 2026-07-31
 
-Céluma 1.3 Fase 2, Bloque E, Historia E1/E2. Purely additive:
+Céluma 1.3 Phase 2, Block E, Story E1/E2. Purely additive:
 
   - `pdf_generation_status` (nullable string, CHECK IN ('GENERATING','READY',
     'FAILED')): NULL means "never attempted" for every existing row — no

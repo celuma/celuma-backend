@@ -110,28 +110,28 @@ class StudyTypeRef(BaseModel):
 
 
 class StudyTypeReportDefaultsResponse(BaseModel):
-    """Post-Fase-2 remediation: one round-trip resolving everything the
+    """Post-Phase-2 remediation: one round-trip resolving everything the
     report editor needs to bootstrap a brand-new V2 report — clinical
     template, its active version, and the letterhead that would be used if
     the user does not override it. Replaces the previous 3-sequential-fetch
     dance (study type -> template -> template versions), reducing the
     number of intermediate states the editor can render in (see
-    report-editor-letterhead-selection-contract.md, "Preview inicial V2").
+    report-editor-letterhead-selection-contract.md, "Initial V2 preview").
 
     All fields are None when nothing is resolvable (e.g. no default
     template, no ACTIVE version, no letterhead) — the caller decides how to
     react (mirrors today's `v2ConfigBlocked` behavior), this endpoint never
     raises for an unconfigured tenant.
 
-    Tercera remediación post-Fase 2: además del id, devuelve el
-    `letterhead_id` lógico, la `presentation` ya resuelta y de dónde salió
-    (`letterhead_resolution_source`). Antes el editor tenía que encadenar
-    listar-membretes -> listar-versiones -> leer-versión para reconstruir
-    la presentación, y si CUALQUIER paso fallaba se quedaba sin
-    `presentation` y montaba Legacy en silencio. Con la presentación
-    incluida aquí ese camino desaparece: o hay membrete (V2), o
-    `v2_blocked_reason` dice exactamente por qué no (estado bloqueado),
-    nunca Legacy. Ver deterministic-letterhead-resolution-contract.md.
+    Third post-Phase-2 remediation: besides the id, returns the logical
+    `letterhead_id`, the already-resolved `presentation`, and where it
+    came from (`letterhead_resolution_source`). Previously the editor had
+    to chain list-letterheads -> list-versions -> read-version to rebuild
+    the presentation, and if ANY step failed it was left without
+    `presentation` and silently mounted Legacy. With presentation included
+    here that path disappears: either there is a letterhead (V2), or
+    `v2_blocked_reason` says exactly why not (blocked state), never
+    Legacy. See deterministic-letterhead-resolution-contract.md.
     """
     template_id: Optional[str] = None
     active_template_version_id: Optional[str] = None
@@ -144,9 +144,9 @@ class StudyTypeReportDefaultsResponse(BaseModel):
     # Ephemeral logo URLs for the letterhead above (never persisted).
     letterhead_resolved_resources: Optional[Dict[str, Any]] = None
     # None = V2 puede proceder. Si no:
-    #   "NO_TEMPLATE"            — el tipo de estudio no tiene plantilla.
-    #   "NO_ACTIVE_TEMPLATE_VERSION" — la plantilla no tiene versión activa.
-    #   "NO_LETTERHEAD"          — no hay membrete predeterminado resoluble.
+    #   "NO_TEMPLATE"            — the study type has no template.
+    #   "NO_ACTIVE_TEMPLATE_VERSION" — the template has no active version.
+    #   "NO_LETTERHEAD"          — no resolvable default letterhead.
     #   "LETTERHEAD_MISCONFIGURED" — datos inconsistentes; ver el mensaje.
     v2_blocked_reason: Optional[str] = None
     v2_blocked_detail: Optional[str] = None

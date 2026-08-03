@@ -1,4 +1,4 @@
-"""Tests for CORS origin configuration (Céluma 1.3 Fase 2, Bloque D, Historia D1).
+"""Tests for CORS origin configuration (Céluma 1.3 Phase 2, Block D, Story D1).
 
 `Settings.cors_allowed_origins` is a raw comma-separated string (env var
 `CORS_ALLOWED_ORIGINS`); `cors_allowed_origins_list` is what `app/main.py`

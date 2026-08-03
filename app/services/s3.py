@@ -38,7 +38,7 @@ class S3Service:
         if settings.s3_endpoint_url:
             client_kwargs["endpoint_url"] = settings.s3_endpoint_url
         elif settings.aws_region:
-            # Céluma 1.3 Fase 2, Bloque E: without an explicit endpoint, boto3
+            # Céluma 1.3 Phase 2, Block E: without an explicit endpoint, boto3
             # can resolve the global `s3.amazonaws.com` endpoint for
             # presigned URLs, which AWS rejects for opt-in regions (e.g.
             # `mx-central-1`, the configured bucket region here) with

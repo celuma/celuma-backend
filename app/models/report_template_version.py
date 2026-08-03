@@ -10,7 +10,7 @@ from .base import BaseModel, TimestampMixin, TenantMixin
 class ReportTemplateVersionStatus(str, Enum):
     """Lifecycle of an immutable, published report-template configuration.
 
-    Céluma 1.3 Fase 2, Bloque B. There is no DRAFT state in this block: a
+    Céluma 1.3 Phase 2, Block B. There is no DRAFT state in this block: a
     version is born PUBLISHED (immutable from the moment it is inserted).
     Only `status` may transition afterwards, exclusively via the dedicated
     /activate and /archive endpoints — never a generic PUT/PATCH. See
