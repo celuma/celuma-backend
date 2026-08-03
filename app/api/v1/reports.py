@@ -114,6 +114,46 @@ def _require(user_id, code: str, session: Session) -> None:
         raise HTTPException(403, f"Permission required: {code}")
 
 
+def authorize_report_read_access(
+    session: Session, ctx: AuthContext, user: AppUser, report_id: str
+) -> Report:
+    """Quinta remediación post-Fase 2 — contrato ÚNICO de lectura de un
+    reporte por parte del personal interno del laboratorio.
+
+    Antes de esta remediación cada ruta de solo lectura repetía sus propios
+    checks a mano, y ahí se coló la divergencia que produjo el `403` real
+    reportado: `GET /{id}/full` devolvía 200 mientras
+    `GET /{id}/versions/{n}/pdf` devolvía
+    `{"detail":"Report access blocked due to pending payment"}` (57 bytes,
+    byte a byte el cuerpo capturado en Safari) para el MISMO usuario, el
+    MISMO reporte y el MISMO permiso. Ver
+    official-pdf-download-root-cause.md y
+    report-read-authorization-contract.md.
+
+    La política, ahora en un solo sitio:
+
+      * `reports:read`            -> 403 si falta (aunque conozca el id).
+      * reporte inexistente       -> 404.
+      * reporte de otro tenant    -> 404, NUNCA 403: un 403 confirmaría que
+                                     ese id existe en otro laboratorio.
+
+    `Order.billed_lock` deliberadamente NO participa aquí. Es la compuerta
+    de entrega a terceros (paciente y médico solicitante) y se sigue
+    aplicando, sin cambios, en `app/api/v1/portal.py`. Aplicarla también al
+    personal interno no protegía nada — `/full` ya devuelve el contenido
+    clínico completo y el botón "Imprimir copia local" ya imprime desde
+    ahí — y sí rompía el flujo real: el patólogo firmaba su propio reporte
+    y no podía descargar el PDF que acababa de generar.
+    """
+    _require(user.id, "reports:read", session)
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Report not found")
+    return report
+
+
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
 
 
@@ -615,6 +655,13 @@ def _carry_forward_v2_metadata(
     selector is only ever shown before a report's first save (D10), so a
     content-only save on an existing report must never change which
     letterhead produced its frozen `presentation` block.
+
+    Quinta remediación post-Fase 2: ese "solo antes del primer guardado" era
+    precisamente la frontera equivocada (Observación A). Esta función SIGUE
+    siendo carry-forward puro — nunca cambia de membrete por su cuenta — y
+    el cambio explícito y validado se aplica encima, en
+    `_apply_draft_letterhead_change`. Ver
+    draft-letterhead-change-contract.md.
     """
     if current_version is None or current_version.schema_version != 2:
         return report_body, None, None, None, None
@@ -656,6 +703,129 @@ def _carry_forward_v2_metadata(
     carried_body["schema_version"] = 2
     carried_body["rendering_snapshot"] = frozen_snapshot
     return carried_body, *carried_metadata
+
+
+# Estados en los que el membrete ya forma parte de la versión sometida a
+# revisión y no puede cambiarse (quinta remediación post-Fase 2,
+# Observación A). La frontera NO es "el reporte ya tiene id" — es "el
+# reporte ya salió de DRAFT". Ver letterhead-freeze-at-review-contract.md.
+_LETTERHEAD_EDITABLE_STATUSES = (ReportStatus.DRAFT,)
+
+
+def _apply_draft_letterhead_change(
+    session: Session,
+    ctx: AuthContext,
+    report: Report,
+    carried_body: dict | None,
+    carried_schema_version: int | None,
+    carried_letterhead_version_id: str | None,
+    requested_letterhead_version_id: str | None,
+) -> tuple[dict | None, str | None, ReportLetterheadVersion | None]:
+    """Quinta remediación post-Fase 2 — cambio de membrete en un DRAFT ya
+    persistido (Observación A).
+
+    Sustituye EXCLUSIVAMENTE `rendering_snapshot.presentation` y
+    `ReportVersion.letterhead_version_id`. Nunca toca
+    `rendering_snapshot.template`, `template_version_id`, campos base,
+    secciones, valores clínicos, imágenes, datos del paciente o de la orden,
+    firma, historial ni PDFs ya generados: el `carried_body` que entra aquí
+    ya es el contenido clínico definitivo y de él solo se reemplaza una
+    clave.
+
+    La presentación se obtiene SIEMPRE del servidor a partir del id de
+    versión de membrete (vía `resolve_effective_letterhead_version`, el
+    único punto de verdad desde la tercera remediación). Un `presentation`
+    que venga en el cuerpo del cliente jamás se usa — el cliente solo
+    elige, no dicta el diseño.
+
+    Devuelve `(body, letterhead_version_id, resolved_version|None)`; la
+    tercera posición es no-nula solo cuando hubo un cambio real, para que el
+    caller pueda auditarlo.
+    """
+    # Sin petición explícita, o si es exactamente el membrete que la versión
+    # ya tiene, esto es un guardado de contenido normal: carry-forward puro.
+    if requested_letterhead_version_id is None:
+        return carried_body, carried_letterhead_version_id, None
+    if str(requested_letterhead_version_id) == str(carried_letterhead_version_id or ""):
+        return carried_body, carried_letterhead_version_id, None
+
+    # Un reporte legacy (o V2 sin snapshot) no tiene bloque `presentation`
+    # que sustituir; cambiar el membrete ahí no significa nada y se ignora
+    # en silencio, exactamente como antes de esta remediación.
+    if carried_schema_version != 2:
+        return carried_body, carried_letterhead_version_id, None
+
+    # --- La frontera de inmutabilidad -------------------------------------
+    if report.status not in _LETTERHEAD_EDITABLE_STATUSES:
+        raise HTTPException(
+            409,
+            "El membrete quedó fijado al enviar el reporte a revisión y ya no "
+            f"puede cambiarse (estado actual: {report.status}).",
+        )
+
+    # --- Validación del membrete solicitado -------------------------------
+    try:
+        resolved = resolve_effective_letterhead_version(
+            session,
+            ctx.tenant_id,
+            letterhead_version_id=requested_letterhead_version_id,
+        )
+    except LetterheadNotFoundError as exc:
+        # Incluye el caso cross-tenant: el resolver no distingue "no existe"
+        # de "es de otro laboratorio", justamente para no confirmar ids
+        # ajenos.
+        raise HTTPException(404, exc.message) from None
+    except (LetterheadArchivedError, LetterheadConfigurationError) as exc:
+        raise HTTPException(409, exc.message) from None
+
+    if resolved is None:  # pragma: no cover - la rama explícita nunca da None
+        raise HTTPException(404, "Letterhead version not found")
+
+    # `resolve_effective_letterhead_version` valida tenant, archivado y
+    # configuración de la VERSIÓN, pero por la rama explícita no comprueba
+    # que el membrete lógico siga activo. Un membrete desactivado sigue
+    # siendo legible para los reportes históricos que ya lo usan, pero no
+    # debe poder elegirse de nuevo.
+    if not resolved.letterhead.is_active:
+        raise HTTPException(
+            409,
+            f"El membrete «{resolved.letterhead.name}» está desactivado y no "
+            "puede asignarse a un reporte.",
+        )
+    if resolved.version.status != ReportLetterheadVersionStatus.ACTIVE:
+        raise HTTPException(
+            409,
+            "Solo puede asignarse la versión activa de un membrete "
+            f"(la versión indicada está en estado {resolved.version.status}).",
+        )
+
+    # --- Sustitución quirúrgica de `presentation` -------------------------
+    if not isinstance(carried_body, dict):
+        # Un guardado sin cuerpo JSON no puede reescribir el snapshot; se
+        # cambia solo el vínculo administrativo, que es lo único que hay.
+        return carried_body, str(resolved.version.id), resolved.version
+
+    snapshot = carried_body.get("rendering_snapshot")
+    if not isinstance(snapshot, dict):
+        return carried_body, str(resolved.version.id), resolved.version
+
+    new_body = dict(carried_body)
+    new_snapshot = dict(snapshot)
+    # `template` se conserva byte a byte: el membrete es presentación, la
+    # plantilla clínica es otra cosa (separación de la primera remediación).
+    new_snapshot["presentation"] = resolved.presentation.model_dump(mode="json")
+    new_body["rendering_snapshot"] = new_snapshot
+
+    logger.info(
+        "DRAFT report letterhead changed",
+        extra={
+            "event": "report.draft_letterhead_changed",
+            "report_id": str(report.id),
+            "old_letterhead_version_id": carried_letterhead_version_id,
+            "new_letterhead_version_id": str(resolved.version.id),
+        },
+    )
+    return new_body, str(resolved.version.id), resolved.version
 
 
 @router.post("/{report_id}/new_version", response_model=ReportVersionResponse)
@@ -704,6 +874,27 @@ def create_report_new_version(
         carried_renderer_version,
         carried_letterhead_version_id,
     ) = _carry_forward_v2_metadata(current_version, report_data.report, session)
+
+    # Quinta remediación post-Fase 2 (Observación A): el guardado normal de
+    # un DRAFT acepta ahora `letterhead_version_id`. Se eligió extender este
+    # endpoint en vez de crear uno nuevo (brief §5, "opción preferida")
+    # porque el cambio de membrete SIEMPRE viaja junto al contenido que el
+    # usuario tiene en pantalla: un endpoint aparte obligaría a dos
+    # llamadas no atómicas y abriría la puerta a guardar el membrete nuevo
+    # con el contenido viejo. Ver remediation-5-architecture-decision.md.
+    (
+        carried_report_body,
+        carried_letterhead_version_id,
+        changed_letterhead_version,
+    ) = _apply_draft_letterhead_change(
+        session,
+        ctx,
+        report,
+        carried_report_body,
+        carried_schema_version,
+        carried_letterhead_version_id,
+        report_data.letterhead_version_id,
+    )
 
     json_storage_id = None
     if carried_report_body is not None:
@@ -779,7 +970,34 @@ def create_report_new_version(
         created_by=report_data.created_by,
     )
     session.add(version_event)
-    
+
+    # Quinta remediación (§3.4.8): un cambio de membrete en DRAFT queda
+    # auditado por separado del guardado de contenido — es una decisión
+    # administrativa sobre cómo se va a ver el documento oficial, no una
+    # edición clínica más.
+    if changed_letterhead_version is not None:
+        _create_audit_log(
+            session=session,
+            tenant_id=ctx.tenant_id,
+            branch_id=str(report.branch_id),
+            actor_user_id=ctx.user_id,
+            action="REPORT.CHANGE_LETTERHEAD",
+            entity_type="report",
+            entity_id=str(report.id),
+            old_values={
+                "letterhead_version_id": (
+                    str(current_version.letterhead_version_id)
+                    if current_version and current_version.letterhead_version_id
+                    else None
+                ),
+            },
+            new_values={
+                "letterhead_version_id": str(changed_letterhead_version.id),
+                "letterhead_id": str(changed_letterhead_version.report_letterhead_id),
+                "version_no": next_version_no,
+            },
+        )
+
     session.commit()
     session.refresh(new_version)
 
@@ -1636,12 +1854,7 @@ def get_report(
     user: AppUser = Depends(current_user),
 ):
     """Get report details (requires reports:read)."""
-    _require(user.id, "reports:read", session)
-    report = session.get(Report, report_id)
-    if not report:
-        raise HTTPException(404, "Report not found")
-    if str(report.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Report not found")
+    report = authorize_report_read_access(session, ctx, user, report_id)
 
     current_version = session.exec(
         select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
@@ -1661,13 +1874,7 @@ def get_report_full(
     order (with assignees, reviewers, labels), patient, samples, and full report detail
     including the template snapshot and the current version JSON from S3.
     """
-    _require(user.id, "reports:read", session)
-
-    report = session.get(Report, report_id)
-    if not report:
-        raise HTTPException(404, "Report not found")
-    if str(report.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Report not found")
+    report = authorize_report_read_access(session, ctx, user, report_id)
 
     # Aggregate order / patient / samples using the shared builder
     base = _build_order_full_detail(str(report.order_id), session, ctx)
@@ -1693,12 +1900,7 @@ def list_report_versions(
     user: AppUser = Depends(current_user),
 ):
     """List all versions for a report (requires reports:read)."""
-    _require(user.id, "reports:read", session)
-    report = session.get(Report, report_id)
-    if not report:
-        raise HTTPException(404, "Report not found")
-    if str(report.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Report not found")
+    report = authorize_report_read_access(session, ctx, user, report_id)
     versions = session.exec(select(ReportVersion).where(ReportVersion.report_id == report.id)).all()
     return [{
         "id": str(v.id),
@@ -1714,18 +1916,16 @@ def get_pdf_of_latest_version(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Return a presigned URL to download the PDF for the newest report version (requires reports:read)."""
-    _require(user.id, "reports:read", session)
-    report = session.get(Report, report_id)
-    if not report:
-        raise HTTPException(404, "Report not found")
-    if str(report.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Report not found")
+    """Return a presigned URL to download the PDF for the newest report version (requires reports:read).
 
-    # Check if order is locked due to pending payment
+    Quinta remediación post-Fase 2: comparte `authorize_report_read_access`
+    con `/full` — ver report-read-authorization-contract.md. El check de
+    `Order.billed_lock` que vivía aquí se retiró: es la compuerta de
+    entrega a terceros y sigue vigente en `portal.py`, no en el flujo
+    interno del laboratorio.
+    """
+    report = authorize_report_read_access(session, ctx, user, report_id)
     order = session.get(Order, report.order_id)
-    if order and order.billed_lock:
-        raise HTTPException(403, "Report access blocked due to pending payment")
 
     latest_version = session.exec(
         select(ReportVersion)
@@ -1762,12 +1962,7 @@ def get_report_version(
     user: AppUser = Depends(current_user),
 ):
     """Get specific report version details (requires reports:read)."""
-    _require(user.id, "reports:read", session)
-    report = session.get(Report, report_id)
-    if not report:
-        raise HTTPException(404, "Report not found")
-    if str(report.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Report not found")
+    report = authorize_report_read_access(session, ctx, user, report_id)
 
     version = session.exec(
         select(ReportVersion).where(
@@ -2033,23 +2228,19 @@ def get_pdf_of_specific_version(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Return a presigned URL to download the PDF for a specific report version (requires reports:read)."""
-    _require(user.id, "reports:read", session)
-    report = session.get(Report, report_id)
-    if not report:
-        raise HTTPException(404, "Report not found")
+    """Return a presigned URL to download the PDF for a specific report version (requires reports:read).
 
-    # Post-Fase-2 remediation (bug 4): tenant mismatch now 404s, matching
-    # get_pdf_of_latest_version and every other report-lookup endpoint in
-    # this file — a 403 here previously leaked "this report exists but
-    # belongs to another tenant", inconsistent with the rest of the API.
-    if str(report.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Report not found")
-
-    # Check if order is locked due to pending payment
+    Quinta remediación post-Fase 2 — ESTE es el endpoint del `403` real
+    reportado. Ahora comparte literalmente la misma función de autorización
+    que `GET /{id}/full`, así que "puedo abrir el reporte pero no puedo
+    descargar su PDF" deja de ser representable. El tenant cruzado sigue
+    siendo 404 (tercera remediación, bug 4), y el check de
+    `Order.billed_lock` — la causa raíz — se retiró de aquí: sigue vigente
+    en `portal.py`, que es donde el laboratorio realmente retiene un
+    reporte hasta que le paguen. Ver official-pdf-download-root-cause.md.
+    """
+    report = authorize_report_read_access(session, ctx, user, report_id)
     order = session.get(Order, report.order_id)
-    if order and order.billed_lock:
-        raise HTTPException(403, "Report access blocked due to pending payment")
 
     version = session.exec(
         select(ReportVersion).where(
@@ -2105,6 +2296,87 @@ def _create_audit_log(
     session.add(audit)
 
 
+def _validate_letterhead_before_review(session: Session, report: Report) -> None:
+    """Quinta remediación post-Fase 2 (§3.5) — comprobaciones justo antes de
+    congelar el membrete al enviar a revisión.
+
+    Deliberadamente NO exige `letterhead_version_id`. Existen versiones V2
+    históricas anteriores a la primera remediación cuyo `presentation` se
+    congeló directamente desde la versión de plantilla, sin vínculo
+    administrativo; ese campo nunca se rellenó hacia atrás (ver
+    `ReportDetailResponse.letterhead_version_id`). Exigirlo aquí dejaría
+    esos borradores imposibles de enviar a revisión, que es exactamente el
+    tipo de regresión que §14 prohíbe. Lo que sí se exige es lo que de
+    verdad determina cómo se imprimirá el documento oficial: que la versión
+    congelada tenga un bloque `presentation` válido, y que — si hay vínculo
+    administrativo — siga apuntando a un membrete de este tenant.
+
+    Los reportes legacy (schema_version != 2) no tienen `presentation` y se
+    omiten por completo: su rama no cambia en esta remediación.
+    """
+    current_version = session.exec(
+        select(ReportVersion).where(
+            ReportVersion.report_id == report.id,
+            ReportVersion.is_current == True,  # noqa: E712
+        )
+    ).first()
+    if current_version is None or current_version.schema_version != 2:
+        return
+
+    # 1. El snapshot congelado debe traer una presentación válida.
+    presentation = None
+    if current_version.json_storage_id:
+        storage = session.get(StorageObject, current_version.json_storage_id)
+        if storage:
+            try:
+                body = json.loads(S3Service().download_text(storage.object_key))
+                snapshot = body.get("rendering_snapshot")
+                if isinstance(snapshot, dict):
+                    presentation = snapshot.get("presentation")
+            except Exception:
+                logger.warning(
+                    "Could not re-read the frozen rendering_snapshot while validating "
+                    "a submit-for-review",
+                    extra={
+                        "event": "report.submit_snapshot_unreadable",
+                        "report_version_id": str(current_version.id),
+                    },
+                )
+                # Un fallo de red/almacenamiento no es evidencia de que el
+                # reporte esté mal configurado: no se bloquea el envío por
+                # ello (habría sido convertir una incidencia transitoria en
+                # un error de negocio).
+                return
+
+    if presentation is None:
+        raise HTTPException(
+            409,
+            "Este reporte no tiene un membrete aplicado, así que no puede "
+            "enviarse a revisión. Vuelve al borrador y selecciona un membrete.",
+        )
+    try:
+        ReportPresentationSnapshotV2.model_validate(presentation)
+    except PydanticValidationError:
+        raise HTTPException(
+            409,
+            "La configuración de membrete congelada en este reporte no es "
+            "válida. Selecciona de nuevo el membrete en el borrador antes de "
+            "enviarlo a revisión.",
+        ) from None
+
+    # 2. Si hay vínculo administrativo, debe seguir siendo de este tenant.
+    if current_version.letterhead_version_id:
+        lh_version = session.get(
+            ReportLetterheadVersion, current_version.letterhead_version_id
+        )
+        if lh_version is None or str(lh_version.tenant_id) != str(report.tenant_id):
+            raise HTTPException(
+                409,
+                "El membrete aplicado a este reporte ya no está disponible en "
+                "este laboratorio. Selecciona otro antes de enviarlo a revisión.",
+            )
+
+
 @router.post("/{report_id}/submit", response_model=ReportActionResponse)
 def submit_report(
     report_id: str,
@@ -2124,7 +2396,14 @@ def submit_report(
     
     if report.status != ReportStatus.DRAFT:
         raise HTTPException(400, f"Cannot submit report in {report.status} status")
-    
+
+    # Quinta remediación post-Fase 2 (§3.5): enviar a revisión es el momento
+    # en que el membrete se CONGELA, así que es también el último momento
+    # en que se puede comprobar que lo que se congela es coherente. A partir
+    # de aquí ninguna ruta permite cambiarlo (ver
+    # letterhead-freeze-at-review-contract.md).
+    _validate_letterhead_before_review(session, report)
+
     # Get all reviewers for this order (regardless of current status)
     reviewers = session.exec(
         select(ReportReview).where(
@@ -2748,6 +3027,14 @@ def sign_and_publish_report(
         pdf_size_bytes=version.pdf_size_bytes,
         pdf_page_count=version.pdf_page_count,
         pdf_generated_at=version.pdf_generated_at,
+        # Quinta remediación: la versión EXACTA cuyo PDF oficial acaba de
+        # generarse, para que la UI no tenga que derivarla de un `/full`
+        # refrescado. Ver sign-and-publish-response-contract.md.
+        report_version_id=str(version.id),
+        version_no=version.version_no,
+        official_pdf_available=bool(
+            version.pdf_storage_id and version.pdf_generation_status == "READY"
+        ),
     )
 
 

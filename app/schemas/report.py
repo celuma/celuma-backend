@@ -226,6 +226,18 @@ class ReportSignAndPublishResponse(ReportActionResponse):
     pdf_size_bytes: Optional[int] = None
     pdf_page_count: Optional[int] = None
     pdf_generated_at: Optional[datetime] = None
+    # Quinta remediación post-Fase 2: la UI ya no debe *adivinar* qué versión
+    # descargar. Antes leía `envelope.version_no` de un `/full` refrescado
+    # después de publicar — un valor potencialmente stale y, en cualquier
+    # caso, indirecto. Ahora la propia respuesta de publicación dice de qué
+    # versión es el PDF oficial recién generado. Ver
+    # sign-and-publish-response-contract.md.
+    report_version_id: Optional[str] = None
+    version_no: Optional[int] = None
+    # True solo cuando existe un artefacto PDF descargable para esa versión
+    # (`pdf_storage_id` presente y generación READY). Es la señal que la UI
+    # usa para mostrar "Descargar PDF oficial" sin recargar.
+    official_pdf_available: bool = False
 
 
 # Report Template Schemas

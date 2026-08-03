@@ -126,7 +126,25 @@ class TestDownloadPermissionMatrix:
         assert specific.status_code == 404
         assert latest.status_code == 404
 
-    def test_payment_locked_order_blocks_download(self, client, session, stub_pdf_render):
+    def test_payment_locked_order_does_not_block_internal_download(
+        self, client, session, stub_pdf_render
+    ):
+        """Quinta remediación post-Fase 2 — INVERSIÓN DELIBERADA de esta
+        prueba.
+
+        Antes afirmaba `403`. Esa aserción es justamente lo que dejó pasar el
+        bug real: `Order.billed_lock` es la compuerta de entrega a TERCEROS
+        (paciente y médico solicitante, `app/api/v1/portal.py`), y se había
+        colado también en los endpoints internos del PDF, donde `/full` —
+        mismo permiso, mismo reporte, contenido clínico completo — nunca la
+        aplicó. El resultado en producción: la patóloga firmaba su reporte y
+        recibía `{"detail":"Report access blocked due to pending payment"}`
+        al intentar descargarlo.
+
+        La prueba se conserva (no se borra) con la afirmación correcta: el
+        personal interno descarga, y `portal.py` sigue bloqueando. Ver
+        official-pdf-download-root-cause.md.
+        """
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
@@ -137,5 +155,12 @@ class TestDownloadPermissionMatrix:
         session.add(order)
         session.commit()
 
-        resp = client.get(f"/api/v1/reports/{report.id}/versions/1/pdf", headers=auth_headers(editor))
-        assert resp.status_code == 403
+        specific = client.get(
+            f"/api/v1/reports/{report.id}/versions/1/pdf", headers=auth_headers(editor)
+        )
+        latest = client.get(f"/api/v1/reports/{report.id}/pdf", headers=auth_headers(editor))
+        full = client.get(f"/api/v1/reports/{report.id}/full", headers=auth_headers(editor))
+
+        assert full.status_code == 200
+        assert specific.status_code == 200, specific.text
+        assert latest.status_code == 200, latest.text
