@@ -5,6 +5,7 @@ from sqlmodel import SQLModel, Field, Relationship
 from .base import BaseModel, TimestampMixin, TenantMixin
 
 if TYPE_CHECKING:
+    from .tenant import Branch, Tenant
     from .user_role import UserRoleLink
 
 

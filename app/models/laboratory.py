@@ -1,10 +1,13 @@
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, TYPE_CHECKING
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field, Relationship, Column
 from sqlalchemy import JSON
 from .base import BaseModel, TimestampMixin, TenantMixin, BranchMixin
 from .enums import OrderStatus, SampleType, SampleState
+
+if TYPE_CHECKING:
+    from .storage import SampleImageRendition
 
 class Order(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     """Laboratory order model
