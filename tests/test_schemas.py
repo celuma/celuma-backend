@@ -1,7 +1,7 @@
 """
 Unit tests for Celuma API Pydantic schemas
 """
-from app.schemas.tenant import TenantCreate, TenantResponse, BranchCreate, BranchResponse
+from app.schemas.tenant import TenantCreate, TenantResponse, TenantDetailResponse, BranchCreate, BranchResponse
 from app.schemas.patient import PatientCreate, PatientResponse
 from app.schemas.user import UserDetailResponse
 from app.schemas.auth import UserRegister, UserLogin, UserResponse
@@ -31,6 +31,19 @@ class TestTenantSchemas:
         )
         assert tenant_response.id == "test-id"
         assert tenant_response.name == "Test Tenant"
+
+    def test_tenant_response_reports_v2_enabled_defaults_false(self):
+        """Céluma 1.3 Phase 2, Block A / Story A6."""
+        tenant_response = TenantResponse(id="test-id", name="Test Tenant")
+        assert tenant_response.reports_v2_enabled is False
+
+    def test_tenant_response_reports_v2_enabled_explicit_true(self):
+        tenant_response = TenantResponse(id="test-id", name="Test Tenant", reports_v2_enabled=True)
+        assert tenant_response.reports_v2_enabled is True
+
+    def test_tenant_detail_response_reports_v2_enabled_defaults_false(self):
+        detail = TenantDetailResponse(id="test-id", name="Test Tenant")
+        assert detail.reports_v2_enabled is False
 
 class TestBranchSchemas:
     """Test Branch schema validation"""

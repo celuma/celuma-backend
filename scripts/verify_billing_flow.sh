@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Script para verificar el flujo completo: orden → factura con precio del catálogo → pago → balance
-# Uso: ./verify_billing_flow.sh <TOKEN>
+# Script to verify the full flow: order → invoice with catalog price → payment → balance
+# Usage: ./verify_billing_flow.sh <TOKEN>
 
 set -e
 
-# Configuración
+# Configuration
 BASE_URL="${BASE_URL:-http://localhost:8000}"
 TOKEN="${1:-Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI1YzZmMjVmYi00ODUxLTQ5ZjctYWNlMi03MjE2NWM2MzRlZjAiLCJleHAiOjE3NzA4OTEyMzl9.bVpfH8zwKXG9hWxCIhH8rNRkWvmx6Dm9WQywWEZKzMg}"
 
@@ -14,13 +14,13 @@ echo "Verificación de flujo de facturación"
 echo "====================================="
 echo ""
 
-# Colores para output
+# Colors for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-# 1. Obtener tipos de estudio
+# 1. Fetch study types
 echo -e "${YELLOW}1. Obteniendo tipos de estudio...${NC}"
 STUDY_TYPES=$(curl -s -H "Authorization: $TOKEN" "$BASE_URL/api/v1/study-types/")
 echo "$STUDY_TYPES" | jq -r '.study_types[] | select(.is_active == true) | "\(.name) (\(.code)) - ID: \(.id)"' | head -3
@@ -29,7 +29,7 @@ STUDY_TYPE_CODE=$(echo "$STUDY_TYPES" | jq -r '.study_types[] | select(.id == "'
 echo -e "${GREEN}✓ Usando tipo de estudio: $STUDY_TYPE_CODE (ID: $STUDY_TYPE_ID)${NC}"
 echo ""
 
-# 2. Verificar catálogo de precios
+# 2. Verify price catalog
 echo -e "${YELLOW}2. Verificando catálogo de precios activos...${NC}"
 PRICE_CATALOG=$(curl -s -H "Authorization: $TOKEN" "$BASE_URL/api/v1/price-catalog/?is_active=true")
 PRICE=$(echo "$PRICE_CATALOG" | jq -r --arg STUDY_TYPE_ID "$STUDY_TYPE_ID" '.prices[] | select(.study_type_id == $STUDY_TYPE_ID) | .unit_price' | head -1)
@@ -42,7 +42,7 @@ fi
 echo -e "${GREEN}✓ Precio encontrado: \$$PRICE MXN${NC}"
 echo ""
 
-# 3. Obtener pacientes
+# 3. Fetch patients
 echo -e "${YELLOW}3. Obteniendo pacientes...${NC}"
 PATIENTS=$(curl -s -H "Authorization: $TOKEN" "$BASE_URL/api/v1/patients/")
 PATIENT_ID=$(echo "$PATIENTS" | jq -r '.patients[0].id')
@@ -52,7 +52,7 @@ BRANCH_ID=$(echo "$PATIENTS" | jq -r '.patients[0].branch_id')
 echo -e "${GREEN}✓ Usando paciente: $PATIENT_NAME (ID: $PATIENT_ID)${NC}"
 echo ""
 
-# 4. Crear orden (sin order_code, se genera automático)
+# 4. Create order (no order_code — auto-generated)
 echo -e "${YELLOW}4. Creando orden con tipo de estudio $STUDY_TYPE_CODE...${NC}"
 ORDER_RESPONSE=$(curl -s -H "Authorization: $TOKEN" \
     -H "Content-Type: application/json" \
@@ -81,9 +81,9 @@ fi
 echo -e "${GREEN}✓ Orden creada: $ORDER_CODE (ID: $ORDER_ID)${NC}"
 echo ""
 
-# 5. Verificar factura auto-generada
+# 5. Verify auto-generated invoice
 echo -e "${YELLOW}5. Verificando factura auto-generada...${NC}"
-sleep 1  # Pequeña pausa para asegurar que la factura se haya creado
+sleep 1  # Brief pause to ensure the invoice has been created
 INVOICE=$(curl -s -H "Authorization: $TOKEN" "$BASE_URL/api/v1/billing/orders/$ORDER_ID/invoice")
 INVOICE_ID=$(echo "$INVOICE" | jq -r '.id')
 INVOICE_NUMBER=$(echo "$INVOICE" | jq -r '.invoice_number')
@@ -98,7 +98,7 @@ echo "  Total: \$$INVOICE_TOTAL MXN"
 echo "  Items:"
 echo "$INVOICE" | jq -r '.items[] | "    - \(.description): $\(.unit_price) x \(.quantity) = $\(.subtotal)"'
 
-# Verificar que el precio coincida
+# Verify the price matches
 if [ "$INVOICE_TOTAL" == "$PRICE" ]; then
     echo -e "${GREEN}✓ El precio de la factura coincide con el catálogo${NC}"
 else
@@ -106,7 +106,7 @@ else
 fi
 echo ""
 
-# 6. Registrar pago parcial
+# 6. Record partial payment
 echo -e "${YELLOW}6. Registrando pago parcial de \$$(echo "scale=2; $INVOICE_TOTAL / 2" | bc) MXN...${NC}"
 PARTIAL_PAYMENT=$(echo "scale=2; $INVOICE_TOTAL / 2" | bc)
 PAYMENT_RESPONSE=$(curl -s -H "Authorization: $TOKEN" \
@@ -130,7 +130,7 @@ fi
 echo -e "${GREEN}✓ Pago registrado (ID: $PAYMENT_ID)${NC}"
 echo ""
 
-# 7. Verificar balance de la orden
+# 7. Verify order balance
 echo -e "${YELLOW}7. Verificando balance de la orden...${NC}"
 BALANCE=$(curl -s -H "Authorization: $TOKEN" "$BASE_URL/api/v1/billing/orders/$ORDER_ID/balance")
 echo "$BALANCE" | jq '{
@@ -145,7 +145,7 @@ REMAINING=$(echo "$BALANCE" | jq -r '.balance')
 echo -e "${GREEN}✓ Balance pendiente: \$$REMAINING MXN${NC}"
 echo ""
 
-# 8. Completar pago
+# 8. Complete payment
 echo -e "${YELLOW}8. Completando pago con \$$REMAINING MXN...${NC}"
 FINAL_PAYMENT=$(curl -s -H "Authorization: $TOKEN" \
     -H "Content-Type: application/json" \
@@ -168,7 +168,7 @@ fi
 echo -e "${GREEN}✓ Pago final registrado (ID: $FINAL_PAYMENT_ID)${NC}"
 echo ""
 
-# 9. Verificar estado final
+# 9. Verify final state
 echo -e "${YELLOW}9. Verificando estado final...${NC}"
 FINAL_BALANCE=$(curl -s -H "Authorization: $TOKEN" "$BASE_URL/api/v1/billing/orders/$ORDER_ID/balance")
 FINAL_REMAINING=$(echo "$FINAL_BALANCE" | jq -r '.balance')

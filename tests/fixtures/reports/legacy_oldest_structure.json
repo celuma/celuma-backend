@@ -1,0 +1,18 @@
+{
+  "_fixture_meta": {
+    "covers": ["reporte histórico con la estructura más antigua disponible"],
+    "status": "PUBLISHED",
+    "note": "Simula un reporte guardado antes de que existieran base_order/section_order/signatureMetadata y antes de que 'requesting_physician' fuera un campo base predefinido (ver LEGACY_PREDEFINED_BASE_HIDDEN en src/models/report.ts). No tiene schema_version porque ese campo nunca ha existido en producción."
+  },
+  "base": {
+    "order_code": { "is_visible": true, "label": "Código de orden", "value": "SYN-0006" },
+    "patient": { "is_visible": true, "label": "Paciente", "value": "Paciente de Prueba Seis" },
+    "study_type": { "is_visible": true, "label": "Tipo de estudio", "value": "Histopatología" },
+    "patient_age": { "is_visible": true, "label": "Edad", "value": "71" }
+  },
+  "sections": {
+    "section_macroscopic": { "is_visible": true, "label": "Macroscópica", "type": "richtext", "content": "<p>Descripción sintética de un reporte con estructura antigua.</p>" },
+    "section_microscopic": { "is_visible": true, "label": "Microscópica", "type": "richtext", "content": "<p>Descripción sintética de un reporte con estructura antigua.</p>" },
+    "images": { "is_visible": true, "label": "Imágenes", "type": "images", "content": [] }
+  }
+}

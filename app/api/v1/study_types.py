@@ -5,14 +5,26 @@ from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.core.rbac import has_permission
 from app.models.study_type import StudyType
 from app.models.report import ReportTemplate
+from app.models.report_template_version import ReportTemplateVersion, ReportTemplateVersionStatus
+from app.models.report_letterhead import ReportLetterhead
+from app.models.report_letterhead_version import (
+    ReportLetterheadVersion,
+    ReportLetterheadVersionStatus,
+)
 from app.models.tenant import Tenant
 from app.models.user import AppUser
+from app.services.letterhead_resolution import (
+    LetterheadResolutionError,
+    resolve_effective_letterhead_version,
+)
+from app.services.letterhead_resources import resolve_letterhead_resources
 from app.schemas.study_type import (
     StudyTypeCreate,
     StudyTypeUpdate,
     StudyTypeResponse,
     StudyTypeDetailResponse,
     StudyTypesListResponse,
+    StudyTypeReportDefaultsResponse,
     TemplateRef,
 )
 import logging
@@ -306,3 +318,87 @@ def delete_study_type(
         )
         
         return {"message": "Study type deactivated", "id": str(study_type.id)}
+
+
+@router.get("/{study_type_id}/report-defaults", response_model=StudyTypeReportDefaultsResponse)
+def get_study_type_report_defaults(
+    study_type_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Resolve everything the report editor needs to bootstrap a brand-new
+    V2 report in one round trip (requires lab:read).
+
+    Post-Phase-2 remediation, R7; deterministic resolution and presentation
+    included in the third remediation. Uses the same
+    `resolve_effective_letterhead_version` as `create_report`, so what the
+    editor shows and what ends up embedded in the report cannot diverge.
+    Never raises for an unconfigured tenant: instead returns
+    `v2_blocked_reason` with the exact reason, so the UI can show an
+    actionable blocked state instead of falling back to Legacy.
+    """
+    if not has_permission(user.id, "lab:read", session):
+        raise HTTPException(403, "Permission required: lab:read")
+    study_type = session.get(StudyType, study_type_id)
+    if not study_type or str(study_type.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Study type not found")
+
+    template_id = study_type.default_report_template_id
+    active_template_version_id = None
+    owning_template = None
+    if template_id is not None:
+        owning_template = session.get(ReportTemplate, template_id)
+        if owning_template is not None:
+            active_version = session.exec(
+                select(ReportTemplateVersion).where(
+                    ReportTemplateVersion.report_template_id == template_id,
+                    ReportTemplateVersion.status == ReportTemplateVersionStatus.ACTIVE,
+                )
+            ).first()
+            if active_version is not None:
+                active_template_version_id = active_version.id
+
+    resolved = None
+    blocked_reason = None
+    blocked_detail = None
+    try:
+        resolved = resolve_effective_letterhead_version(
+            session, ctx.tenant_id, template=owning_template
+        )
+    except LetterheadResolutionError as exc:
+        blocked_reason = "LETTERHEAD_MISCONFIGURED"
+        blocked_detail = exc.message
+
+    if blocked_reason is None:
+        if template_id is None:
+            blocked_reason = "NO_TEMPLATE"
+        elif active_template_version_id is None:
+            blocked_reason = "NO_ACTIVE_TEMPLATE_VERSION"
+        elif resolved is None:
+            blocked_reason = "NO_LETTERHEAD"
+
+    resolved_resources = None
+    if resolved is not None:
+        resolved_resources = resolve_letterhead_resources(
+            resolved.version.configuration, ctx.tenant_id, session
+        )
+
+    return StudyTypeReportDefaultsResponse(
+        template_id=str(template_id) if template_id else None,
+        active_template_version_id=(
+            str(active_template_version_id) if active_template_version_id else None
+        ),
+        letterhead_version_id=(resolved.letterhead_version_id if resolved else None),
+        letterhead_name=(resolved.letterhead.name if resolved else None),
+        letterhead_id=(resolved.letterhead_id if resolved else None),
+        letterhead_resolution_source=(resolved.source.value if resolved else None),
+        letterhead_presentation=(
+            resolved.presentation.model_dump(mode="json") if resolved else None
+        ),
+        letterhead_resolved_resources=(
+            resolved_resources.model_dump() if resolved_resources else None
+        ),
+        v2_blocked_reason=blocked_reason,
+        v2_blocked_detail=blocked_detail,
+    )

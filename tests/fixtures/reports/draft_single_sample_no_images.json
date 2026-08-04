@@ -1,0 +1,22 @@
+{
+  "_fixture_meta": {
+    "covers": ["una muestra", "contenido corto", "sin imágenes", "reporte en borrador"],
+    "status": "DRAFT",
+    "note": "Datos sintéticos, sin información real de pacientes ni diagnósticos identificables."
+  },
+  "base": {
+    "order_code": { "is_visible": true, "label": "Código de orden", "value": "SYN-0001" },
+    "patient": { "is_visible": true, "label": "Paciente", "value": "Paciente de Prueba Uno" },
+    "study_type": { "is_visible": true, "label": "Tipo de estudio", "value": "Histopatología" },
+    "patient_age": { "is_visible": true, "label": "Edad", "value": "40" },
+    "requesting_physician": { "is_visible": true, "label": "Médico solicitante", "value": "Dr. Solicitante Sintético" }
+  },
+  "sections": {
+    "section_macroscopic": { "is_visible": true, "label": "Macroscópica", "type": "richtext", "content": "<p>Fragmento único de tejido sintético, 1.0 x 0.5 cm.</p>" },
+    "section_microscopic": { "is_visible": true, "label": "Microscópica", "type": "richtext", "content": "<p>Hallazgo de prueba sin relevancia clínica.</p>" },
+    "images": { "is_visible": true, "label": "Imágenes", "type": "images", "content": [] }
+  },
+  "base_order": ["order_code", "patient", "study_type", "patient_age", "requesting_physician"],
+  "section_order": ["section_macroscopic", "section_microscopic", "images"],
+  "signatureMetadata": { "show_signature_section": false, "require_digital_signature": false }
+}

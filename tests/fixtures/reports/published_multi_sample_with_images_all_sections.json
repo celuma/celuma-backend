@@ -1,0 +1,35 @@
+{
+  "_fixture_meta": {
+    "covers": ["varias muestras", "reporte con imágenes", "todas las secciones completas", "reporte liberado"],
+    "status": "PUBLISHED",
+    "note": "Datos sintéticos. Las imágenes referencian URLs ficticias (nunca se descargan en las pruebas)."
+  },
+  "base": {
+    "order_code": { "is_visible": true, "label": "Código de orden", "value": "SYN-0002" },
+    "patient": { "is_visible": true, "label": "Paciente", "value": "Paciente de Prueba Dos" },
+    "study_type": { "is_visible": true, "label": "Tipo de estudio", "value": "Histopatología" },
+    "patient_age": { "is_visible": true, "label": "Edad", "value": "58" },
+    "requesting_physician": { "is_visible": true, "label": "Médico solicitante", "value": "Dra. Solicitante Sintética" },
+    "custom_clinical_note": { "is_visible": true, "label": "Nota clínica", "value": "Antecedente sintético sin relevancia real.", "type": "text", "is_custom": true }
+  },
+  "sections": {
+    "section_macroscopic": { "is_visible": true, "label": "Macroscópica", "type": "richtext", "content": "<p>Se reciben tres fragmentos etiquetados A, B y C, correspondientes a tres muestras distintas de la misma orden.</p>" },
+    "section_microscopic": { "is_visible": true, "label": "Microscópica", "type": "richtext", "content": "<p>Descripción microscópica sintética de las tres muestras, sin hallazgos reales.</p>" },
+    "section_diagnosis": { "is_visible": true, "label": "Diagnóstico", "type": "text", "content": "Diagnóstico de prueba: hallazgo sintético benigno." },
+    "section_results_table": { "is_visible": true, "label": "Resultados", "type": "table", "content": "| Muestra | Resultado |\n|---|---|\n| A | Negativo |\n| B | Negativo |\n| C | Positivo (sintético) |" },
+    "images": {
+      "is_visible": true,
+      "label": "Imágenes",
+      "type": "images",
+      "content": [
+        { "id": "img-a1", "url": "https://cdn.example.invalid/synthetic/sample-a-1.png", "caption": "Muestra A, corte 1 (sintético)" },
+        { "id": "img-b1", "url": "https://cdn.example.invalid/synthetic/sample-b-1.png", "caption": "Muestra B, corte 1 (sintético)" },
+        { "id": "img-c1", "url": "https://cdn.example.invalid/synthetic/sample-c-1.png", "caption": "Muestra C, corte 1 (sintético)" },
+        { "id": "img-c2", "url": "https://cdn.example.invalid/synthetic/sample-c-2.png", "caption": "Muestra C, corte 2 (sintético)" }
+      ]
+    }
+  },
+  "base_order": ["order_code", "patient", "study_type", "patient_age", "requesting_physician", "custom_clinical_note"],
+  "section_order": ["section_macroscopic", "section_microscopic", "section_diagnosis", "section_results_table", "images"],
+  "signatureMetadata": { "show_signature_section": true, "require_digital_signature": true, "signature_url": "https://cdn.example.invalid/synthetic/signature.png" }
+}

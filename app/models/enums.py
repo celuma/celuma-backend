@@ -21,7 +21,7 @@ class SampleState(str, Enum):
     RECEIVED = "RECEIVED"      # Recibida - default when created
     PROCESSING = "PROCESSING"  # En Proceso - when images uploaded
     READY = "READY"            # Lista - manually set or when complete
-    DAMAGED = "DAMAGED"        # Dañada - sample physically damaged
+    DAMAGED = "DAMAGED"        # Damaged - sample physically damaged
     CANCELLED = "CANCELLED"    # Cancelada - cannot be used for other reasons
 
 class ReportStatus(str, Enum):

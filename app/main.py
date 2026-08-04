@@ -18,6 +18,7 @@ from app.api.v1.patients import router as patients_router
 from app.api.v1.requesting_physicians import router as requesting_physicians_router
 from app.api.v1.laboratory import router as laboratory_router
 from app.api.v1.reports import router as reports_router
+from app.api.v1.report_letterheads import router as report_letterheads_router
 from app.api.v1.report_sections import router as report_sections_router
 from app.api.v1.study_types import router as study_types_router
 from app.api.v1.price_catalog import router as price_catalog_router
@@ -26,6 +27,8 @@ from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.portal import router as portal_router
 from app.api.v1.worklist import router as worklist_router
 from app.api.v1.rbac import router as rbac_router
+from app.api.v1.internal_render import router as internal_render_router
+from app.core.config import settings
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -53,9 +56,33 @@ app.add_middleware(
 )
 
 # Add CORS middleware (more secure in production)
+#
+# Céluma 1.3 Phase 2, Block C, Story C11: `allow_origins` previously
+# included a literal "*" alongside explicit origins, together with
+# `allow_credentials=True`. Starlette's CORSMiddleware treats ANY "*" in the
+# list (not just an exact `["*"]`) as allow_all_origins=True, and in that
+# mode its *actual*-response headers (as opposed to preflight) always send
+# `Access-Control-Allow-Origin: *` — which is invalid combined with
+# `Access-Control-Allow-Credentials: true` per the Fetch/CORS spec. Browsers
+# silently reject that combination, so every credentialed cross-origin
+# request (`credentials: "include"`, used by login.tsx and elsewhere)
+# failed with "Failed to fetch" for any origin actually reached the backend
+# directly instead of through Vite's dev-only proxy — e.g. `vite preview`
+# (used to validate the static production build) on port 4173, or any real
+# deployment where the frontend and backend are on different origins. This
+# went unnoticed until this block because the dev server (5173) proxies
+# `/api/*` server-side, so the browser never saw it as cross-origin at all.
+# Fixed by listing only explicit origins — no bare "*" — so
+# Access-Control-Allow-Origin correctly echoes the literal requesting origin.
+#
+# Céluma 1.3 Phase 2, Block D, Story D1: the origin list itself now comes
+# from `settings.cors_allowed_origins` (CORS_ALLOWED_ORIGINS env var) instead
+# of being hardcoded here, so the production frontend origin can be
+# configured without a code change. `cors_allowed_origins_list` still
+# enforces the no-bare-"*" invariant above.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "*"],  # In production, specify exact origins
+    allow_origins=settings.cors_allowed_origins_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
@@ -161,8 +188,8 @@ async def basic_rate_limiting(request: Request, call_next):
     
     client_ip = request.client.host if request.client else "unknown"
     current_time = time.time()
-    window_size = 60  # 1 minute
-    max_requests = 100  # 100 requests per minute per IP
+    window_size = settings.rate_limit_window_seconds
+    max_requests = settings.rate_limit_max_requests
     
     async with rate_limit_lock:
         # Clean old entries
@@ -253,6 +280,9 @@ app.include_router(patients_router, prefix="/api/v1", dependencies=[Depends(curr
 app.include_router(requesting_physicians_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(laboratory_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(reports_router, prefix="/api/v1", dependencies=[Depends(current_user)])
+app.include_router(
+    report_letterheads_router, prefix="/api/v1", dependencies=[Depends(current_user)]
+)
 app.include_router(report_sections_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(study_types_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(price_catalog_router, prefix="/api/v1", dependencies=[Depends(current_user)])
@@ -260,6 +290,9 @@ app.include_router(billing_router, prefix="/api/v1", dependencies=[Depends(curre
 app.include_router(dashboard_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(worklist_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(portal_router, prefix="/api/v1")  # Portal has mixed auth requirements
+# Céluma 1.3 Phase 2, Block E: token-only auth (render token, not current_user)
+# — must NOT inherit reports_router's blanket Depends(current_user) above.
+app.include_router(internal_render_router, prefix="/api/v1")
 app.include_router(rbac_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 
 CELUMA_VERSION: str = os.environ.get("CELUMA_VERSION", "dev")

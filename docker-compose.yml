@@ -9,7 +9,13 @@ services:
     volumes: ["pgdata:/var/lib/postgresql/data"]
 
   api:
-    build: .
+    # `dev` target: runtime image + pytest/httpx, so `docker compose exec api
+    # pytest` works locally. CI builds with no --target and gets `runtime`,
+    # which ships no test tooling. See
+    # docs/celuma-1.3/phase-2-closure/backend-image-size-analysis.md.
+    build:
+      context: .
+      target: dev
     env_file: .env
     command: bash start.sh
     volumes:

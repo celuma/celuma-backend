@@ -1,0 +1,32 @@
+{
+  "_fixture_meta": {
+    "covers": ["contenido de varias páginas", "textos suficientemente largos para provocar saltos de página"],
+    "status": "APPROVED",
+    "note": "Texto sintético repetido deliberadamente largo, sin contenido clínico real, para forzar la paginación del renderer."
+  },
+  "base": {
+    "order_code": { "is_visible": true, "label": "Código de orden", "value": "SYN-0004" },
+    "patient": { "is_visible": true, "label": "Paciente", "value": "Paciente de Prueba Cuatro" },
+    "study_type": { "is_visible": true, "label": "Tipo de estudio", "value": "Histopatología" },
+    "patient_age": { "is_visible": true, "label": "Edad", "value": "63" },
+    "requesting_physician": { "is_visible": true, "label": "Médico solicitante", "value": "Dr. Solicitante Sintético" }
+  },
+  "sections": {
+    "section_macroscopic": {
+      "is_visible": true,
+      "label": "Macroscópica",
+      "type": "richtext",
+      "content": "<p>Párrafo sintético de prueba de paginación, número uno de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número dos de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número tres de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número cuatro de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número cinco de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número seis de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número siete de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número ocho de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p>"
+    },
+    "section_microscopic": {
+      "is_visible": true,
+      "label": "Microscópica",
+      "type": "richtext",
+      "content": "<p>Párrafo sintético de prueba de paginación, número nueve de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número diez de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número once de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número doce de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número trece de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número catorce de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número quince de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número dieciséis de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número diecisiete de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p><p>Párrafo sintético de prueba de paginación, número dieciocho de veinte, repetido para alcanzar una longitud suficiente y forzar múltiples páginas en el documento generado. Este texto no contiene información clínica real.</p>"
+    },
+    "images": { "is_visible": true, "label": "Imágenes", "type": "images", "content": [] }
+  },
+  "base_order": ["order_code", "patient", "study_type", "patient_age", "requesting_physician"],
+  "section_order": ["section_macroscopic", "section_microscopic", "images"],
+  "signatureMetadata": { "show_signature_section": false, "require_digital_signature": false }
+}

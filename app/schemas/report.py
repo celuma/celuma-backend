@@ -3,6 +3,8 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 
+
+
 class SignatureMetadata(BaseModel):
     """Metadata that controls the digital signature block of a report.
 
@@ -35,6 +37,38 @@ class ReportCreate(BaseModel):
     created_by: Optional[str] = None
     published_at: Optional[datetime] = None
     report: Optional[Dict[str, Any]] = None  # JSON body to be uploaded to S3
+    # Céluma 1.3 Phase 2, Block B: caller may select a published
+    # ReportTemplateVersion to create a V2 report. Only takes effect when
+    # the tenant has reports_v2_enabled=true; the backend resolves,
+    # validates, and freezes the definitive rendering snapshot server-side
+    # — this id is a selection, never a trusted snapshot. See
+    # phase-2-block-b-architecture-decision.md.
+    template_version_id: Optional[str] = None
+    # Post-Phase-2 remediation: caller may select a published/active
+    # ReportLetterheadVersion to brand this V2 report. If omitted, the
+    # backend resolves one server-side (template preference -> tenant
+    # default) and, if none is resolvable, falls back to the template
+    # version's own embedded `presentation` — never blocked, to avoid
+    # silently breaking tenants that have not adopted the letterhead
+    # domain yet. See template-letterhead-association-contract.md.
+    letterhead_version_id: Optional[str] = None
+
+class ReportResolvedResources(BaseModel):
+    """Céluma 1.3 Phase 2, Block C, Story C1.
+
+    Ephemeral resources resolved server-side from a V2 report's
+    `rendering_snapshot` (e.g. `presentation.header.logo_storage_id` -> a
+    downloadable URL). Never persisted — recomputed on every read — and
+    never written back into the snapshot stored in S3. Absent/empty for
+    legacy reports and for V2 reports with nothing to resolve (e.g. no
+    logo configured). See report-resource-resolution-contract.md.
+    """
+    header_logo_url: Optional[str] = None
+    # Second post-Phase-2 remediation (UX): twin of header_logo_url for
+    # presentation.footer.logo_storage_id — needed for Legacy parity
+    # (Legacy's logo lives in the footer, not the header).
+    footer_logo_url: Optional[str] = None
+
 
 class ReportResponse(BaseModel):
     """Schema for report response"""
@@ -59,6 +93,33 @@ class ReportDetailResponse(BaseModel):
     signed_at: Optional[datetime] = None
     report: Optional[Dict[str, Any]] = None  # reconstructed JSON from S3
     template: Optional[Dict[str, Any]] = None  # Snapshot of the template used at creation time
+    # Céluma 1.3 Phase 2, Block B: V2 metadata, sourced from ReportVersion.
+    # All null for legacy reports (schema_version absent/1).
+    schema_version: Optional[int] = None
+    template_version_id: Optional[str] = None
+    # Post-Phase-2 remediation: administrative twin of `template_version_id`
+    # — which ReportLetterheadVersion produced this version's `presentation`
+    # block. None for legacy reports and for V2 reports created before this
+    # remediation (never backfilled).
+    letterhead_version_id: Optional[str] = None
+    generated_by_renderer_version: Optional[str] = None
+    # Céluma 1.3 Phase 2, Block C: ephemeral, request-scoped resources
+    # resolved from `report.rendering_snapshot` (never part of the snapshot
+    # itself). None for legacy reports and for V2 reports with nothing to
+    # resolve.
+    resolved_resources: Optional["ReportResolvedResources"] = None
+    # Céluma 1.3 Phase 2, Block E: official PDF artifact status, so the
+    # editor/detail UI can show "Sin generar / Generando / Listo / Falló"
+    # without a separate round trip. None (pdf_generation_status) means no
+    # generation attempt has ever run for this version — including every
+    # historical version from before this block existed.
+    pdf_generation_status: Optional[str] = None
+    pdf_generated_at: Optional[datetime] = None
+    pdf_sha256: Optional[str] = None
+    pdf_size_bytes: Optional[int] = None
+    pdf_page_count: Optional[int] = None
+    pdf_error_code: Optional[str] = None
+    pdf_error_message: Optional[str] = None
 
 class ReportVersionCreate(BaseModel):
     """Schema for creating a report version"""
@@ -76,6 +137,10 @@ class ReportVersionResponse(BaseModel):
     version_no: int
     report_id: str
     is_current: bool
+    schema_version: Optional[int] = None
+    template_version_id: Optional[str] = None
+    letterhead_version_id: Optional[str] = None
+    generated_by_renderer_version: Optional[str] = None
 
 
 class ReportMetaResponse(BaseModel):
@@ -150,6 +215,31 @@ class ReportActionResponse(BaseModel):
     message: str
 
 
+class ReportSignAndPublishResponse(ReportActionResponse):
+    """Second post-Phase-2 remediation (UX): response of
+    `POST /{report_id}/sign-and-publish` — the published report together
+    with metadata of the just-generated official PDF (already signed), so
+    the frontend does not need a second round-trip before offering the
+    download."""
+    pdf_generation_status: Optional[str] = None
+    pdf_sha256: Optional[str] = None
+    pdf_size_bytes: Optional[int] = None
+    pdf_page_count: Optional[int] = None
+    pdf_generated_at: Optional[datetime] = None
+    # Fifth post-Phase-2 remediation: the UI must no longer *guess* which
+    # version to download. Previously it read `envelope.version_no` from a
+    # refreshed `/full` after publishing — a potentially stale value and,
+    # in any case, indirect. Now the publish response itself says which
+    # version the just-generated official PDF belongs to. See
+    # sign-and-publish-response-contract.md.
+    report_version_id: Optional[str] = None
+    version_no: Optional[int] = None
+    # True only when a downloadable PDF artifact exists for that version
+    # (`pdf_storage_id` present and generation READY). The signal the UI
+    # uses to show "Descargar PDF oficial" without reloading.
+    official_pdf_available: bool = False
+
+
 # Report Template Schemas
 class ReportTemplateCreate(BaseModel):
     """Schema for creating a report template"""
@@ -164,6 +254,17 @@ class ReportTemplateUpdate(BaseModel):
     description: Optional[str] = None
     template_json: Optional[Dict[str, Any]] = None
     is_active: Optional[bool] = None
+    # Post-Phase-2 remediation: administrative preference only, not
+    # ownership — see template-letterhead-association-contract.md. Omitting
+    # a preference (or None means "no preference") falls back to the
+    # tenant's default letterhead at report-creation time.
+    # Second remediation UX: legacy field, read-only for old rows — the
+    # app no longer writes it. Use preferred_letterhead_id.
+    preferred_letterhead_version_id: Optional[str] = None
+    # Second post-Phase-2 remediation (UX): the preferred logical
+    # letterhead (not a concrete version) — see
+    # template-simplification-contract.md.
+    preferred_letterhead_id: Optional[str] = None
 
 
 class ReportTemplateResponse(BaseModel):
@@ -174,6 +275,8 @@ class ReportTemplateResponse(BaseModel):
     description: Optional[str] = None
     is_active: bool
     created_at: datetime
+    preferred_letterhead_version_id: Optional[str] = None
+    preferred_letterhead_id: Optional[str] = None
 
 
 class ReportTemplateDetailResponse(BaseModel):
@@ -186,6 +289,8 @@ class ReportTemplateDetailResponse(BaseModel):
     created_by: Optional[str] = None
     is_active: bool
     created_at: datetime
+    preferred_letterhead_version_id: Optional[str] = None
+    preferred_letterhead_id: Optional[str] = None
 
 
 class ReportTemplatesListResponse(BaseModel):

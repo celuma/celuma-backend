@@ -12,6 +12,9 @@ from .requesting_physician import RequestingPhysician
 from .storage import StorageObject, SampleImageRendition
 from .laboratory import Order, Sample, SampleImage, OrderComment, Label, OrderLabel, SampleLabel
 from .report import Report, ReportVersion, ReportTemplate
+from .report_template_version import ReportTemplateVersion, ReportTemplateVersionStatus
+from .report_letterhead import ReportLetterhead
+from .report_letterhead_version import ReportLetterheadVersion, ReportLetterheadVersionStatus
 from .report_section import ReportSection
 from .study_type import StudyType
 from .price_catalog import PriceCatalog
@@ -57,6 +60,11 @@ __all__ = [
     "Report",
     "ReportVersion",
     "ReportTemplate",
+    "ReportTemplateVersion",
+    "ReportTemplateVersionStatus",
+    "ReportLetterhead",
+    "ReportLetterheadVersion",
+    "ReportLetterheadVersionStatus",
     "ReportSection",
     "StudyType",
     "PriceCatalog",

@@ -1,8 +1,11 @@
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field, Relationship
 from .base import BaseModel, TimestampMixin
+
+if TYPE_CHECKING:
+    from .user import AppUser, UserBranch
 
 class Tenant(BaseModel, TimestampMixin, table=True):
     """Tenant model for multi-tenancy"""
@@ -14,7 +17,11 @@ class Tenant(BaseModel, TimestampMixin, table=True):
     tax_id: Optional[str] = Field(max_length=50, default=None)
     logo_url: Optional[str] = Field(max_length=500, default=None)
     is_active: bool = Field(default=True)
-    
+    # Céluma 1.3 Phase 2, Block A: gates creation of new V2 reports only.
+    # Does not affect rendering of existing reports (schema_version-based,
+    # see report-schema-versioning.md) and is not read anywhere in this block.
+    reports_v2_enabled: bool = Field(default=False)
+
     # Basic relationships only - will add more as we fix the models
     branches: List["Branch"] = Relationship(back_populates="tenant")
     users: List["AppUser"] = Relationship(back_populates="tenant")

@@ -10,6 +10,7 @@ from app.models.storage import StorageObject
 from app.models.user import AppUser
 from app.models.enums import ReportStatus
 from app.services.s3 import S3Service
+from app.api.v1.reports import official_pdf_presigned_url
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -123,10 +124,15 @@ def get_physician_report(
     if not storage:
         raise HTTPException(404, "Storage object not found")
     
-    # Generate presigned URL (short expiration)
+    # Generate presigned URL (short expiration). Céluma 1.3 Phase 2, Block E:
+    # was previously calling generate_presigned_url(..., expiration=600) —
+    # `expiration` is not a real parameter of that method (it's `expires_in`),
+    # so this call would have raised a TypeError at runtime the first time a
+    # physician actually tried to download a PDF. Fixed here as part of
+    # connecting the portal to the persisted-PDF download flow (E11).
     s3 = S3Service()
-    url = s3.generate_presigned_url(storage.object_key, expiration=600)  # 10 minutes
-    
+    url = official_pdf_presigned_url(s3, storage.object_key, order.order_code, latest_version.version_no)
+
     return {
         "report_id": str(report.id),
         "order_code": order.order_code,
@@ -196,10 +202,13 @@ def get_patient_report(
     if not storage:
         raise HTTPException(404, "Storage object not found")
     
-    # Generate presigned URL (short expiration)
+    # Generate presigned URL (short expiration). Same `expiration` ->
+    # `expires_in` fix as get_physician_report above.
     s3 = S3Service()
-    url = s3.generate_presigned_url(storage.object_key, expiration=600)  # 10 minutes
-    
+    url = official_pdf_presigned_url(
+        s3, storage.object_key, matched_order.order_code, latest_version.version_no
+    )
+
     patient = session.get(Patient, matched_order.patient_id)
     patient_name = f"{patient.first_name} {patient.last_name}" if patient else "Unknown"
     

@@ -5,6 +5,12 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.models.report import Report, ReportVersion, ReportTemplate
+from app.models.report_template_version import ReportTemplateVersion, ReportTemplateVersionStatus
+from app.models.report_letterhead import ReportLetterhead
+from app.models.report_letterhead_version import (
+    ReportLetterheadVersion,
+    ReportLetterheadVersionStatus,
+)
 from app.models.laboratory import Order
 from app.models.tenant import Tenant, Branch
 from app.models.patient import Patient
@@ -16,6 +22,34 @@ from app.core.rbac import has_permission, has_any_role, ROLE_REVIEWER
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
 from app.services.s3 import S3Service
+from app.services.managed_tenant_image_service import (
+    ManagedTenantImageService,
+    InvalidImageError,
+    ImageRegistrationError,
+)
+from app.services.report_pdf_generation import (
+    ReportPdfGenerationService,
+    ReportPdfGenerationError,
+    ReportPdfAlreadyInProgressError,
+    ReportPdfImmutableError,
+    load_locked_version,
+)
+from app.services.letterhead_resolution import (
+    LetterheadArchivedError,
+    LetterheadConfigurationError,
+    LetterheadNotFoundError,
+    resolve_effective_letterhead_version,
+)
+from app.services.report_template_autoversion import snapshot_and_activate_template_version
+from app.services.report_publishing import (
+    embed_signature_metadata_if_required,
+    claim_publish,
+    clear_publish_claim,
+    finalize_publish,
+    ReportPublishError,
+    ReportPublishAlreadyInProgressError,
+    ReportPublishConflictError,
+)
 from app.schemas.report import (
     ReportCreate, 
     ReportResponse, 
@@ -31,15 +65,28 @@ from app.schemas.report import (
     ReportSignRequest,
     ReportReviewComment,
     ReportActionResponse,
+    ReportSignAndPublishResponse,
     ReportTemplateCreate,
     ReportTemplateUpdate,
     ReportTemplateResponse,
     ReportTemplateDetailResponse,
     ReportTemplatesListResponse,
     SignatureMetadata,
+    ReportResolvedResources,
+)
+from app.schemas.report_template_version import (
+    ReportTemplateVersionCreate,
+    ReportTemplateVersionResponse,
+    ReportTemplateVersionDetailResponse,
+    ReportTemplateVersionsListResponse,
+    ReportRenderingSnapshotV2,
+    ReportPresentationSnapshotV2,
+    ReportTemplateLogoUploadResponse,
 )
 from app.schemas.laboratory import ReportFullDetailResponse
+from pydantic import ValidationError as PydanticValidationError
 import json
+import re
 from datetime import datetime
 import logging
 
@@ -47,11 +94,86 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reports")
 
+# Céluma 1.3 Phase 2, Block B: identifies which backend logic produced a V2
+# report's rendering snapshot (there is no VersionedReportRendererV2 yet —
+# this only audits the *persistence* path, see
+# phase-2-block-b-architecture-decision.md).
+SNAPSHOT_BUILDER_VERSION = "block-b/1.0.0"
+
+# Statuses in which a report's content/template/branding must never change
+# again through the normal creation/versioning/PDF-upload flow (Story B9).
+# RETRACTED is included deliberately: retraction ends the normal editing
+# lifecycle and this block does not implement a formal amendment flow — see
+# block-c-dependencies.md.
+_IMMUTABLE_REPORT_STATUSES = (ReportStatus.PUBLISHED, ReportStatus.RETRACTED)
+
 
 def _require(user_id, code: str, session: Session) -> None:
     """Raise 403 if user lacks the specified permission."""
     if not has_permission(user_id, code, session):
         raise HTTPException(403, f"Permission required: {code}")
+
+
+def authorize_report_read_access(
+    session: Session, ctx: AuthContext, user: AppUser, report_id: str
+) -> Report:
+    """Fifth post-Phase-2 remediation — SINGLE read-access contract for a
+    report by internal laboratory staff.
+
+    Before this remediation every read-only route repeated its own checks
+    by hand, and that is where the divergence that produced the real
+    reported `403` slipped in: `GET /{id}/full` returned 200 while
+    `GET /{id}/versions/{n}/pdf` returned
+    `{"detail":"Report access blocked due to pending payment"}` (57 bytes,
+    byte-for-byte the body captured in Safari) for the SAME user, the
+    SAME report, and the SAME permission. See
+    official-pdf-download-root-cause.md and
+    report-read-authorization-contract.md.
+
+    The policy, now in one place:
+
+      * `reports:read`            -> 403 if missing (even if the id is known).
+      * missing report            -> 404.
+      * report from another tenant -> 404, NEVER 403: a 403 would confirm
+                                     that id exists in another laboratory.
+
+    `Order.billed_lock` deliberately does NOT participate here. It is the
+    delivery gate for third parties (patient and requesting physician) and
+    continues to apply, unchanged, in `app/api/v1/portal.py`. Applying it
+    to internal staff protected nothing — `/full` already returns the full
+    clinical content and the "Imprimir copia local" button already prints
+    from there — and it did break the real flow: the pathologist signed
+    their own report and could not download the PDF they had just generated.
+    """
+    _require(user.id, "reports:read", session)
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Report not found")
+    return report
+
+
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def official_pdf_filename(order_code: str, version_no: int) -> str:
+    """Céluma 1.3 Phase 2, Block E, Story E10: the download filename for
+    an official report PDF. Deliberately never derived from a patient name —
+    only the order's human-readable code, which is already shown in the lab
+    UI and is not more sensitive than the case itself."""
+    safe_code = _UNSAFE_FILENAME_CHARS.sub("-", order_code or "reporte").strip("-") or "reporte"
+    return f"reporte-{safe_code}-v{version_no}.pdf"
+
+
+def official_pdf_presigned_url(
+    s3: S3Service, object_key: str, order_code: str, version_no: int
+) -> str:
+    filename = official_pdf_filename(order_code, version_no)
+    return s3.generate_presigned_url(
+        object_key,
+        response_content_disposition=f'attachment; filename="{filename}"',
+    )
 
 
 # Deferred imports to avoid circular module-load (laboratory <-> reports)
@@ -151,6 +273,58 @@ def list_reports(
     
     return ReportsListResponse(reports=results)
 
+def _compensate_failed_v2_report_creation(report_id, session: Session) -> None:
+    """Best-effort compensation when a V2 report's S3/version write fails
+    after its `Report` row was already committed (Story B8).
+
+    This is NOT a distributed transaction: there is a real (narrow) window
+    where a process crash between the two commits below could still leave an
+    orphaned `Report`. That residual risk is documented in
+    phase-2-block-b-architecture-decision.md rather than solved with a
+    saga/outbox mechanism, which would be out of scope for this block.
+    """
+    report = session.get(Report, report_id)
+    if not report:
+        return
+    order_id = report.order_id
+
+    order = session.get(Order, order_id)
+    if order and order.report_id == report.id:
+        order.report_id = None
+        session.add(order)
+
+    from app.models.report_review import ReportReview
+
+    reviews = session.exec(
+        select(ReportReview).where(ReportReview.report_id == report_id)
+    ).all()
+    for review in reviews:
+        review.report_id = None
+        session.add(review)
+
+    from app.models.events import OrderEvent
+    from app.models.enums import EventType
+
+    events = session.exec(
+        select(OrderEvent).where(
+            OrderEvent.order_id == order_id,
+            OrderEvent.event_type == EventType.REPORT_CREATED,
+        )
+    ).all()
+    for event in events:
+        metadata = event.event_metadata or {}
+        if metadata.get("report_id") == str(report_id):
+            session.delete(event)
+
+    session.delete(report)
+    session.flush()
+
+    if order:
+        update_order_status_for_report(str(order_id), session)
+
+    session.commit()
+
+
 @router.post("/", response_model=ReportResponse)
 def create_report(
     report_data: ReportCreate,
@@ -158,41 +332,139 @@ def create_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Create a new report (requires reports:create)."""
+    """Create a new report (requires reports:create).
+
+    Céluma 1.3 Phase 2, Block B: when the tenant has
+    `reports_v2_enabled=true` AND the caller explicitly selects a
+    `template_version_id`, the report is created as schema_version=2 with a
+    backend-built, backend-validated rendering snapshot embedded in its JSON
+    body. In every other case (flag off, or no template_version_id sent) the
+    legacy flow below is unchanged byte-for-byte. See
+    phase-2-block-b-architecture-decision.md for the full rationale.
+    """
     _require(user.id, "reports:create", session)
     # Verify that the report's tenant_id matches the authenticated user's tenant_id
     if report_data.tenant_id != ctx.tenant_id:
         raise HTTPException(403, "Cannot create reports for a different tenant")
-    
+
     # Verify tenant, branch, and order exist
     tenant = session.get(Tenant, report_data.tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
-    
+
     branch = session.get(Branch, report_data.branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
-    
+
     # Verify branch belongs to the tenant
     if str(branch.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Branch does not belong to your tenant")
-    
+
     order = session.get(Order, report_data.order_id)
     if not order:
         raise HTTPException(404, "Order not found")
-    
+
     # Verify order belongs to the tenant
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Order does not belong to your tenant")
-    
+
     # Check if report already exists for this order
     existing_report = session.exec(
         select(Report).where(Report.order_id == report_data.order_id)
     ).first()
-    
+
     if existing_report:
         raise HTTPException(400, "Report already exists for this order")
-    
+
+    # ------------------------------------------------------------------
+    # Céluma 1.3 Phase 2, Block B, Story B6 — resolve V2 vs legacy BEFORE
+    # writing anything to the database, so an invalid V2 request never
+    # creates a partial Report row.
+    # ------------------------------------------------------------------
+    template_version: ReportTemplateVersion | None = None
+    validated_snapshot: ReportRenderingSnapshotV2 | None = None
+    resolved_letterhead_version: ReportLetterheadVersion | None = None
+    if report_data.template_version_id is not None:
+        if not tenant.reports_v2_enabled:
+            raise HTTPException(403, "V2 report creation is not enabled for this tenant")
+
+        template_version = session.get(ReportTemplateVersion, report_data.template_version_id)
+        if not template_version or str(template_version.tenant_id) != ctx.tenant_id:
+            raise HTTPException(404, "Template version not found")
+        if template_version.status == ReportTemplateVersionStatus.ARCHIVED:
+            raise HTTPException(
+                409, "Cannot create a report from an archived template version"
+            )
+        if report_data.report is None:
+            raise HTTPException(
+                400, "V2 reports require report content to build the rendering snapshot"
+            )
+        try:
+            validated_snapshot = ReportRenderingSnapshotV2.model_validate(
+                template_version.configuration
+            )
+        except PydanticValidationError as exc:
+            logger.error(
+                "Stored template version configuration failed re-validation",
+                extra={
+                    "event": "report.create_v2_invalid_template_version_configuration",
+                    "template_version_id": str(template_version.id),
+                    "error": str(exc),
+                },
+            )
+            raise HTTPException(500, "Template version configuration is invalid") from exc
+
+        # ------------------------------------------------------------------
+        # Post-Phase-2 remediation, R7; deterministic resolution + explicit
+        # block in the third remediation. `resolve_effective_letterhead_version`
+        # is the ONLY source of truth (shared with
+        # `GET /study-types/{id}/report-defaults`): explicit -> template
+        # preferred -> tenant default, with strict invariants
+        # (same tenant, active letterhead, EXACTLY one ACTIVE version).
+        #
+        # Deliberate behavior change: if NO letterhead resolves, V2 creation
+        # is blocked with 409 instead of silently keeping the `presentation`
+        # embedded in the template version. That silence is exactly what
+        # produced V2 reports with a letterhead the user never chose (and,
+        # in the editor, the fallback to Legacy). See
+        # deterministic-letterhead-resolution-contract.md.
+        # ------------------------------------------------------------------
+        try:
+            resolved_letterhead = resolve_effective_letterhead_version(
+                session,
+                ctx.tenant_id,
+                template=session.get(ReportTemplate, template_version.report_template_id),
+                letterhead_version_id=report_data.letterhead_version_id,
+            )
+        except LetterheadNotFoundError as exc:
+            raise HTTPException(404, exc.message) from None
+        except (LetterheadArchivedError, LetterheadConfigurationError) as exc:
+            raise HTTPException(409, exc.message) from None
+
+        if resolved_letterhead is None:
+            raise HTTPException(
+                409,
+                "No hay ningún membrete predeterminado configurado para este "
+                "laboratorio. Configura uno en Configuración → Membretes y "
+                "márcalo como predeterminado antes de crear reportes.",
+            )
+
+        resolved_letterhead_version = resolved_letterhead.version
+        validated_snapshot = ReportRenderingSnapshotV2(
+            schema_version=2,
+            template=validated_snapshot.template,
+            presentation=resolved_letterhead.presentation,
+        )
+        logger.info(
+            "V2 report letterhead resolved",
+            extra={
+                "event": "report.create_v2_letterhead_resolved",
+                "letterhead_id": resolved_letterhead.letterhead_id,
+                "letterhead_version_id": resolved_letterhead.letterhead_version_id,
+                "resolution_source": resolved_letterhead.source.value,
+            },
+        )
+
     report = Report(
         tenant_id=report_data.tenant_id,
         branch_id=report_data.branch_id,
@@ -252,43 +524,98 @@ def create_report(
     
     session.commit()
     session.refresh(report)
-    
+
     # If a JSON report body is provided, upload to S3 and create initial version (v1)
     if report_data.report is not None:
-        s3 = S3Service()
-        # Build S3 key
-        key = f"reports/{report.tenant_id}/{report.branch_id}/{report.id}/versions/1/report.json"
-        data_bytes = json.dumps(report_data.report, ensure_ascii=False).encode("utf-8")
-        info = s3.upload_bytes(data_bytes, key=key, content_type="application/json")
+        body = dict(report_data.report)
+        is_v2 = template_version is not None
+        if is_v2:
+            # Backend-authoritative: the client's `report_data.report` never
+            # carries its own snapshot — only the validated, server-resolved
+            # one is embedded (Story B6, "el frontend puede seleccionar
+            # template_version_id, pero no debe poder suministrar
+            # arbitrariamente el snapshot final").
+            body["schema_version"] = 2
+            body["rendering_snapshot"] = validated_snapshot.model_dump(mode="json")
 
-        storage = StorageObject(
-            provider="aws",
-            region=s3.region,
-            bucket=info.bucket,
-            object_key=info.key,
-            version_id=info.version_id,
-            etag=info.etag,
-            content_type="application/json",
-            size_bytes=info.size_bytes,
-            created_by=report.created_by,
-        )
-        session.add(storage)
-        session.flush()
+        try:
+            s3 = S3Service()
+            # Build S3 key
+            key = f"reports/{report.tenant_id}/{report.branch_id}/{report.id}/versions/1/report.json"
+            data_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            info = s3.upload_bytes(data_bytes, key=key, content_type="application/json")
 
-        # Mark existing versions as not current (none expected on create)
-        # Create version 1 as current
-        version = ReportVersion(
-            report_id=report.id,
-            version_no=1,
-            json_storage_id=storage.id,
-            pdf_storage_id=None,
-            html_storage_id=None,
-            authored_by=report.created_by,
-            is_current=True,
-        )
-        session.add(version)
-        session.commit()
-        session.refresh(version)
+            storage = StorageObject(
+                provider="aws",
+                region=s3.region,
+                bucket=info.bucket,
+                object_key=info.key,
+                version_id=info.version_id,
+                etag=info.etag,
+                content_type="application/json",
+                size_bytes=info.size_bytes,
+                created_by=report.created_by,
+            )
+            session.add(storage)
+            session.flush()
+
+            # Mark existing versions as not current (none expected on create)
+            # Create version 1 as current
+            version = ReportVersion(
+                report_id=report.id,
+                version_no=1,
+                json_storage_id=storage.id,
+                pdf_storage_id=None,
+                html_storage_id=None,
+                authored_by=report.created_by,
+                is_current=True,
+                schema_version=(2 if is_v2 else None),
+                template_version_id=(template_version.id if is_v2 else None),
+                generated_by_renderer_version=(
+                    f"backend-snapshot-builder/{SNAPSHOT_BUILDER_VERSION}" if is_v2 else None
+                ),
+                letterhead_version_id=(
+                    resolved_letterhead_version.id
+                    if is_v2 and resolved_letterhead_version
+                    else None
+                ),
+            )
+            session.add(version)
+            session.commit()
+            session.refresh(version)
+        except Exception as exc:
+            session.rollback()
+            if is_v2:
+                # Story B8: a V2 report is all-or-nothing. Compensate the
+                # already-committed Report row rather than leave it orphaned
+                # with no content and no snapshot anywhere.
+                _compensate_failed_v2_report_creation(report.id, session)
+                logger.error(
+                    "V2 report creation failed after the Report row was committed; compensated",
+                    extra={
+                        "event": "report.create_v2_failed_compensated",
+                        "report_id": str(report.id),
+                        "error": str(exc),
+                    },
+                )
+                raise HTTPException(
+                    500,
+                    "Failed to create the V2 report: the rendering snapshot could "
+                    "not be persisted. No report was created.",
+                )
+            # Legacy path: this failure mode (Report row committed, content
+            # upload then fails) pre-dates this block and is not changed
+            # here — see phase-2-block-b-architecture-decision.md, B8, for
+            # why fixing it is out of scope for Block B.
+            logger.error(
+                "Report content upload failed after the Report row was already committed",
+                extra={
+                    "event": "report.create_legacy_content_upload_failed",
+                    "report_id": str(report.id),
+                    "error": str(exc),
+                },
+            )
+            raise
 
     return ReportResponse(
         id=str(report.id),
@@ -297,6 +624,209 @@ def create_report(
         tenant_id=str(report.tenant_id),
         branch_id=str(report.branch_id)
     )
+
+
+def _carry_forward_v2_metadata(
+    current_version: ReportVersion | None,
+    report_body: dict | None,
+    session: Session,
+) -> tuple[dict | None, int | None, str | None, str | None, str | None]:
+    """Céluma 1.3 Phase 2, Block C, Story C9.
+
+    `create_report_new_version` only ever changes clinical content — it must
+    never let a content-only save silently degrade a V2 report to legacy.
+    Before this fix, neither `ReportVersion.schema_version`/
+    `template_version_id` nor the JSON body's `rendering_snapshot` were
+    carried forward onto a new content version, so saving an edit through
+    the editor (whose `buildEnvelope()` rebuilds `report` from the template
+    definition) would silently strip the snapshot and every later read would
+    resolve the report as legacy. See versioned-renderer-v2-contract.md,
+    "Snapshot continuity across content versions", and
+    phase-2-block-c-architecture-decision.md.
+
+    Always re-attaches the FROZEN snapshot already stored on the current
+    version — this never re-resolves or re-validates against a live
+    ReportTemplateVersion (that would violate "do not re-query the
+    administrative template"), and never trusts a `rendering_snapshot` the
+    client may have sent, only ever the one already persisted for this report.
+
+    Post-Phase-2 remediation: also carries forward `letterhead_version_id`,
+    the administrative twin of `template_version_id` — the letterhead
+    selector is only ever shown before a report's first save (D10), so a
+    content-only save on an existing report must never change which
+    letterhead produced its frozen `presentation` block.
+
+    Fifth post-Phase-2 remediation: that "only before the first save"
+    boundary was precisely the wrong one (Observation A). This function
+    REMAINS pure carry-forward — it never changes letterhead on its own —
+    and the explicit, validated change is applied on top in
+    `_apply_draft_letterhead_change`. See
+    draft-letterhead-change-contract.md.
+    """
+    if current_version is None or current_version.schema_version != 2:
+        return report_body, None, None, None, None
+
+    carried_metadata = (
+        current_version.schema_version,
+        str(current_version.template_version_id) if current_version.template_version_id else None,
+        current_version.generated_by_renderer_version,
+        str(current_version.letterhead_version_id) if current_version.letterhead_version_id else None,
+    )
+
+    if report_body is None:
+        return None, *carried_metadata
+
+    frozen_snapshot = None
+    if current_version.json_storage_id:
+        storage = session.get(StorageObject, current_version.json_storage_id)
+        if storage:
+            s3 = S3Service()
+            try:
+                existing = json.loads(s3.download_text(storage.object_key))
+                frozen_snapshot = existing.get("rendering_snapshot")
+            except Exception:
+                logger.warning(
+                    "Could not re-download the current V2 rendering_snapshot while "
+                    "creating a new content version; the new version's JSON body will "
+                    "be uploaded without it",
+                    extra={
+                        "event": "report.new_version_v2_snapshot_carry_forward_failed",
+                        "report_version_id": str(current_version.id),
+                    },
+                )
+                frozen_snapshot = None
+
+    if frozen_snapshot is None:
+        return report_body, *carried_metadata
+
+    carried_body = dict(report_body)
+    carried_body["schema_version"] = 2
+    carried_body["rendering_snapshot"] = frozen_snapshot
+    return carried_body, *carried_metadata
+
+
+# Statuses where the letterhead is already part of the version submitted
+# for review and cannot be changed (fifth post-Phase-2 remediation,
+# Observation A). The boundary is NOT "the report already has an id" — it
+# is "the report has left DRAFT". See letterhead-freeze-at-review-contract.md.
+_LETTERHEAD_EDITABLE_STATUSES = (ReportStatus.DRAFT,)
+
+
+def _apply_draft_letterhead_change(
+    session: Session,
+    ctx: AuthContext,
+    report: Report,
+    carried_body: dict | None,
+    carried_schema_version: int | None,
+    carried_letterhead_version_id: str | None,
+    requested_letterhead_version_id: str | None,
+) -> tuple[dict | None, str | None, ReportLetterheadVersion | None]:
+    """Fifth post-Phase-2 remediation — letterhead change on an already
+    persisted DRAFT (Observation A).
+
+    Replaces EXCLUSIVELY `rendering_snapshot.presentation` and
+    `ReportVersion.letterhead_version_id`. Never touches
+    `rendering_snapshot.template`, `template_version_id`, base fields,
+    sections, clinical values, images, patient or order data, signature,
+    history, or already-generated PDFs: the incoming `carried_body` is
+    already the definitive clinical content and only one key is replaced
+    in it.
+
+    Presentation is ALWAYS obtained server-side from the letterhead
+    version id (via `resolve_effective_letterhead_version`, the only
+    source of truth since the third remediation). A `presentation` that
+    arrives in the client body is never used — the client only chooses,
+    it does not dictate the design.
+
+    Returns `(body, letterhead_version_id, resolved_version|None)`; the
+    third position is non-null only when a real change happened, so the
+    caller can audit it.
+    """
+    # No explicit request, or it is exactly the letterhead the version
+    # already has: this is a normal content save — pure carry-forward.
+    if requested_letterhead_version_id is None:
+        return carried_body, carried_letterhead_version_id, None
+    if str(requested_letterhead_version_id) == str(carried_letterhead_version_id or ""):
+        return carried_body, carried_letterhead_version_id, None
+
+    # A legacy report (or V2 without a snapshot) has no `presentation`
+    # block to replace; changing the letterhead there means nothing and is
+    # ignored silently, exactly as before this remediation.
+    if carried_schema_version != 2:
+        return carried_body, carried_letterhead_version_id, None
+
+    # --- La frontera de inmutabilidad -------------------------------------
+    if report.status not in _LETTERHEAD_EDITABLE_STATUSES:
+        raise HTTPException(
+            409,
+            "El membrete quedó fijado al enviar el reporte a revisión y ya no "
+            f"puede cambiarse (estado actual: {report.status}).",
+        )
+
+    # --- Validation of the requested letterhead ---------------------------
+    try:
+        resolved = resolve_effective_letterhead_version(
+            session,
+            ctx.tenant_id,
+            letterhead_version_id=requested_letterhead_version_id,
+        )
+    except LetterheadNotFoundError as exc:
+        # Includes the cross-tenant case: the resolver does not distinguish
+        # "does not exist" from "belongs to another laboratory", precisely
+        # so foreign ids are never confirmed.
+        raise HTTPException(404, exc.message) from None
+    except (LetterheadArchivedError, LetterheadConfigurationError) as exc:
+        raise HTTPException(409, exc.message) from None
+
+    if resolved is None:  # pragma: no cover - explicit branch never returns None
+        raise HTTPException(404, "Letterhead version not found")
+
+    # `resolve_effective_letterhead_version` validates tenant, archived, and
+    # VERSION configuration, but the explicit branch does not check that
+    # the logical letterhead is still active. A deactivated letterhead
+    # remains readable for historical reports that already use it, but
+    # must not be selectable again.
+    if not resolved.letterhead.is_active:
+        raise HTTPException(
+            409,
+            f"El membrete «{resolved.letterhead.name}» está desactivado y no "
+            "puede asignarse a un reporte.",
+        )
+    if resolved.version.status != ReportLetterheadVersionStatus.ACTIVE:
+        raise HTTPException(
+            409,
+            "Solo puede asignarse la versión activa de un membrete "
+            f"(la versión indicada está en estado {resolved.version.status}).",
+        )
+
+    # --- Surgical replacement of `presentation` ---------------------------
+    if not isinstance(carried_body, dict):
+        # A save without a JSON body cannot rewrite the snapshot; only the
+        # administrative link is changed, which is all there is.
+        return carried_body, str(resolved.version.id), resolved.version
+
+    snapshot = carried_body.get("rendering_snapshot")
+    if not isinstance(snapshot, dict):
+        return carried_body, str(resolved.version.id), resolved.version
+
+    new_body = dict(carried_body)
+    new_snapshot = dict(snapshot)
+    # `template` is preserved byte-for-byte: letterhead is presentation,
+    # the clinical template is something else (separation from the first
+    # remediation).
+    new_snapshot["presentation"] = resolved.presentation.model_dump(mode="json")
+    new_body["rendering_snapshot"] = new_snapshot
+
+    logger.info(
+        "DRAFT report letterhead changed",
+        extra={
+            "event": "report.draft_letterhead_changed",
+            "report_id": str(report.id),
+            "old_letterhead_version_id": carried_letterhead_version_id,
+            "new_letterhead_version_id": str(resolved.version.id),
+        },
+    )
+    return new_body, str(resolved.version.id), resolved.version
 
 
 @router.post("/{report_id}/new_version", response_model=ReportVersionResponse)
@@ -323,17 +853,55 @@ def create_report_new_version(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.3 Phase 2, Block B, Story B9: a published (or retracted)
+    # report's content/template/branding is frozen. This moves the
+    # protection from the frontend (which already disables the relevant
+    # buttons) into the API itself — see phase-2-block-b-architecture-decision.md.
+    if report.status in _IMMUTABLE_REPORT_STATUSES:
+        raise HTTPException(
+            409, f"Cannot create a new version for a report in {report.status} status"
+        )
+
     # Determine next version number
     current_version = session.exec(
         select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
     ).first()
     next_version_no = (current_version.version_no + 1) if current_version else 1
 
+    (
+        carried_report_body,
+        carried_schema_version,
+        carried_template_version_id,
+        carried_renderer_version,
+        carried_letterhead_version_id,
+    ) = _carry_forward_v2_metadata(current_version, report_data.report, session)
+
+    # Fifth post-Phase-2 remediation (Observation A): a normal DRAFT save
+    # now accepts `letterhead_version_id`. Extending this endpoint was
+    # preferred over creating a new one (brief §5, "preferred option")
+    # because the letterhead change ALWAYS travels with the content the
+    # user has on screen: a separate endpoint would force two non-atomic
+    # calls and open the door to saving the new letterhead with the old
+    # content. See remediation-5-architecture-decision.md.
+    (
+        carried_report_body,
+        carried_letterhead_version_id,
+        changed_letterhead_version,
+    ) = _apply_draft_letterhead_change(
+        session,
+        ctx,
+        report,
+        carried_report_body,
+        carried_schema_version,
+        carried_letterhead_version_id,
+        report_data.letterhead_version_id,
+    )
+
     json_storage_id = None
-    if report_data.report is not None:
+    if carried_report_body is not None:
         s3 = S3Service()
         key = f"reports/{report.tenant_id}/{report.branch_id}/{report.id}/versions/{next_version_no}/report.json"
-        data_bytes = json.dumps(report_data.report, ensure_ascii=False).encode("utf-8")
+        data_bytes = json.dumps(carried_report_body, ensure_ascii=False).encode("utf-8")
         info = s3.upload_bytes(data_bytes, key=key, content_type="application/json")
 
         storage = StorageObject(
@@ -365,6 +933,10 @@ def create_report_new_version(
         html_storage_id=None,
         authored_by=report_data.created_by,
         is_current=True,
+        schema_version=carried_schema_version,
+        template_version_id=carried_template_version_id,
+        generated_by_renderer_version=carried_renderer_version,
+        letterhead_version_id=carried_letterhead_version_id,
     )
     session.add(new_version)
     
@@ -399,7 +971,34 @@ def create_report_new_version(
         created_by=report_data.created_by,
     )
     session.add(version_event)
-    
+
+    # Fifth remediation (§3.4.8): a DRAFT letterhead change is audited
+    # separately from the content save — it is an administrative decision
+    # about how the official document will look, not just another clinical
+    # edit.
+    if changed_letterhead_version is not None:
+        _create_audit_log(
+            session=session,
+            tenant_id=ctx.tenant_id,
+            branch_id=str(report.branch_id),
+            actor_user_id=ctx.user_id,
+            action="REPORT.CHANGE_LETTERHEAD",
+            entity_type="report",
+            entity_id=str(report.id),
+            old_values={
+                "letterhead_version_id": (
+                    str(current_version.letterhead_version_id)
+                    if current_version and current_version.letterhead_version_id
+                    else None
+                ),
+            },
+            new_values={
+                "letterhead_version_id": str(changed_letterhead_version.id),
+                "letterhead_id": str(changed_letterhead_version.report_letterhead_id),
+                "version_no": next_version_no,
+            },
+        )
+
     session.commit()
     session.refresh(new_version)
 
@@ -408,6 +1007,14 @@ def create_report_new_version(
         version_no=new_version.version_no,
         report_id=str(new_version.report_id),
         is_current=new_version.is_current,
+        schema_version=new_version.schema_version,
+        template_version_id=(
+            str(new_version.template_version_id) if new_version.template_version_id else None
+        ),
+        letterhead_version_id=(
+            str(new_version.letterhead_version_id) if new_version.letterhead_version_id else None
+        ),
+        generated_by_renderer_version=new_version.generated_by_renderer_version,
     )
 
 @router.get("/worklist", response_model=ReportsListResponse)
@@ -516,6 +1123,14 @@ def list_templates(
                 description=t.description,
                 is_active=t.is_active,
                 created_at=t.created_at,
+                preferred_letterhead_version_id=(
+                    str(t.preferred_letterhead_version_id)
+                    if t.preferred_letterhead_version_id
+                    else None
+                ),
+                preferred_letterhead_id=(
+                    str(t.preferred_letterhead_id) if t.preferred_letterhead_id else None
+                ),
             )
             for t in templates
         ]
@@ -547,6 +1162,14 @@ def get_template(
         created_by=str(template.created_by) if template.created_by else None,
         is_active=template.is_active,
         created_at=template.created_at,
+        preferred_letterhead_version_id=(
+            str(template.preferred_letterhead_version_id)
+            if template.preferred_letterhead_version_id
+            else None
+        ),
+        preferred_letterhead_id=(
+            str(template.preferred_letterhead_id) if template.preferred_letterhead_id else None
+        ),
     )
 
 
@@ -571,7 +1194,12 @@ def create_template(
     session.add(template)
     session.commit()
     session.refresh(template)
-    
+
+    # Second post-Phase-2 remediation (UX): create and activate the first
+    # internal clinical revision at once, if a letterhead is already
+    # resolvable.
+    snapshot_and_activate_template_version(session, template, user.id)
+
     logger.info(
         f"Report template '{template.name}' created",
         extra={
@@ -580,7 +1208,7 @@ def create_template(
             "user_id": str(user.id),
         },
     )
-    
+
     return ReportTemplateResponse(
         id=str(template.id),
         tenant_id=str(template.tenant_id),
@@ -618,11 +1246,53 @@ def update_template(
         flag_modified(template, "template_json")
     if template_data.is_active is not None:
         template.is_active = template_data.is_active
-    
+    # Post-Phase-2 remediation: unlike the fields above, an explicit null is
+    # meaningful here ("no preference, use the tenant default") — so this
+    # checks `model_fields_set` instead of `is not None`.
+    if "preferred_letterhead_version_id" in template_data.model_fields_set:
+        new_pref = template_data.preferred_letterhead_version_id
+        if new_pref is not None:
+            pref_version = session.get(ReportLetterheadVersion, new_pref)
+            if (
+                not pref_version
+                or str(pref_version.tenant_id) != ctx.tenant_id
+                or pref_version.status == ReportLetterheadVersionStatus.ARCHIVED
+            ):
+                raise HTTPException(
+                    400,
+                    "preferred_letterhead_version_id must reference a "
+                    "non-archived letterhead version owned by this tenant",
+                )
+        template.preferred_letterhead_version_id = new_pref
+
+    # Second post-Phase-2 remediation (UX): the field the app writes from
+    # now on is the logical letterhead, not a concrete version. Same
+    # `model_fields_set` pattern as the legacy field above: an explicit
+    # `null` clears the preference (falls back to the tenant default).
+    if "preferred_letterhead_id" in template_data.model_fields_set:
+        new_letterhead_pref = template_data.preferred_letterhead_id
+        if new_letterhead_pref is not None:
+            pref_letterhead = session.get(ReportLetterhead, new_letterhead_pref)
+            if not pref_letterhead or str(pref_letterhead.tenant_id) != ctx.tenant_id:
+                raise HTTPException(
+                    400,
+                    "preferred_letterhead_id must reference a letterhead owned by this tenant",
+                )
+        template.preferred_letterhead_id = new_letterhead_pref
+
     session.add(template)
     session.commit()
     session.refresh(template)
-    
+
+    # Second post-Phase-2 remediation (UX): re-snapshot/activate the
+    # internal clinical revision only if `template_json` changed (internal
+    # hash-diff). A `preferred_letterhead_id` change alone does not trigger
+    # a new revision: the letterhead is resolved fresh on every report
+    # creation (resolve_effective_letterhead_version), never from the
+    # `presentation` embedded in this version — see
+    # report-letterhead-selection-ux.md.
+    snapshot_and_activate_template_version(session, template, user.id)
+
     logger.info(
         f"Report template '{template.name}' updated",
         extra={
@@ -631,7 +1301,7 @@ def update_template(
             "user_id": str(user.id),
         },
     )
-    
+
     return ReportTemplateResponse(
         id=str(template.id),
         tenant_id=str(template.tenant_id),
@@ -639,6 +1309,14 @@ def update_template(
         description=template.description,
         is_active=template.is_active,
         created_at=template.created_at,
+        preferred_letterhead_version_id=(
+            str(template.preferred_letterhead_version_id)
+            if template.preferred_letterhead_version_id
+            else None
+        ),
+        preferred_letterhead_id=(
+            str(template.preferred_letterhead_id) if template.preferred_letterhead_id else None
+        ),
     )
 
 
@@ -660,6 +1338,23 @@ def delete_template(
         raise HTTPException(403, "Template does not belong to your tenant")
     
     if hard_delete:
+        # Céluma 1.3 Phase 2, Block B: a template with published versions can
+        # never be hard-deleted — those versions may still be referenced by
+        # report_version rows and must remain reconstructible. Soft-delete
+        # (deactivate) instead. The FK itself already blocks this at the DB
+        # level (no ON DELETE CASCADE); this check returns a clear 409
+        # instead of surfacing a raw IntegrityError.
+        has_versions = session.exec(
+            select(ReportTemplateVersion.id).where(
+                ReportTemplateVersion.report_template_id == template.id
+            )
+        ).first()
+        if has_versions:
+            raise HTTPException(
+                409,
+                "Cannot permanently delete a template with published versions. "
+                "Archive its versions or deactivate the template instead.",
+            )
         # Permanently delete the template
         session.delete(template)
         session.commit()
@@ -690,6 +1385,411 @@ def delete_template(
         )
         
         return {"message": "Template deactivated", "id": str(template.id)}
+
+
+# ============================================================================
+# Report Template Version Endpoints (append-only, immutable) — Block B
+#
+# These publish/activate/archive immutable snapshots of a template's
+# rendering configuration for administration and audit. They are NEVER
+# consulted by a renderer to reconstruct an existing report — that source of
+# truth is the snapshot embedded in the report's own JSON body at creation
+# time (see phase-2-block-b-architecture-decision.md). There is deliberately
+# no PUT/PATCH here: correcting a version means publishing a new one.
+# ============================================================================
+
+def _get_owned_template(template_id: str, ctx: AuthContext, session: Session) -> ReportTemplate:
+    template = session.get(ReportTemplate, template_id)
+    if not template:
+        raise HTTPException(404, "Template not found")
+    if str(template.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Template not found")
+    return template
+
+
+def _get_owned_template_version(
+    template_id: str, version_id: str, ctx: AuthContext, session: Session
+) -> ReportTemplateVersion:
+    version = session.get(ReportTemplateVersion, version_id)
+    if (
+        not version
+        or str(version.report_template_id) != template_id
+        or str(version.tenant_id) != ctx.tenant_id
+    ):
+        raise HTTPException(404, "Template version not found")
+    return version
+
+
+def _template_version_response(v: ReportTemplateVersion) -> ReportTemplateVersionResponse:
+    return ReportTemplateVersionResponse(
+        id=str(v.id),
+        tenant_id=str(v.tenant_id),
+        report_template_id=str(v.report_template_id),
+        version_number=v.version_number,
+        schema_version=v.schema_version,
+        status=v.status,
+        created_by=str(v.created_by) if v.created_by else None,
+        published_at=v.published_at,
+        activated_at=v.activated_at,
+        archived_at=v.archived_at,
+    )
+
+
+@router.get(
+    "/templates/{template_id}/versions", response_model=ReportTemplateVersionsListResponse
+)
+def list_template_versions(
+    template_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """List all published versions of a template, newest first (requires reports:manage_templates)."""
+    _require(user.id, "reports:manage_templates", session)
+    _get_owned_template(template_id, ctx, session)
+    versions = session.exec(
+        select(ReportTemplateVersion)
+        .where(ReportTemplateVersion.report_template_id == template_id)
+        .order_by(ReportTemplateVersion.version_number.desc())
+    ).all()
+    return ReportTemplateVersionsListResponse(
+        versions=[_template_version_response(v) for v in versions]
+    )
+
+
+@router.get(
+    "/templates/{template_id}/versions/{version_id}",
+    response_model=ReportTemplateVersionDetailResponse,
+)
+def get_template_version(
+    template_id: str,
+    version_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Get a specific template version, including its full immutable configuration."""
+    _require(user.id, "reports:manage_templates", session)
+    _get_owned_template(template_id, ctx, session)
+    version = _get_owned_template_version(template_id, version_id, ctx, session)
+    return ReportTemplateVersionDetailResponse(
+        **_template_version_response(version).model_dump(),
+        configuration=version.configuration,
+    )
+
+
+@router.post(
+    "/templates/{template_id}/versions", response_model=ReportTemplateVersionDetailResponse
+)
+def create_template_version(
+    template_id: str,
+    payload: ReportTemplateVersionCreate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Publish a new, immutable version of a template's rendering configuration.
+
+    `payload.configuration` is validated against `ReportRenderingSnapshotV2`
+    by FastAPI/Pydantic before this function runs. Append-only: this is the
+    only way to add a version; there is no endpoint to edit one afterwards.
+    """
+    _require(user.id, "reports:manage_templates", session)
+    template = _get_owned_template(template_id, ctx, session)
+
+    logo_storage_id = payload.configuration.presentation.header.logo_storage_id
+    if logo_storage_id is not None:
+        logo_object = session.get(StorageObject, logo_storage_id)
+        if not logo_object:
+            raise HTTPException(400, "logo_storage_id does not reference an existing object")
+        # Céluma 1.3 Phase 2, Block C, Story C1: a logo referenced by a
+        # published template version must be explicitly owned by the same
+        # tenant that publishes it. `StorageObject.tenant_id` is nullable
+        # (most objects predate this scoping and are tenant-scoped
+        # indirectly through a parent entity instead), so an unscoped
+        # object is rejected here too — it was never tagged as belonging to
+        # this tenant, so it cannot be trusted as this tenant's logo. See
+        # report-resource-resolution-contract.md.
+        if str(logo_object.tenant_id) != str(template.tenant_id):
+            raise HTTPException(
+                400, "logo_storage_id does not reference an object owned by this tenant"
+            )
+
+    last_version = session.exec(
+        select(ReportTemplateVersion)
+        .where(ReportTemplateVersion.report_template_id == template.id)
+        .order_by(ReportTemplateVersion.version_number.desc())
+    ).first()
+    next_version_number = (last_version.version_number + 1) if last_version else 1
+
+    version = ReportTemplateVersion(
+        tenant_id=template.tenant_id,
+        report_template_id=template.id,
+        version_number=next_version_number,
+        schema_version=payload.configuration.schema_version,
+        configuration=payload.configuration.model_dump(mode="json"),
+        status=ReportTemplateVersionStatus.PUBLISHED,
+        created_by=user.id,
+    )
+    session.add(version)
+    session.commit()
+    session.refresh(version)
+
+    logger.info(
+        f"Report template version {version.version_number} published for template {template_id}",
+        extra={
+            "event": "report_template_version.published",
+            "template_id": template_id,
+            "version_id": str(version.id),
+            "user_id": str(user.id),
+        },
+    )
+
+    return ReportTemplateVersionDetailResponse(
+        **_template_version_response(version).model_dump(),
+        configuration=version.configuration,
+    )
+
+
+@router.post(
+    "/templates/{template_id}/versions/{version_id}/activate",
+    response_model=ReportTemplateVersionResponse,
+)
+def activate_template_version(
+    template_id: str,
+    version_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Mark a version as the template's active/default version.
+
+    At most one version is ACTIVE per template at a time (also enforced by a
+    partial unique index at the database level). Calling this on an
+    ARCHIVED version reactivates it — that is the explicit, intentional flow
+    for reactivation; nothing else may reactivate an archived version as a
+    side effect.
+    """
+    _require(user.id, "reports:manage_templates", session)
+    _get_owned_template(template_id, ctx, session)
+    version = _get_owned_template_version(template_id, version_id, ctx, session)
+
+    previous_active = session.exec(
+        select(ReportTemplateVersion).where(
+            ReportTemplateVersion.report_template_id == template_id,
+            ReportTemplateVersion.status == ReportTemplateVersionStatus.ACTIVE,
+            ReportTemplateVersion.id != version.id,
+        )
+    ).first()
+    if previous_active:
+        previous_active.status = ReportTemplateVersionStatus.PUBLISHED
+        session.add(previous_active)
+        # Flush the demotion before promoting `version` below: both rows are
+        # covered by the same partial unique index (at most one ACTIVE per
+        # template), which Postgres checks per-statement, not per-transaction.
+        # Without this explicit ordering, the flush order of the two UPDATEs
+        # is otherwise unspecified and can violate the index transiently.
+        session.flush()
+
+    version.status = ReportTemplateVersionStatus.ACTIVE
+    version.activated_at = datetime.utcnow()
+    version.archived_at = None
+    session.add(version)
+    session.commit()
+    session.refresh(version)
+
+    logger.info(
+        f"Report template version {version_id} activated for template {template_id}",
+        extra={
+            "event": "report_template_version.activated",
+            "template_id": template_id,
+            "version_id": version_id,
+            "user_id": str(user.id),
+        },
+    )
+    return _template_version_response(version)
+
+
+@router.post(
+    "/templates/{template_id}/versions/{version_id}/archive",
+    response_model=ReportTemplateVersionResponse,
+)
+def archive_template_version(
+    template_id: str,
+    version_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Retire a version so it can no longer be selected for new reports.
+
+    Existing reports that already reference this version are unaffected:
+    their rendering snapshot was already embedded in their own JSON body at
+    creation time and is never re-read from here.
+    """
+    _require(user.id, "reports:manage_templates", session)
+    _get_owned_template(template_id, ctx, session)
+    version = _get_owned_template_version(template_id, version_id, ctx, session)
+
+    if version.status == ReportTemplateVersionStatus.ACTIVE:
+        raise HTTPException(
+            409,
+            "Cannot archive the active version. Activate a replacement version first.",
+        )
+    if version.status == ReportTemplateVersionStatus.ARCHIVED:
+        raise HTTPException(400, "Version is already archived")
+
+    version.status = ReportTemplateVersionStatus.ARCHIVED
+    version.archived_at = datetime.utcnow()
+    session.add(version)
+    session.commit()
+    session.refresh(version)
+
+    logger.info(
+        f"Report template version {version_id} archived for template {template_id}",
+        extra={
+            "event": "report_template_version.archived",
+            "template_id": template_id,
+            "version_id": version_id,
+            "user_id": str(user.id),
+        },
+    )
+    return _template_version_response(version)
+
+
+# ============================================================================
+# Report Template Logo Upload — Block D, Story D2
+#
+# Uploads a logo image to be referenced (by StorageObject id) as
+# `presentation.header.logo_storage_id` when publishing a
+# ReportTemplateVersion (see create_template_version above, which validates
+# tenant ownership of the referenced object at publish time). A
+# report-template logo must be resolvable by id, with tenant_id populated,
+# per report-resource-resolution-contract.md. SVG is explicitly rejected: it
+# can carry embedded scripts/markup, which nothing else in this contract
+# permits. Validation/upload shared with the tenant-logo and letterhead-logo
+# endpoints via `ManagedTenantImageService` — see
+# managed-logo-upload-contract.md.
+# ============================================================================
+
+@router.post(
+    "/templates/{template_id}/logo",
+    response_model=ReportTemplateLogoUploadResponse,
+)
+def upload_template_logo(
+    template_id: str,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Upload a logo image for a template version's `presentation.header`.
+
+    Returns a `storage_object_id` to use as `logo_storage_id` when publishing
+    a version. Does not touch any ReportTemplateVersion — publishing is a
+    separate, explicit step (create_template_version).
+
+    Validation/upload delegated to `ManagedTenantImageService`, shared with
+    the letterhead-logo endpoint and the tenant-logo endpoint (post-Phase-2
+    remediation R5/R9 — see managed-logo-upload-contract.md).
+    """
+    _require(user.id, "reports:manage_templates", session)
+    template = _get_owned_template(template_id, ctx, session)
+
+    file_bytes = file.file.read()
+    try:
+        result = ManagedTenantImageService().upload(
+            file_bytes=file_bytes,
+            declared_content_type=file.content_type or "",
+            tenant_id=template.tenant_id,
+            key_prefix=f"report-templates/{template_id}/logos",
+            created_by=user.id,
+            session=session,
+        )
+    except InvalidImageError as exc:
+        raise HTTPException(400, exc.message) from None
+    except ImageRegistrationError:
+        raise HTTPException(500, "Failed to register uploaded logo") from None
+
+    logger.info(
+        f"Report template logo uploaded for template {template_id}",
+        extra={
+            "event": "report_template_logo.uploaded",
+            "template_id": template_id,
+            "storage_object_id": str(result.storage_object.id),
+            "user_id": str(user.id),
+        },
+    )
+
+    return ReportTemplateLogoUploadResponse(
+        storage_object_id=str(result.storage_object.id),
+        url=result.url,
+        content_type=result.content_type,
+        size_bytes=result.size_bytes,
+    )
+
+
+def _resolve_report_resources(
+    report: Report,
+    report_json: dict | None,
+    session: Session,
+) -> ReportResolvedResources | None:
+    """Céluma 1.3 Phase 2, Block C, Story C1.
+
+    Resolves ephemeral, request-scoped resources referenced by a V2 report's
+    `rendering_snapshot` (currently: `presentation.header.logo_storage_id`)
+    into a downloadable URL. Never mutates `report_json` and never persists
+    anything — recomputed on every read. See
+    report-resource-resolution-contract.md for the full contract, including
+    why an unresolved/cross-tenant/missing logo falls back to `None` instead
+    of raising.
+    """
+    if not isinstance(report_json, dict):
+        return None
+    snapshot = report_json.get("rendering_snapshot")
+    if not isinstance(snapshot, dict):
+        return None
+    presentation = snapshot.get("presentation")
+    if not isinstance(presentation, dict):
+        return None
+    header = presentation.get("header")
+    footer = presentation.get("footer")
+    header_logo_storage_id = header.get("logo_storage_id") if isinstance(header, dict) else None
+    footer_logo_storage_id = footer.get("logo_storage_id") if isinstance(footer, dict) else None
+    if not header_logo_storage_id and not footer_logo_storage_id:
+        return None
+
+    s3 = S3Service()
+
+    def _resolve_one(storage_id: str | None) -> str | None:
+        if not storage_id:
+            return None
+        try:
+            logo_object = session.get(StorageObject, storage_id)
+        except (ValueError, TypeError):
+            return None
+        if not logo_object:
+            return None
+        # Defense in depth: the object was already validated as belonging
+        # to this tenant when the ReportTemplateVersion/ReportLetterheadVersion
+        # that produced this snapshot was published. Re-checking here means
+        # a future bug in that check, or a historical row inserted before
+        # this validation existed, can never leak a cross-tenant logo
+        # through a report read.
+        if str(logo_object.tenant_id) != str(report.tenant_id):
+            return None
+        return s3.object_public_url(logo_object.object_key)
+
+    header_logo_url = _resolve_one(header_logo_storage_id)
+    footer_logo_url = _resolve_one(footer_logo_storage_id)
+    if header_logo_url is None and footer_logo_url is None:
+        # Preserves the pre-existing contract: `resolved_resources` is None
+        # whenever there's nothing usable to resolve — whether because
+        # nothing was referenced, or because every reference that WAS
+        # present failed validation (e.g. cross-tenant) — never an object
+        # with every field null.
+        return None
+    return ReportResolvedResources(header_logo_url=header_logo_url, footer_logo_url=footer_logo_url)
 
 
 def _build_report_detail_response(
@@ -723,6 +1823,28 @@ def _build_report_detail_response(
         signed_by=(str(version.signed_by) if version and version.signed_by else None),
         signed_at=(version.signed_at if version else None),
         report=report_json,
+        schema_version=(version.schema_version if version else None),
+        template_version_id=(
+            str(version.template_version_id)
+            if version and version.template_version_id
+            else None
+        ),
+        letterhead_version_id=(
+            str(version.letterhead_version_id)
+            if version and version.letterhead_version_id
+            else None
+        ),
+        generated_by_renderer_version=(
+            version.generated_by_renderer_version if version else None
+        ),
+        resolved_resources=_resolve_report_resources(report, report_json, session),
+        pdf_generation_status=(version.pdf_generation_status if version else None),
+        pdf_generated_at=(version.pdf_generated_at if version else None),
+        pdf_sha256=(version.pdf_sha256 if version else None),
+        pdf_size_bytes=(version.pdf_size_bytes if version else None),
+        pdf_page_count=(version.pdf_page_count if version else None),
+        pdf_error_code=(version.pdf_error_code if version else None),
+        pdf_error_message=(version.pdf_error_message if version else None),
     )
 
 
@@ -734,12 +1856,7 @@ def get_report(
     user: AppUser = Depends(current_user),
 ):
     """Get report details (requires reports:read)."""
-    _require(user.id, "reports:read", session)
-    report = session.get(Report, report_id)
-    if not report:
-        raise HTTPException(404, "Report not found")
-    if str(report.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Report not found")
+    report = authorize_report_read_access(session, ctx, user, report_id)
 
     current_version = session.exec(
         select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
@@ -759,13 +1876,7 @@ def get_report_full(
     order (with assignees, reviewers, labels), patient, samples, and full report detail
     including the template snapshot and the current version JSON from S3.
     """
-    _require(user.id, "reports:read", session)
-
-    report = session.get(Report, report_id)
-    if not report:
-        raise HTTPException(404, "Report not found")
-    if str(report.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Report not found")
+    report = authorize_report_read_access(session, ctx, user, report_id)
 
     # Aggregate order / patient / samples using the shared builder
     base = _build_order_full_detail(str(report.order_id), session, ctx)
@@ -791,12 +1902,7 @@ def list_report_versions(
     user: AppUser = Depends(current_user),
 ):
     """List all versions for a report (requires reports:read)."""
-    _require(user.id, "reports:read", session)
-    report = session.get(Report, report_id)
-    if not report:
-        raise HTTPException(404, "Report not found")
-    if str(report.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Report not found")
+    report = authorize_report_read_access(session, ctx, user, report_id)
     versions = session.exec(select(ReportVersion).where(ReportVersion.report_id == report.id)).all()
     return [{
         "id": str(v.id),
@@ -812,18 +1918,16 @@ def get_pdf_of_latest_version(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Return a presigned URL to download the PDF for the newest report version (requires reports:read)."""
-    _require(user.id, "reports:read", session)
-    report = session.get(Report, report_id)
-    if not report:
-        raise HTTPException(404, "Report not found")
-    if str(report.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Report not found")
+    """Return a presigned URL to download the PDF for the newest report version (requires reports:read).
 
-    # Check if order is locked due to pending payment
+    Fifth post-Phase-2 remediation: shares `authorize_report_read_access`
+    with `/full` — see report-read-authorization-contract.md. The
+    `Order.billed_lock` check that lived here was removed: it is the
+    third-party delivery gate and remains in force in `portal.py`, not in
+    the internal laboratory flow.
+    """
+    report = authorize_report_read_access(session, ctx, user, report_id)
     order = session.get(Order, report.order_id)
-    if order and order.billed_lock:
-        raise HTTPException(403, "Report access blocked due to pending payment")
 
     latest_version = session.exec(
         select(ReportVersion)
@@ -841,7 +1945,7 @@ def get_pdf_of_latest_version(
         raise HTTPException(404, "Storage object not found")
 
     s3 = S3Service()
-    url = s3.generate_presigned_url(storage.object_key)
+    url = official_pdf_presigned_url(s3, storage.object_key, order.order_code if order else "", latest_version.version_no)
     return {
         "version_id": str(latest_version.id),
         "version_no": latest_version.version_no,
@@ -860,12 +1964,7 @@ def get_report_version(
     user: AppUser = Depends(current_user),
 ):
     """Get specific report version details (requires reports:read)."""
-    _require(user.id, "reports:read", session)
-    report = session.get(Report, report_id)
-    if not report:
-        raise HTTPException(404, "Report not found")
-    if str(report.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Report not found")
+    report = authorize_report_read_access(session, ctx, user, report_id)
 
     version = session.exec(
         select(ReportVersion).where(
@@ -877,6 +1976,56 @@ def get_report_version(
         raise HTTPException(404, "Report version not found")
 
     return _build_report_detail_response(report, version, session)
+
+
+def _pdf_generation_status_response(version: ReportVersion) -> dict:
+    return {
+        "version_id": str(version.id),
+        "version_no": version.version_no,
+        "report_id": str(version.report_id),
+        "pdf_generation_status": version.pdf_generation_status,
+        "pdf_generated_at": version.pdf_generated_at,
+        "pdf_sha256": version.pdf_sha256,
+        "pdf_size_bytes": version.pdf_size_bytes,
+        "pdf_page_count": version.pdf_page_count,
+        "pdf_error_code": version.pdf_error_code,
+        "pdf_error_message": version.pdf_error_message,
+    }
+
+
+@router.post("/{report_id}/versions/{version_no}/generate-pdf")
+def generate_report_pdf(
+    report_id: str,
+    version_no: int,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Generate the official PDF for one report version (requires reports:edit).
+
+    Idempotent once READY (returns the existing artifact's metadata without
+    regenerating). Retryable while FAILED as long as the report is still
+    editable. Rejected (409) once the report is PUBLISHED/RETRACTED, or if a
+    generation attempt is already running for this version. See
+    pdf-generation-contract.md.
+    """
+    _require(user.id, "reports:edit", session)
+
+    report, version = load_locked_version(session, report_id, version_no)
+    if not report or not version:
+        raise HTTPException(404, "Report or version not found")
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Report or version not found")
+
+    service = ReportPdfGenerationService(session)
+    try:
+        version = service.generate(report, version, user.id)
+    except (ReportPdfAlreadyInProgressError, ReportPdfImmutableError) as exc:
+        raise HTTPException(409, exc.message) from None
+    except ReportPdfGenerationError as exc:
+        raise HTTPException(422, exc.message) from None
+
+    return _pdf_generation_status_response(version)
 
 
 @router.post("/{report_id}/versions/{version_no}/pdf")
@@ -903,6 +2052,13 @@ def upload_pdf_to_specific_version(
     # Verify report belongs to the authenticated user's tenant
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
+
+    # Céluma 1.3 Phase 2, Block B, Story B9: never silently replace the
+    # PDF of a published/retracted report.
+    if report.status in _IMMUTABLE_REPORT_STATUSES:
+        raise HTTPException(
+            409, f"Cannot replace the PDF for a report in {report.status} status"
+        )
 
     version = session.exec(
         select(ReportVersion).where(
@@ -944,6 +2100,21 @@ def upload_pdf_to_specific_version(
     session.flush()
 
     version.pdf_storage_id = storage.id
+    # Céluma 1.3 Phase 2, Block E: this manual endpoint bypasses
+    # ReportPdfGenerationService entirely (no render, no validation, no
+    # hash). Any generation metadata a prior official generation left behind
+    # must never keep claiming READY for bytes that were never validated —
+    # reset it so the publish gate in sign_report() correctly requires a
+    # fresh official generation.
+    version.pdf_generation_status = None
+    version.pdf_generation_started_at = None
+    version.pdf_generated_at = None
+    version.pdf_sha256 = None
+    version.pdf_size_bytes = None
+    version.pdf_page_count = None
+    version.pdf_generator_version = None
+    version.pdf_error_code = None
+    version.pdf_error_message = None
     session.add(version)
     session.commit()
     session.refresh(version)
@@ -981,6 +2152,13 @@ def upload_pdf_to_latest_version(
     # Verify report belongs to the authenticated user's tenant
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
+
+    # Céluma 1.3 Phase 2, Block B, Story B9: never silently replace the
+    # PDF of a published/retracted report.
+    if report.status in _IMMUTABLE_REPORT_STATUSES:
+        raise HTTPException(
+            409, f"Cannot replace the PDF for a report in {report.status} status"
+        )
 
     latest_version = session.exec(
         select(ReportVersion)
@@ -1020,6 +2198,16 @@ def upload_pdf_to_latest_version(
     session.flush()
 
     latest_version.pdf_storage_id = storage.id
+    # See the equivalent reset in upload_pdf_to_specific_version above.
+    latest_version.pdf_generation_status = None
+    latest_version.pdf_generation_started_at = None
+    latest_version.pdf_generated_at = None
+    latest_version.pdf_sha256 = None
+    latest_version.pdf_size_bytes = None
+    latest_version.pdf_page_count = None
+    latest_version.pdf_generator_version = None
+    latest_version.pdf_error_code = None
+    latest_version.pdf_error_message = None
     session.add(latest_version)
     session.commit()
     session.refresh(latest_version)
@@ -1042,20 +2230,19 @@ def get_pdf_of_specific_version(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Return a presigned URL to download the PDF for a specific report version (requires reports:read)."""
-    _require(user.id, "reports:read", session)
-    report = session.get(Report, report_id)
-    if not report:
-        raise HTTPException(404, "Report not found")
-    
-    # Verify report belongs to the authenticated user's tenant
-    if str(report.tenant_id) != ctx.tenant_id:
-        raise HTTPException(403, "Report does not belong to your tenant")
+    """Return a presigned URL to download the PDF for a specific report version (requires reports:read).
 
-    # Check if order is locked due to pending payment
+    Fifth post-Phase-2 remediation — THIS is the endpoint of the real
+    reported `403`. It now literally shares the same authorization
+    function as `GET /{id}/full`, so "I can open the report but cannot
+    download its PDF" is no longer representable. Cross-tenant remains
+    404 (third remediation, bug 4), and the `Order.billed_lock` check —
+    the root cause — was removed from here: it remains in force in
+    `portal.py`, which is where the laboratory actually holds a report
+    until it is paid for. See official-pdf-download-root-cause.md.
+    """
+    report = authorize_report_read_access(session, ctx, user, report_id)
     order = session.get(Order, report.order_id)
-    if order and order.billed_lock:
-        raise HTTPException(403, "Report access blocked due to pending payment")
 
     version = session.exec(
         select(ReportVersion).where(
@@ -1074,7 +2261,7 @@ def get_pdf_of_specific_version(
         raise HTTPException(404, "Storage object not found")
 
     s3 = S3Service()
-    url = s3.generate_presigned_url(storage.object_key)
+    url = official_pdf_presigned_url(s3, storage.object_key, order.order_code if order else "", version.version_no)
     return {
         "version_id": str(version.id),
         "version_no": version.version_no,
@@ -1111,6 +2298,87 @@ def _create_audit_log(
     session.add(audit)
 
 
+def _validate_letterhead_before_review(session: Session, report: Report) -> None:
+    """Fifth post-Phase-2 remediation (§3.5) — checks just before freezing
+    the letterhead when submitting for review.
+
+    Deliberately does NOT require `letterhead_version_id`. There are
+    historical V2 versions from before the first remediation whose
+    `presentation` was frozen directly from the template version, with no
+    administrative link; that field was never backfilled (see
+    `ReportDetailResponse.letterhead_version_id`). Requiring it here would
+    leave those drafts impossible to submit for review, which is exactly
+    the kind of regression §14 forbids. What IS required is what truly
+    determines how the official document will print: that the frozen
+    version has a valid `presentation` block, and that — if there is an
+    administrative link — it still points at a letterhead of this tenant.
+
+    Legacy reports (schema_version != 2) have no `presentation` and are
+    skipped entirely: their branch does not change in this remediation.
+    """
+    current_version = session.exec(
+        select(ReportVersion).where(
+            ReportVersion.report_id == report.id,
+            ReportVersion.is_current == True,  # noqa: E712
+        )
+    ).first()
+    if current_version is None or current_version.schema_version != 2:
+        return
+
+    # 1. The frozen snapshot must carry a valid presentation.
+    presentation = None
+    if current_version.json_storage_id:
+        storage = session.get(StorageObject, current_version.json_storage_id)
+        if storage:
+            try:
+                body = json.loads(S3Service().download_text(storage.object_key))
+                snapshot = body.get("rendering_snapshot")
+                if isinstance(snapshot, dict):
+                    presentation = snapshot.get("presentation")
+            except Exception:
+                logger.warning(
+                    "Could not re-read the frozen rendering_snapshot while validating "
+                    "a submit-for-review",
+                    extra={
+                        "event": "report.submit_snapshot_unreadable",
+                        "report_version_id": str(current_version.id),
+                    },
+                )
+                # A network/storage failure is not evidence that the report
+                # is misconfigured: submission is not blocked for it (that
+                # would have turned a transient incident into a business
+                # error).
+                return
+
+    if presentation is None:
+        raise HTTPException(
+            409,
+            "Este reporte no tiene un membrete aplicado, así que no puede "
+            "enviarse a revisión. Vuelve al borrador y selecciona un membrete.",
+        )
+    try:
+        ReportPresentationSnapshotV2.model_validate(presentation)
+    except PydanticValidationError:
+        raise HTTPException(
+            409,
+            "La configuración de membrete congelada en este reporte no es "
+            "válida. Selecciona de nuevo el membrete en el borrador antes de "
+            "enviarlo a revisión.",
+        ) from None
+
+    # 2. If there is an administrative link, it must still belong to this tenant.
+    if current_version.letterhead_version_id:
+        lh_version = session.get(
+            ReportLetterheadVersion, current_version.letterhead_version_id
+        )
+        if lh_version is None or str(lh_version.tenant_id) != str(report.tenant_id):
+            raise HTTPException(
+                409,
+                "El membrete aplicado a este reporte ya no está disponible en "
+                "este laboratorio. Selecciona otro antes de enviarlo a revisión.",
+            )
+
+
 @router.post("/{report_id}/submit", response_model=ReportActionResponse)
 def submit_report(
     report_id: str,
@@ -1130,7 +2398,13 @@ def submit_report(
     
     if report.status != ReportStatus.DRAFT:
         raise HTTPException(400, f"Cannot submit report in {report.status} status")
-    
+
+    # Fifth post-Phase-2 remediation (§3.5): submit-for-review is the
+    # moment the letterhead is FROZEN, so it is also the last moment to
+    # check that what is being frozen is coherent. From here on no route
+    # allows changing it (see letterhead-freeze-at-review-contract.md).
+    _validate_letterhead_before_review(session, report)
+
     # Get all reviewers for this order (regardless of current status)
     reviewers = session.exec(
         select(ReportReview).where(
@@ -1491,71 +2765,39 @@ def sign_report(
     if not current_version:
         raise HTTPException(404, "No current version found for this report")
 
-    # If the persisted JSON requires a digital signature, embed the signer's
-    # PNG (presigned URL) into the document under signatureMetadata before
-    # finalising the signature.
-    if current_version.json_storage_id is not None:
-        json_storage = session.get(StorageObject, current_version.json_storage_id)
-        if json_storage is not None:
-            s3 = S3Service()
-            try:
-                raw_json = s3.download_text(json_storage.object_key)
-                report_doc = json.loads(raw_json)
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Failed to load report JSON from S3 while signing",
-                    extra={
-                        "event": "report.sign_json_load_failed",
-                        "report_id": report_id,
-                        "object_key": json_storage.object_key,
-                        "error": str(exc),
-                    },
-                )
-                raise HTTPException(500, "Failed to load report content for signing")
+    # Céluma 1.3 Phase 2, Block E: a report cannot be published without a
+    # validated, hashed, persisted official PDF for the version being
+    # published — see pdf-publication-workflow.md. Generation is a separate,
+    # explicit step (POST .../generate-pdf); signing never generates one
+    # itself, to keep the (potentially slow, browser-driven) generation out
+    # of this transaction.
+    if current_version.pdf_generation_status != "READY":
+        raise HTTPException(
+            422,
+            "Cannot sign: this report version has no generated PDF yet. "
+            "Generate the official PDF before publishing.",
+        )
 
-            metadata_dict = report_doc.get("signatureMetadata") or {}
-            try:
-                signature_meta = SignatureMetadata.model_validate(metadata_dict)
-            except Exception:
-                # Tolerate legacy or malformed metadata: fall back to defaults.
-                signature_meta = SignatureMetadata()
+    # Second post-Phase-2 remediation (UX): same claim that
+    # sign_and_publish_report uses, as defense in depth against a direct
+    # double-submit to this endpoint (the main UI flow no longer calls it,
+    # but it remains for compatibility). The lock is not held during the
+    # call — it is released on commit.
+    try:
+        claim_publish(session, current_version, user.id)
+    except ReportPublishAlreadyInProgressError as exc:
+        raise HTTPException(409, exc.message) from None
 
-            if signature_meta.require_digital_signature:
-                if user.signature_storage_id is None:
-                    raise HTTPException(
-                        422,
-                        "Cannot sign: the report requires a digital signature image but the signer has no signature uploaded",
-                    )
-                sig_storage = session.get(StorageObject, user.signature_storage_id)
-                if sig_storage is None:
-                    raise HTTPException(
-                        422,
-                        "Cannot sign: signer's signature storage object is missing",
-                    )
-                # Use the public CDN URL (same pattern as avatars, sample images
-                # and /users/me/signature). Presigned S3 URLs would fail in the
-                # browser when the bucket is fronted by CloudFront with public
-                # access blocked at the S3 level. The signature object key is
-                # already unique per upload (timestamp-suffixed), so no cache
-                # buster query string is needed.
-                signature_url = s3.object_public_url(sig_storage.object_key)
-                report_doc["signatureMetadata"] = {
-                    **metadata_dict,
-                    "show_signature_section": True,
-                    "require_digital_signature": True,
-                    "signature_url": signature_url,
-                }
+    # If the report requires a digital signature, embed the user's public
+    # signature URL in the persisted JSON — see report_publishing.py.
+    try:
+        embed_signature_metadata_if_required(session, report_id, current_version, user)
+    except ReportPublishError as exc:
+        clear_publish_claim(session, current_version)
+        raise HTTPException(422, exc.message) from None
 
-                updated_bytes = json.dumps(report_doc, ensure_ascii=False).encode("utf-8")
-                info = s3.upload_bytes(
-                    updated_bytes,
-                    key=json_storage.object_key,
-                    content_type="application/json",
-                )
-                json_storage.etag = info.etag
-                json_storage.size_bytes = info.size_bytes
-                json_storage.version_id = info.version_id
-                session.add(json_storage)
+    current_version.publish_started_at = None
+    current_version.publish_started_by = None
 
     # Update version with signature
     current_version.signed_by = user.id
@@ -1629,6 +2871,171 @@ def sign_report(
         id=str(report.id),
         status=report.status,
         message="Report signed and published"
+    )
+
+
+@router.post("/{report_id}/sign-and-publish", response_model=ReportSignAndPublishResponse)
+def sign_and_publish_report(
+    report_id: str,
+    data: ReportSignRequest,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Second post-Phase-2 remediation (UX): "Sign and publish" as a
+    single product action (requires reports:sign + reviewer role),
+    replacing the two-button flow "Generate official PDF" -> "Sign and
+    Publish" in the normal UI.
+
+    Orchestrates, under a claim that serializes concurrent attempts
+    (`publish_started_at`/`publish_started_by` on `ReportVersion`, same
+    staleness pattern as PDF generation):
+      1. Embeds the digital signature in the persisted JSON IF the report
+         requires it (before generating the PDF, not after — see
+         signed-pdf-publication-workflow.md on why the previous order was
+         a conceptual bug: the "official" PDF never reflected the truly
+         signed state).
+      2. Generates (forcing regeneration: `force=True`) the official PDF
+         already reflecting that signed state.
+      3. If both steps succeed, sets signed_by/signed_at and
+         report.status=PUBLISHED atomically. If anything fails, the claim
+         is released, the report stays APPROVED, and the operation is
+         retryable — never a signed-but-unpublished report, nor an
+         official PDF without the signature.
+
+    `POST .../generate-pdf` and `POST .../sign` (above) remain intact for
+    compatibility/internal use — this endpoint is the only one the main
+    UI invokes.
+    """
+    if not has_permission(user.id, "reports:sign", session):
+        raise HTTPException(403, "Permission required: reports:sign")
+    if not has_any_role(user.id, {ROLE_REVIEWER}, session):
+        raise HTTPException(403, f"Only users with the '{ROLE_REVIEWER}' role can sign reports")
+
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
+    if report.status != ReportStatus.APPROVED:
+        raise HTTPException(
+            400, f"Cannot sign report in {report.status} status. Report must be approved first."
+        )
+
+    current_version = session.exec(
+        select(ReportVersion).where(
+            ReportVersion.report_id == report.id,
+            ReportVersion.is_current == True,
+        )
+    ).first()
+    if not current_version:
+        raise HTTPException(404, "No current version found for this report")
+
+    report, version = load_locked_version(session, report_id, current_version.version_no)
+    if not report or not version:
+        raise HTTPException(404, "Report or version not found")
+
+    try:
+        claim_publish(session, version, user.id)
+    except ReportPublishAlreadyInProgressError as exc:
+        raise HTTPException(409, exc.message) from None
+
+    try:
+        embed_signature_metadata_if_required(session, report_id, version, user)
+        pdf_service = ReportPdfGenerationService(session)
+        version = pdf_service.generate(report, version, user.id, force=True)
+    except (ReportPdfAlreadyInProgressError, ReportPdfImmutableError) as exc:
+        clear_publish_claim(session, version)
+        raise HTTPException(409, exc.message) from None
+    except ReportPdfGenerationError as exc:
+        clear_publish_claim(session, version)
+        raise HTTPException(422, exc.message) from None
+    except ReportPublishError as exc:
+        clear_publish_claim(session, version)
+        raise HTTPException(422, exc.message) from None
+    except Exception:
+        clear_publish_claim(session, version)
+        raise
+
+    report, version = load_locked_version(session, report_id, version.version_no)
+    old_status = report.status
+    try:
+        finalize_publish(session, report, version, user.id, data.changelog)
+    except ReportPublishConflictError as exc:
+        clear_publish_claim(session, version)
+        raise HTTPException(409, exc.message) from None
+
+    _create_audit_log(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        branch_id=str(report.branch_id),
+        actor_user_id=ctx.user_id,
+        action="REPORT.SIGN_AND_PUBLISH",
+        entity_type="report",
+        entity_id=report_id,
+        old_values={"status": old_status},
+        new_values={
+            "status": report.status,
+            "signed_by": str(user.id),
+            "signed_at": report.published_at.isoformat() if report.published_at else None,
+            "changelog": data.changelog,
+            "pdf_sha256": version.pdf_sha256,
+        },
+    )
+
+    from app.models.events import OrderEvent
+    from app.models.enums import EventType
+
+    sign_event = OrderEvent(
+        tenant_id=report.tenant_id,
+        branch_id=report.branch_id,
+        order_id=report.order_id,
+        event_type=EventType.REPORT_APPROVED,  # Using REPORT_APPROVED for signing
+        description="",
+        event_metadata={
+            "report_id": str(report.id),
+            "signer_id": str(user.id),
+            "signer_name": user.full_name or user.username,
+            "published": True,
+            "changelog": data.changelog if data.changelog else None,
+        },
+        created_by=user.id,
+    )
+    session.add(sign_event)
+
+    if report.order_id:
+        update_order_status_for_report(str(report.order_id), session)
+
+    session.commit()
+    session.refresh(report)
+    session.refresh(version)
+
+    logger.info(
+        f"Report {report_id} signed and published (single-action) by pathologist {ctx.user_id}",
+        extra={
+            "event": "report.sign_and_publish",
+            "report_id": report_id,
+            "user_id": ctx.user_id,
+        },
+    )
+
+    return ReportSignAndPublishResponse(
+        id=str(report.id),
+        status=report.status,
+        message="Reporte firmado y publicado",
+        pdf_generation_status=version.pdf_generation_status,
+        pdf_sha256=version.pdf_sha256,
+        pdf_size_bytes=version.pdf_size_bytes,
+        pdf_page_count=version.pdf_page_count,
+        pdf_generated_at=version.pdf_generated_at,
+        # Fifth remediation: the EXACT version whose official PDF was just
+        # generated, so the UI does not have to derive it from a refreshed
+        # `/full`. See sign-and-publish-response-contract.md.
+        report_version_id=str(version.id),
+        version_no=version.version_no,
+        official_pdf_available=bool(
+            version.pdf_storage_id and version.pdf_generation_status == "READY"
+        ),
     )
 
 

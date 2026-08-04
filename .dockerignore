@@ -1,39 +1,63 @@
+# Build context exclusions for the production API image.
+#
+# Céluma 1.3 Phase 2 closure: the runtime image ships application code,
+# `alembic/` (start.sh runs `alembic upgrade head` on boot) and `start.sh`.
+# Nothing else — no tests, no docs, no coverage output, no local artifacts.
+# See docs/celuma-1.3/phase-2-closure/backend-image-size-analysis.md.
+
 # VCS
 .git
 .gitignore
+.github/
 
 # Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.pytest_cache/
 .venv/
 venv/
+*.egg-info/
+
+# Tests and test tooling — never part of the runtime image.
+# `requirements-dev.txt` is NOT excluded: the `dev` build target installs from
+# it. It is a ~400-byte manifest; the packages it names are never installed
+# into the `runtime` target.
+tests/
+pytest.ini
+run_tests.py
+.pytest_cache/
 
 # Coverage / test outputs
 htmlcov/
 .coverage*
-.pytest_cache/
-/tests/
+coverage.xml
+
+# Documentation — the image serves an API, not Markdown.
+docs/
+*.md
+
+# Local database dumps and scratch state
+backups/
+.oldchain/
 
 # IDE / project files
 .idea/
 .vscode/
+.cursor/
 *.code-workspace
 
 # Build artifacts
 build/
 dist/
-*.egg-info/
+
+# Local orchestration — the image is built from this context, never runs it
+docker-compose*.yml
+Dockerfile
+.dockerignore
 
 # Misc
 .env
 .env.*
 *.log
 .DS_Store
-
-# Docker
-.dockerignore
-
-
