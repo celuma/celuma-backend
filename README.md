@@ -146,6 +146,22 @@ python3 -m pytest tests/test_rbac_phase2.py # RBAC tests only
 The project uses a **single baseline migration** (`v1_0_0`) that creates the complete schema.
 New features are added as additional Alembic revisions on top of this baseline.
 
+Each release is consolidated into one migration before it ships, so the chain
+records releases rather than the order in which features were developed:
+
+```
+v1_0_0 → v1_1_0 → v1_2_0 → v1_3_0 (head)
+```
+
+`v1_3_0` is the whole **Céluma 1.3** database delta — versioned report
+templates, the letterhead domain, official-PDF artifact fields and the
+publish lock — in one revision. It replaced the seven revisions the release
+was developed across, none of which was ever deployed. See
+[`docs/celuma-1.3/phase-2-closure/`](../docs/celuma-1.3/phase-2-closure/):
+`alembic-v1-3-contract.md` for the full DDL and
+`local-database-transition-guide.md` if your local database is stamped at a
+revision that no longer exists.
+
 ### Automatic Migrations
 Migrations run automatically on startup:
 - **Development**: `docker compose up --build` runs `alembic upgrade head` via `init_db.sh`
@@ -197,14 +213,16 @@ celuma-backend/
 ├── alembic/              # Database migrations
 ├── docker-compose.yml    # Development environment
 ├── Makefile              # Development commands
-└── requirements.txt      # Python dependencies
+├── requirements.txt      # Runtime dependencies (what the production image ships)
+└── requirements-dev.txt  # Runtime + test dependencies
 ```
 
 ### Available Commands
 ```bash
 make help                 # Show all available commands
 make setup                # Create Python virtual environment
-make install              # Install Python dependencies
+make install              # Install runtime dependencies only
+make install-dev          # Install runtime + test dependencies (needed for make test-unit)
 make test-unit            # Run unit tests with coverage report
 make build                # Build Docker image
 make clean                # Clean up Docker images and containers

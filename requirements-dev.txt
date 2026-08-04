@@ -1,0 +1,17 @@
+# Development and test dependencies for celuma-backend.
+#
+# Deliberately NOT installed by the production Dockerfile: the API image
+# ships runtime code only. Install locally and in CI with:
+#
+#     make install-dev
+#
+# Céluma 1.3 Phase 2 closure — see
+# docs/celuma-1.3/phase-2-closure/browser-dependency-classification.md.
+-r requirements.txt
+
+pytest==8.4.1
+pytest-cov==6.2.1
+
+# httpx is required by fastapi.testclient.TestClient, which only the HTTP
+# integration tests use — no application module imports it.
+httpx==0.27.*

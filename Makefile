@@ -1,4 +1,4 @@
-.PHONY: help setup install test-unit build clean
+.PHONY: help setup install install-dev test-unit build clean
 
 help: ## Show this help message
 	@echo "Celuma API - Available Commands:"
@@ -9,8 +9,11 @@ setup: ## Setup virtual environment
 	python3 -m venv .venv
 	@echo "Virtual environment created. Activate it with: source .venv/bin/activate"
 
-install: ## Install dependencies
+install: ## Install runtime dependencies only (what the production image ships)
 	python3 -m pip install -r requirements.txt
+
+install-dev: ## Install runtime + test dependencies (use this to run the suite)
+	python3 -m pip install -r requirements-dev.txt
 
 test-unit: ## Run unit tests with coverage
 	python3 -m pytest --cov=app --cov-branch --cov-report=xml --cov-report=term-missing --cov-report=html
