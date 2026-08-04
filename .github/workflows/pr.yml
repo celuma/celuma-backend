@@ -4,6 +4,10 @@ on:
   pull_request:
     branches:
       - main
+      - celuma-1.3
+
+permissions:
+  contents: read
 
 # Prevents duplicate builds from multiple pushes on the same PR
 concurrency:
@@ -13,10 +17,24 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: celuma_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d celuma_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
-      DATABASE_URL: ${{ vars.DATABASE_URL }}
-      JWT_SECRET: ${{ vars.JWT_SECRET }}
-      JWT_EXPIRES_MIN: ${{ vars.JWT_EXPIRES_MIN }}
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/celuma_test
+      JWT_SECRET: ci-only-secret-not-used-outside-tests
+      JWT_EXPIRES_MIN: 30
     steps:
       - uses: actions/checkout@v4
       
@@ -38,6 +56,10 @@ jobs:
       - name: Install dependencies
         run: make install-dev
         shell: bash
+
+      - name: Lint
+        run: make lint
+        shell: bash
       
       - name: Run unit tests
         run: make test-unit
@@ -47,7 +69,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     # Only runs if tests passed
-    if: needs.test.result == 'success'
+    if: >-
+      needs.test.result == 'success' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     
     permissions:
       contents: read

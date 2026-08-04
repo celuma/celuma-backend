@@ -1,4 +1,4 @@
-.PHONY: help setup install install-dev test-unit build clean
+.PHONY: help setup install install-dev lint test-unit build clean
 
 help: ## Show this help message
 	@echo "Celuma API - Available Commands:"
@@ -14,6 +14,9 @@ install: ## Install runtime dependencies only (what the production image ships)
 
 install-dev: ## Install runtime + test dependencies (use this to run the suite)
 	python3 -m pip install -r requirements-dev.txt
+
+lint: ## Run critical Python static checks
+	python3 -m ruff check app tests alembic
 
 test-unit: ## Run unit tests with coverage
 	python3 -m pytest --cov=app --cov-branch --cov-report=xml --cov-report=term-missing --cov-report=html
