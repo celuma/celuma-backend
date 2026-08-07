@@ -620,23 +620,47 @@ def release_stale_deliveries(
     `next_attempt_at` is null) and no one will ever resolve it. This sweeps
     those up, using `last_attempt_at` — set at claim time — as the age.
 
-    **Selected lifecycle: stale `SENDING` -> `FAILED` with a backed-off
-    `next_attempt_at`**, so the ordinary claim picks it up again, subject to
-    the same maximum as any other failure. `error_code` is
-    `worker_stale_claim`, which is what distinguishes "we never learned the
-    outcome" from "the provider rejected it" when someone reads the table.
+    **Selected lifecycle: stale `SENDING` -> TERMINAL `FAILED`, with
+    `next_attempt_at = NULL` and `error_code = "worker_stale_claim"`.**
+    Nothing claims the row again automatically; the row is the dead letter,
+    and the code distinguishes "we never learned the outcome" from "the
+    provider rejected it" for whoever reads the table.
 
-    > This **overrides Block A's idempotency strategy §5**, which specified
-    > that an abandoned `SENDING` row move to terminal `FAILED` with no
-    > automatic retry, on the grounds that the provider might already have
-    > accepted the message and a retry would double-send. That reasoning is
-    > sound and is *not* being discarded — it simply does not bind Block D,
-    > where no provider exists and no message can have been accepted. The
-    > trade it describes (an under-delivered email versus a duplicate email
-    > to a physician about a clinical report) becomes real only when Block E
-    > introduces a send, so Block E must make that call explicitly. It is
-    > recorded as a required decision in
-    > docs/celuma-1.3/phase-3-block-d/block-e-dependencies.md.
+    Céluma 1.3 Phase 3, Block E, Story E7 — the retry was removed
+    ------------------------------------------------------------
+    Block D wrote a **backed-off** `next_attempt_at` here, so the ordinary
+    claim picked the row up again. That was correct for Block D and is wrong
+    now, and the reason is entirely about what sits between the claim and the
+    resolution:
+
+        Block D:  claim -> (nothing) -> resolve
+        Block E:  claim -> ses.send() -> resolve
+
+    In Block D no provider existed, so an abandoned `SENDING` row provably
+    carried no delivered message and a retry could not duplicate anything —
+    retrying was the more useful default for a lifecycle nothing drove. With a
+    real send in that gap the window is genuinely ambiguous: a worker that
+    died *after* the provider accepted the message, but *before*
+    `mark_delivery_sent` committed, leaves a row that looks identical to one
+    that died before the provider was ever contacted. Retrying it delivers a
+    second copy of a message the provider already took.
+
+    The trade, made explicitly:
+
+    | | Cost |
+    |---|---|
+    | Retry (Block D) | A physician may receive two copies of "report published" about a clinical document |
+    | Terminal (this) | A message may be silently under-delivered; the in-app notification is unaffected |
+
+    Terminal, per Block A's idempotency strategy §5 — whose reasoning this
+    restores rather than overrides — and on this codebase's own precedent that
+    an ambiguous outcome earns explicit operational visibility rather than a
+    silent automatic retry (the manual "Reintentar" for PDF generation). The
+    in-app Notification Center is unaffected either way, which is what makes
+    under-delivery the survivable direction.
+
+    Full argument, including what would have to change to revisit it, in
+    docs/celuma-1.3/phase-3-block-e/phase-3-block-e-architecture-decision.md.
 
     Safe to run repeatedly: a second pass finds nothing, because the first
     moved the rows out of `SENDING`. Fresh claims are untouched. Rows are
@@ -667,14 +691,21 @@ def release_stale_deliveries(
         session.commit()
         return 0
 
-    # Resolved row by row rather than in one UPDATE: `next_attempt_at`
-    # depends on each row's own `attempts`, and expressing that schedule as a
-    # SQL CASE would duplicate `compute_next_attempt_at` in a second,
-    # separately-maintained dialect. The batch is bounded by `limit`.
+    # Céluma 1.3 Phase 3, Block E, Story E7: `next_attempt_at = None`
+    # unconditionally, where Block D wrote
+    # `compute_next_attempt_at(delivery.attempts, now)`. A null next attempt
+    # is the terminal marker the claim predicate excludes, so these rows are
+    # never picked up again — see this function's docstring for why a real
+    # provider makes that the correct side of the trade.
+    #
+    # This is also why the loop is no longer arithmetic: every row gets the
+    # same value now, so it *could* be one UPDATE. It stays row-by-row because
+    # the rows are already loaded and locked for the count, and one statement
+    # would buy nothing on a batch bounded by `limit`.
     for delivery in stale:
         delivery.status = NotificationDeliveryStatus.FAILED
         delivery.error_code = STALE_CLAIM_ERROR_CODE
-        delivery.next_attempt_at = compute_next_attempt_at(delivery.attempts, now)
+        delivery.next_attempt_at = None
         delivery.updated_at = now
         session.add(delivery)
 
@@ -686,6 +717,10 @@ def release_stale_deliveries(
             "event": "notification.delivery.stale_released",
             "released_count": len(stale),
             "error_code": STALE_CLAIM_ERROR_CODE,
+            # Always true since Story E7. Logged explicitly so an operator
+            # reading the line does not have to know the block history to know
+            # whether these rows will be retried.
+            "terminal": True,
         },
     )
     return len(stale)

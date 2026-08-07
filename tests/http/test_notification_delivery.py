@@ -908,6 +908,21 @@ class TestFailed:
 
 
 class TestStaleRecovery:
+    """Céluma 1.3 Phase 3, Block E, Story E7 rewrote what recovery *does*.
+
+    Block D moved a stale `SENDING` row to `FAILED` with a backed-off
+    `next_attempt_at`, so the ordinary claim picked it up again. That was
+    correct while no provider existed — nothing could have been accepted, so no
+    retry could duplicate anything. With a real `provider.send()` between the
+    claim and the resolution the window is genuinely ambiguous, and a retry can
+    send a physician a second copy of "report published".
+
+    Block E made recovery **terminal**, restoring Block A's idempotency
+    strategy §5. The three tests below that asserted the retry are inverted
+    rather than deleted, each naming the supersession — the same treatment
+    Block D gave the two Block B assertions it superseded.
+    """
+
     def _stale(self, session, world, **overrides):
         age = settings.notification_delivery_stale_sending_seconds
         values = {
@@ -919,7 +934,10 @@ class TestStaleRecovery:
         values.update(overrides)
         return seed_delivery(session, world, **values)
 
-    def test_a_stale_claim_becomes_a_retryable_failure(self, session, world):
+    def test_a_stale_claim_becomes_a_terminal_failure(self, session, world):
+        """Supersedes Block D's `test_a_stale_claim_becomes_a_retryable_failure`
+        (Story E7). `next_attempt_at IS NULL` is the terminal marker the claim
+        predicate excludes — the row is the dead letter."""
         delivery = self._stale(session, world)
 
         assert release_stale_deliveries(session) == 1
@@ -928,7 +946,24 @@ class TestStaleRecovery:
         row = session.get(NotificationDelivery, delivery.id)
         assert row.status == NotificationDeliveryStatus.FAILED
         assert row.error_code == STALE_CLAIM_ERROR_CODE
-        assert row.next_attempt_at is not None
+        assert row.next_attempt_at is None
+
+    def test_a_stale_claim_is_terminal_even_with_attempts_remaining(
+        self, session, world
+    ):
+        """The point of Story E7, stated as its own case: terminality here is
+        *not* the attempt ceiling doing its job. A row with four of five
+        attempts left still stops, because what makes it unsafe is the
+        ambiguity of the window, not exhaustion."""
+        delivery = self._stale(session, world, attempts=1)
+        assert settings.notification_delivery_max_attempts > 2
+
+        release_stale_deliveries(session)
+
+        session.expire_all()
+        row = session.get(NotificationDelivery, delivery.id)
+        assert row.attempts == 1
+        assert row.next_attempt_at is None
 
     def test_a_fresh_claim_is_untouched(self, session, world):
         delivery = self._stale(session, world, last_attempt_at=datetime.utcnow())
@@ -960,7 +995,24 @@ class TestStaleRecovery:
         assert row.status == NotificationDeliveryStatus.FAILED
         assert row.next_attempt_at is None
 
-    def test_a_recovered_row_is_claimable_once_due(self, session, world):
+    def test_a_recovered_row_is_never_claimed_again(self, session, world):
+        """Inverts Block D's `test_a_recovered_row_is_claimable_once_due`
+        (Story E7). This is the assertion that actually prevents the double
+        send: the provider may already have accepted this message, so nothing
+        automatic may attempt it a second time."""
+        self._stale(session, world)
+        release_stale_deliveries(session)
+
+        assert claim_pending_deliveries(session) == []
+
+    def test_an_operator_can_still_requeue_a_recovered_row_by_hand(
+        self, session, world
+    ):
+        """Terminal means "nothing claims it automatically", not "the row is
+        frozen". Writing a due `next_attempt_at` — direct database access,
+        which is the only delivery affordance Céluma 1.3 has — brings it back,
+        so the decision to risk a duplicate stays available to a human who has
+        checked whether the first one arrived."""
         delivery = self._stale(session, world)
         release_stale_deliveries(session)
 
@@ -1002,11 +1054,25 @@ class TestStaleRecovery:
         )
 
 
-class TestNoProviderExists:
+class TestTheLifecycleStillOwnsNoProvider:
+    """Renamed from Block D's `TestNoProviderExists` (Story E6/E7).
+
+    A provider exists now, so the class cannot keep asserting that nothing
+    sends. What it asserts instead is the boundary that survived: **this
+    module still contains no provider client**, and the poller lives somewhere
+    else. `block-e-dependencies.md` §14 anticipated exactly this — "if
+    `test_no_poller_is_started` starts failing, that is Block E landing; the
+    test's assertion should move, not be deleted."
+    """
+
     def test_the_delivery_module_contains_no_provider_client(self):
-        """Block D must not send. Asserted structurally rather than trusted:
-        a future contributor adding a boto3 SES client here fails CI instead
-        of shipping an unreviewed send path."""
+        """Unchanged from Block D, and it must stay that way.
+
+        The lifecycle service owns the `notification_delivery` table and
+        nothing else. Block E put the SES client in
+        `app/services/email_provider_ses.py`, behind an interface, precisely so
+        that this assertion keeps holding — a contributor who adds a send path
+        to the state machine fails CI."""
         import inspect as py_inspect
 
         import app.services.notification_delivery as module
@@ -1015,13 +1081,39 @@ class TestNoProviderExists:
         for forbidden in ("boto3", "smtplib", "send_email", "requests.", "httpx"):
             assert forbidden not in source, forbidden
 
-    def test_no_poller_is_started(self):
-        """No lifespan task, no thread, no scheduler: the lifecycle exists
-        and nothing drives it until Block E."""
+    def test_the_poller_is_started_from_lifespan(self):
+        """Supersedes `test_no_poller_is_started`.
+
+        Block A's delivery strategy §3 chose an in-process asyncio task in
+        FastAPI's `lifespan` over the three alternatives. Asserting the shape
+        structurally is what stops a later contributor "simplifying" it into a
+        `BackgroundTasks` callback (lost on restart, no retry, no record) or
+        adding a queue nobody decided to operate."""
         import inspect as py_inspect
 
         import app.main as module
 
         source = py_inspect.getsource(module)
-        assert "notification_delivery" not in source
-        assert "claim_pending_deliveries" not in source
+        assert "start_worker" in source
+        assert "stop_worker" in source
+        assert "lifespan" in source
+        for forbidden in ("BackgroundTasks", "celery", "Celery", "APScheduler"):
+            assert forbidden not in source, forbidden
+
+    def test_main_cannot_drive_the_queue_itself(self):
+        """The claim primitive stays the worker's. `app/main.py` knows two
+        functions — start and stop — and has no way to claim, resolve or
+        release a delivery, so an HTTP handler added to that file could not
+        reach into the queue even by accident."""
+        import inspect as py_inspect
+
+        import app.main as module
+
+        source = py_inspect.getsource(module)
+        for forbidden in (
+            "claim_pending_deliveries",
+            "mark_delivery_sent",
+            "mark_delivery_failed",
+            "release_stale_deliveries",
+        ):
+            assert forbidden not in source, forbidden

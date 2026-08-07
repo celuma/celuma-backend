@@ -33,17 +33,47 @@ from app.api.v1.notification_preferences import (
     router as notification_preferences_router,
 )
 from app.core.config import settings
+# Céluma 1.3 Phase 3, Block E, Story E6: the notification delivery worker.
+# Imported as its two lifecycle functions rather than as the module, so this
+# file has no access to the claim primitive at all — the worker owns the queue.
+# `test_main_cannot_drive_the_queue_itself` asserts that from this source, so
+# an HTTP handler added here could not reach into the queue by accident.
+from app.services.notification_delivery_worker import start_worker, stop_worker
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Startup/shutdown events
+#
+# Céluma 1.3 Phase 3, Block E, Story E6: the in-process notification delivery
+# poller is started and stopped here, and nowhere else.
+#
+# This is the mechanism Block A's delivery strategy §3 selected after
+# evaluating all four options: a long-lived asyncio task in the API container.
+# Not a per-request post-response callback (lost on restart, invisible to any
+# other process, no retry), not a second ECS worker service, not a queue
+# library. Its *state* lives entirely in PostgreSQL, so a restart costs
+# wall-clock time and no information.
+#
+# `start_worker` never raises and returns None when email is disabled or
+# misconfigured — `EMAIL_ENABLED` defaults to false, so by default nothing
+# starts here at all. Boot must not depend on email being configured
+# (architectural principle §4.3/§4.7), and that is also what keeps the worker
+# out of the test suite: `TestClient` runs this lifespan, so anything gated on
+# something other than configuration would start under pytest.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 Celuma API starting up...")
-    yield
-    logger.info("🛑 Celuma API shutting down...")
+    await start_worker()
+    try:
+        yield
+    finally:
+        # In a `finally` so a failure anywhere in shutdown still stops the
+        # poller: a worker left running against a closing process is a worker
+        # holding claimed rows nothing will resolve.
+        await stop_worker()
+        logger.info("🛑 Celuma API shutting down...")
 
 app = FastAPI(
     title="Celuma API", 

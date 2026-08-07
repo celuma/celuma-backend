@@ -443,8 +443,9 @@ def create_invitation(
 
     tenant = session.get(Tenant, ctx.tenant_id)
     tenant_name = tenant.name if tenant else "Laboratorio"
-    base_url = getattr(settings, "frontend_url", "http://localhost:5173")
-    invitation_url = f"{base_url}/accept-invitation?token={token}"
+    # Céluma 1.3 Phase 3, Block E, Story E1: real Settings field — see the
+    # matching comment in app/api/v1/auth.py's password-reset path.
+    invitation_url = f"{settings.frontend_url}/accept-invitation?token={token}"
 
     email_service = EmailService()
     email_sent = email_service.send_invitation_email(

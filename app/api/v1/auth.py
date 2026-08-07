@@ -519,8 +519,13 @@ def request_password_reset(
             session.flush()
             
             # Build reset URL
-            base_url = getattr(settings, 'frontend_url', 'http://localhost:5173')
-            reset_url = f"{base_url}/reset-password?token={token}"
+            # Céluma 1.3 Phase 3, Block E, Story E1: `frontend_url` is a real
+            # Settings field now. It used to be read through a defaulted
+            # attribute lookup against a field that did not exist, so every
+            # environment — including production, where celuma-infra already
+            # sets FRONTEND_URL on the task definition — built this link
+            # against localhost and the reset email pointed nowhere useful.
+            reset_url = f"{settings.frontend_url}/reset-password?token={token}"
             
             # Send email
             email_service = EmailService()

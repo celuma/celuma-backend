@@ -7,17 +7,57 @@ logger = logging.getLogger(__name__)
 
 
 class EmailService:
-    """Service for sending emails via AWS SES"""
-    
+    """Service for sending transactional account emails (invitation, password
+    reset) via AWS SES.
+
+    Céluma 1.3 Phase 3, Block E, Story E1: this class used to read its sender
+    and its region through defaulted attribute lookups against fields that did
+    not exist on ``Settings``. A defaulted lookup cannot fail, so the sender
+    was *always* the hardcoded ``noreply@celuma.com`` — in every environment —
+    and since that address is not a verified SES identity, every send was
+    rejected by SES and swallowed by the ``return False`` below. Both
+    fallbacks are gone: the settings are real fields now, and an unset sender
+    is reported rather than papered over.
+
+    ``email_ses_region`` rather than ``aws_region`` because Céluma runs in
+    ``mx-central-1``, where SES is not offered — see ``Settings``.
+
+    This class predates Block E and is **not** the notification delivery path.
+    Notification email goes through ``app/services/email_provider.py`` and the
+    delivery worker, which has a provider abstraction, sanitized error codes,
+    a retry lifecycle and tests. This one is left in place, with its
+    configuration corrected, because rewriting the invitation/reset flows is
+    not Block E's scope.
+    """
+
     def __init__(self):
         self.client = boto3.client(
             'ses',
-            region_name=getattr(settings, 'aws_region', 'us-east-1'),
-            aws_access_key_id=getattr(settings, 'aws_access_key_id', None),
-            aws_secret_access_key=getattr(settings, 'aws_secret_access_key', None),
+            region_name=settings.effective_email_ses_region,
+            aws_access_key_id=settings.aws_access_key_id,
+            aws_secret_access_key=settings.aws_secret_access_key,
         )
-        self.sender_email = getattr(settings, 'email_sender', 'noreply@celuma.com')
-    
+        self.sender_email = settings.email_sender
+
+    def _sender_or_none(self) -> str | None:
+        """The configured sender, or None with one log line explaining why no
+        email will be sent.
+
+        Cheaper and far more diagnosable than handing ``Source=None`` to SES
+        and reading the resulting ``ParamValidationError`` — which is what the
+        old silent default effectively produced, one network round trip later.
+        """
+        if not (self.sender_email or "").strip():
+            logger.error(
+                "Email sender is not configured; no email was sent",
+                extra={
+                    "event": "email.not_configured",
+                    "error_code": "email_sender_not_configured",
+                },
+            )
+            return None
+        return self.sender_email
+
     def send_invitation_email(
         self,
         recipient_email: str,
@@ -56,10 +96,14 @@ class EmailService:
         Saludos,
         Equipo Céluma
         """
-        
+
+        sender = self._sender_or_none()
+        if sender is None:
+            return False
+
         try:
             response = self.client.send_email(
-                Source=self.sender_email,
+                Source=sender,
                 Destination={'ToAddresses': [recipient_email]},
                 Message={
                     'Subject': {'Data': subject, 'Charset': 'UTF-8'},
@@ -69,7 +113,7 @@ class EmailService:
                     }
                 }
             )
-            
+
             logger.info(
                 f"Invitation email sent to {recipient_email}",
                 extra={
@@ -135,10 +179,14 @@ class EmailService:
         Saludos,
         Equipo Céluma
         """
-        
+
+        sender = self._sender_or_none()
+        if sender is None:
+            return False
+
         try:
             response = self.client.send_email(
-                Source=self.sender_email,
+                Source=sender,
                 Destination={'ToAddresses': [recipient_email]},
                 Message={
                     'Subject': {'Data': subject, 'Charset': 'UTF-8'},
@@ -148,7 +196,7 @@ class EmailService:
                     }
                 }
             )
-            
+
             logger.info(
                 f"Password reset email sent to {recipient_email}",
                 extra={

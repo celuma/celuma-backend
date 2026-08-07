@@ -1,4 +1,19 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
+
+#: Céluma 1.3 Phase 3, Block E, Story E1: the providers `email_provider` may
+#: name. Declared here rather than imported from the service layer so that
+#: validating configuration never imports boto3 — a value typo must fail on a
+#: string comparison, not on an SDK import.
+EMAIL_PROVIDERS: tuple[str, ...] = ("ses", "fake")
+
+#: Bounds on the worker's poll interval. The lower bound stops a typo (`0`)
+#: turning the loop into a busy-wait against PostgreSQL; the upper bound stops
+#: one turning delivery into something that looks broken. Block A's delivery
+#: strategy §5 recommends 10–15 s, which is the default.
+MIN_DELIVERY_POLL_INTERVAL_SECONDS = 1
+MAX_DELIVERY_POLL_INTERVAL_SECONDS = 3600
+
 
 class Settings(BaseSettings):
     app_name: str = "celuma"
@@ -82,8 +97,163 @@ class Settings(BaseSettings):
     notification_delivery_stale_sending_seconds: int = 900
     notification_delivery_claim_batch_size: int = 50
 
+    # Céluma 1.3 Phase 3, Block E, Story E1: email delivery.
+    #
+    # These are the settings `app/services/email.py`, `app/api/v1/auth.py` and
+    # `app/api/v1/users.py` have been reading through a defaulted attribute
+    # lookup against fields that **did not exist** — so the lookup could not
+    # fail, and every environment silently used the hardcoded literal instead.
+    # Including production, where `celuma-infra` has been setting FRONTEND_URL
+    # on the task definition all along (backend_stack.py, environment_vars)
+    # and the backend ignored it. Declaring them makes the deployed values
+    # take effect and makes a missing one a visible failure instead of a wrong
+    # default.
+    #
+    # Every defaulted-lookup fallback for them was removed in the same block,
+    # and `tests/test_email_configuration.py` greps `app/` to keep them gone.
+    #
+    # `email_enabled` is the master switch for the delivery worker, and it
+    # defaults to **False** on purpose:
+    #
+    #   - No SES identity, DKIM record or `ses:SendEmail` IAM grant exists in
+    #     any environment yet (block-e-dependencies.md §15), so a worker that
+    #     started by default would do nothing but accumulate failed attempts
+    #     against real delivery rows.
+    #   - Nothing creates a notification in production until Block F, so there
+    #     is nothing to deliver.
+    #   - It is what keeps the worker out of the test suite without making
+    #     production code test-aware: `TestClient` runs FastAPI's lifespan, so
+    #     a worker gated on anything *other* than configuration would start
+    #     under pytest.
+    #
+    # Turning email on is therefore a deliberate, per-environment act.
+    email_enabled: bool = False
+    email_provider: str = "ses"
+    # No default. A fallback sender is the exact bug this block is closing:
+    # `noreply@celuma.com` is not a verified SES identity, so the silent
+    # default guaranteed every send was rejected. Unset now means "email is
+    # not configured", which the worker reports and refuses to run on.
+    email_sender: str | None = None
+    email_sender_name: str = "Céluma"
+    # Céluma runs in `mx-central-1`, where Amazon SES is not offered, so the
+    # SES client cannot simply reuse `aws_region` the way `S3Service` does.
+    # Falls back to `aws_region` when unset (see `effective_email_ses_region`)
+    # so a region where SES *is* available needs no extra configuration.
+    email_ses_region: str | None = None
+    # The origin the "log in to Céluma" call to action points at. Only ever
+    # used as a bare origin: content policy §3 forbids a notification email
+    # from deep-linking into a protected resource or carrying a signed URL.
+    frontend_url: str = "http://localhost:5173"
+    # Block A's delivery strategy §5 recommends 10–15 s for the in-process
+    # poller. It is a setting rather than a constant for the same reason the
+    # retry values above are: tuning delivery latency against a real provider
+    # must not need a code change.
+    delivery_poll_interval_seconds: int = 10
+
     class Config:
         env_file = ".env"
+
+    # -- Céluma 1.3 Phase 3, Block E, Story E1: configuration validation ----
+    #
+    # Two tiers, deliberately.
+    #
+    # **Field validators** (below) run at import, because they check
+    # invariants that are always wrong however email is configured — an
+    # unknown provider name, a poll interval of zero — and a process that
+    # cannot answer "which provider?" has no safe way to continue.
+    #
+    # **Cross-field validation** (`validate_email_configuration`) runs at
+    # *worker startup*, not at import, because it depends on `email_enabled`.
+    # Raising at import for a missing `EMAIL_SENDER` would mean a
+    # misconfigured mailbox stops the API from booting — inverting
+    # architectural principle §4.3/§4.7, which say a clinical operation must
+    # never depend on email. Instead the worker refuses to start, logs why,
+    # and everything else in Céluma runs untouched.
+
+    @field_validator("email_provider")
+    @classmethod
+    def _validate_email_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in EMAIL_PROVIDERS:
+            raise ValueError(
+                f"EMAIL_PROVIDER must be one of {', '.join(EMAIL_PROVIDERS)} "
+                f"(got {normalized!r})"
+            )
+        return normalized
+
+    @field_validator("delivery_poll_interval_seconds")
+    @classmethod
+    def _validate_delivery_poll_interval(cls, value: int) -> int:
+        if not (
+            MIN_DELIVERY_POLL_INTERVAL_SECONDS
+            <= value
+            <= MAX_DELIVERY_POLL_INTERVAL_SECONDS
+        ):
+            raise ValueError(
+                "DELIVERY_POLL_INTERVAL_SECONDS must be between "
+                f"{MIN_DELIVERY_POLL_INTERVAL_SECONDS} and "
+                f"{MAX_DELIVERY_POLL_INTERVAL_SECONDS} seconds (got {value})"
+            )
+        return value
+
+    @field_validator("frontend_url")
+    @classmethod
+    def _validate_frontend_url(cls, value: str) -> str:
+        candidate = value.strip().rstrip("/")
+        if not candidate.startswith(("http://", "https://")):
+            raise ValueError(
+                "FRONTEND_URL must be an absolute http(s) origin "
+                "(it is rendered into email as a link)"
+            )
+        return candidate
+
+    @field_validator("email_sender_name")
+    @classmethod
+    def _validate_email_sender_name(cls, value: str) -> str:
+        # This string is interpolated into a `From:` header. A line break in
+        # it is header injection — an attacker-controlled `Bcc:` — so it is
+        # rejected rather than stripped, and the quote characters that would
+        # break the display-name quoting go with it.
+        candidate = value.strip()
+        if not candidate:
+            raise ValueError("EMAIL_SENDER_NAME must not be empty")
+        if any(char in candidate for char in "\r\n\"<>"):
+            raise ValueError(
+                "EMAIL_SENDER_NAME must not contain line breaks, quotes or "
+                "angle brackets (it is rendered into a From header)"
+            )
+        return candidate
+
+    @property
+    def effective_email_ses_region(self) -> str | None:
+        return self.email_ses_region or self.aws_region
+
+    def validate_email_configuration(self) -> list[str]:
+        """Every reason email delivery cannot run, or an empty list.
+
+        Returns rather than raises: the only caller is the worker's startup
+        path, which must degrade to "delivery is off" instead of taking the
+        API down with it. Each message names a variable and is safe to log —
+        no value is echoed back, so a misconfigured sender address never
+        reaches a log line.
+        """
+        problems: list[str] = []
+        if not self.email_enabled:
+            return problems
+
+        if not (self.email_sender or "").strip():
+            problems.append("EMAIL_SENDER is not set")
+        elif "@" not in self.email_sender or any(
+            char in self.email_sender for char in "\r\n <>,"
+        ):
+            problems.append("EMAIL_SENDER is not a bare email address")
+
+        if self.email_provider == "ses" and not self.effective_email_ses_region:
+            problems.append(
+                "EMAIL_SES_REGION (or AWS_REGION) is not set, and the SES "
+                "provider cannot resolve an endpoint without one"
+            )
+        return problems
 
     @property
     def cors_allowed_origins_list(self) -> list[str]:
