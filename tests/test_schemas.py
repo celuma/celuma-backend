@@ -177,3 +177,108 @@ class TestUserSchemas:
         assert user_response.id == "test-id"
         assert user_response.email == "test@example.com"
         assert user_response.full_name == "Test User"
+
+
+class TestNotificationSchemas:
+    """Céluma 1.3 Phase 3, Block B."""
+
+    def _valid_command_kwargs(self):
+        import uuid
+
+        from app.models.notification import NotificationResourceType, NotificationType
+
+        return {
+            "tenant_id": uuid.uuid4(),
+            "type": NotificationType.REPORT_SUBMITTED,
+            "resource_type": NotificationResourceType.REPORT,
+            "resource_id": uuid.uuid4(),
+            "occurrence_marker": "order-event-1",
+            "template_key": "report_submitted_v1",
+            "template_params": {"order_number": "ORD-1", "actor_name": "Dra. M"},
+        }
+
+    def test_command_valid(self):
+        from app.schemas.notification import NotificationCommand
+
+        command = NotificationCommand(**self._valid_command_kwargs())
+        assert command.recipient_user_ids == []
+        assert command.exclude_actor is True
+        assert command.created_by is None
+
+    def test_command_rejects_an_unknown_template_key(self):
+        import pytest
+
+        from app.schemas.notification import NotificationCommand
+
+        kwargs = self._valid_command_kwargs()
+        kwargs["template_key"] = "made_up_v1"
+        with pytest.raises(ValueError):
+            NotificationCommand(**kwargs)
+
+    def test_command_rejects_an_unknown_resource_type(self):
+        import pytest
+
+        from app.schemas.notification import NotificationCommand
+
+        kwargs = self._valid_command_kwargs()
+        kwargs["resource_type"] = "invoice"
+        with pytest.raises(ValueError):
+            NotificationCommand(**kwargs)
+
+    def test_command_rejects_a_blank_occurrence_marker(self):
+        import pytest
+
+        from app.schemas.notification import NotificationCommand
+
+        for blank in ("", "   ", "\n"):
+            kwargs = self._valid_command_kwargs()
+            kwargs["occurrence_marker"] = blank
+            with pytest.raises(ValueError):
+                NotificationCommand(**kwargs)
+
+    def test_list_response_serializes_both_ids_separately(self):
+        import uuid
+        from datetime import datetime
+
+        from app.schemas.notification import (
+            NotificationListItem,
+            NotificationListResponse,
+        )
+
+        item = NotificationListItem(
+            recipient_id=str(uuid.uuid4()),
+            notification_id=str(uuid.uuid4()),
+            type="REPORT_SUBMITTED",
+            severity="INFO",
+            title="Reporte listo para revisión — Orden ORD-1",
+            body=None,
+            resource_type="report",
+            resource_id=str(uuid.uuid4()),
+            status="UNREAD",
+            created_at=datetime.utcnow(),
+        )
+        dumped = NotificationListResponse(items=[item]).model_dump()
+
+        assert "id" not in dumped["items"][0]
+        assert dumped["items"][0]["recipient_id"] != dumped["items"][0]["notification_id"]
+        assert dumped["next_cursor"] is None
+
+    def test_count_and_read_responses(self):
+        import uuid
+
+        from app.schemas.notification import (
+            NotificationReadAllResponse,
+            NotificationRecipientReadResponse,
+            NotificationUnreadCountResponse,
+        )
+
+        assert NotificationUnreadCountResponse(unread_count=4).model_dump() == {
+            "unread_count": 4
+        }
+        assert NotificationReadAllResponse(updated_count=12).model_dump() == {
+            "updated_count": 12
+        }
+        read = NotificationRecipientReadResponse(
+            recipient_id=str(uuid.uuid4()), status="READ", read_at=None
+        )
+        assert set(read.model_dump()) == {"recipient_id", "status", "read_at"}

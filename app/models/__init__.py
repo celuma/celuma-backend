@@ -24,6 +24,18 @@ from .events import OrderEvent
 from .invitation import UserInvitation, PasswordResetToken
 from .assignment import Assignment
 from .report_review import ReportReview
+from .notification import (
+    Notification,
+    NotificationRecipient,
+    NotificationDelivery,
+    NotificationPreference,
+    NotificationType,
+    NotificationSeverity,
+    NotificationRecipientStatus,
+    NotificationChannel,
+    NotificationDeliveryStatus,
+    NotificationResourceType,
+)
 
 __all__ = [
     "BaseModel",
@@ -77,4 +89,14 @@ __all__ = [
     "PasswordResetToken",
     "Assignment",
     "ReportReview",
+    "Notification",
+    "NotificationRecipient",
+    "NotificationDelivery",
+    "NotificationPreference",
+    "NotificationType",
+    "NotificationSeverity",
+    "NotificationRecipientStatus",
+    "NotificationChannel",
+    "NotificationDeliveryStatus",
+    "NotificationResourceType",
 ]

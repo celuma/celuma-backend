@@ -28,6 +28,10 @@ from app.api.v1.portal import router as portal_router
 from app.api.v1.worklist import router as worklist_router
 from app.api.v1.rbac import router as rbac_router
 from app.api.v1.internal_render import router as internal_render_router
+from app.api.v1.notifications import router as notifications_router
+from app.api.v1.notification_preferences import (
+    router as notification_preferences_router,
+)
 from app.core.config import settings
 
 # Configure logging
@@ -294,6 +298,16 @@ app.include_router(portal_router, prefix="/api/v1")  # Portal has mixed auth req
 # — must NOT inherit reports_router's blanket Depends(current_user) above.
 app.include_router(internal_render_router, prefix="/api/v1")
 app.include_router(rbac_router, prefix="/api/v1", dependencies=[Depends(current_user)])
+# Céluma 1.3 Phase 3, Block B: the notifications router resolves the bearer
+# credential itself so a request with no Authorization header gets 401 rather
+# than the shared scheme's 403 — it must NOT inherit a blanket
+# Depends(current_user), which would re-introduce that 403 before the
+# router's own dependency runs.
+app.include_router(notifications_router, prefix="/api/v1")
+# Céluma 1.3 Phase 3, Block D: the preference router reuses that same
+# self-resolved credential dependency, so it must be registered the same way —
+# without a blanket Depends(current_user) — for the same 401-not-403 reason.
+app.include_router(notification_preferences_router, prefix="/api/v1")
 
 CELUMA_VERSION: str = os.environ.get("CELUMA_VERSION", "dev")
 

@@ -58,6 +58,30 @@ class Settings(BaseSettings):
     # signature-embedding JSON rewrite and the final publish transaction.
     report_publish_timeout_seconds: int = 45
 
+    # Céluma 1.3 Phase 3, Block D: the NotificationDelivery retry lifecycle.
+    # Block D creates PENDING rows and owns the state machine; nothing
+    # processes them yet, so these values configure a machine that Block E
+    # will drive. They are settings rather than module constants for the same
+    # reason `pdf_generation_timeout_seconds` is: an operator tuning retry
+    # pressure against a real provider must not need a code change.
+    #
+    # `max_attempts` bounds retry amplification (the risk named in Block A's
+    # analysis). Backoff is deterministic — min(base * 2^(attempts-1), max) —
+    # i.e. 60s, 2m, 4m, 8m, capped at 1h; no jitter, because with one
+    # in-process poller there is no thundering herd to spread, and Block E can
+    # add provider-aware jitter when there is a provider to be aware of.
+    #
+    # `stale_sending_seconds` is how long a row may sit claimed (SENDING)
+    # before it is treated as abandoned by a crashed worker. 900s follows the
+    # existing `* 3`-style staleness convention scaled to a send: generous
+    # relative to any single provider call, tight enough that a crash does not
+    # strand a delivery for hours.
+    notification_delivery_max_attempts: int = 5
+    notification_delivery_base_backoff_seconds: int = 60
+    notification_delivery_max_backoff_seconds: int = 3600
+    notification_delivery_stale_sending_seconds: int = 900
+    notification_delivery_claim_batch_size: int = 50
+
     class Config:
         env_file = ".env"
 

@@ -269,3 +269,93 @@ def create_published_v2_report_directly(
     session.refresh(report)
     session.refresh(version)
     return report, version
+
+
+# ---------------------------------------------------------------------------
+# Céluma 1.3 Phase 3, Block B — notifications
+# ---------------------------------------------------------------------------
+#
+# Block B wires no real clinical trigger, so every notification in these tests
+# is seeded here or created through NotificationService directly. Keeping the
+# seeding helper separate from the service means the API tests can build an
+# arbitrary inbox state (already-read rows, old timestamps) that the service's
+# own contract would not let them produce.
+
+
+def create_notification(
+    session: Session,
+    tenant: Tenant,
+    *,
+    notification_type: str = "REPORT_SUBMITTED",
+    title: str = "Reporte listo para revisión — Orden ORD-1",
+    body: Optional[str] = "El reporte fue enviado a revisión por Dra. Martínez.",
+    resource_type: str = "report",
+    resource_id: Optional[uuid.UUID] = None,
+    idempotency_key: Optional[str] = None,
+    severity: str = "INFO",
+    created_at: Optional[datetime] = None,
+    created_by: Optional[uuid.UUID] = None,
+    metadata: Optional[dict] = None,
+) -> "Notification":
+    from app.models.notification import Notification
+
+    notification = Notification(
+        tenant_id=tenant.id,
+        type=notification_type,
+        severity=severity,
+        title=title,
+        body=body,
+        resource_type=resource_type,
+        resource_id=resource_id or uuid.uuid4(),
+        idempotency_key=idempotency_key or f"seed:{uuid.uuid4()}",
+        created_at=created_at or datetime.utcnow(),
+        created_by=created_by,
+        notification_metadata=metadata
+        or {"template_key": "report_submitted_v1", "template_params": {"order_number": "ORD-1"}},
+    )
+    session.add(notification)
+    session.commit()
+    session.refresh(notification)
+    return notification
+
+
+def create_recipient(
+    session: Session,
+    notification: "Notification",
+    user: AppUser,
+    *,
+    status: str = "UNREAD",
+    read_at: Optional[datetime] = None,
+) -> "NotificationRecipient":
+    from app.models.notification import NotificationRecipient
+
+    recipient = NotificationRecipient(
+        notification_id=notification.id,
+        tenant_id=notification.tenant_id,
+        user_id=user.id,
+        status=status,
+        # The service always copies the parent's timestamp; seeded rows do the
+        # same so ordering assertions match production behaviour.
+        created_at=notification.created_at,
+        read_at=read_at,
+    )
+    session.add(recipient)
+    session.commit()
+    session.refresh(recipient)
+    return recipient
+
+
+def create_inbox_notification(
+    session: Session,
+    tenant: Tenant,
+    user: AppUser,
+    **kwargs,
+) -> tuple["Notification", "NotificationRecipient"]:
+    """One notification addressed to exactly one user — the common case."""
+    status = kwargs.pop("status", "UNREAD")
+    read_at = kwargs.pop("read_at", None)
+    notification = create_notification(session, tenant, **kwargs)
+    recipient = create_recipient(
+        session, notification, user, status=status, read_at=read_at
+    )
+    return notification, recipient
