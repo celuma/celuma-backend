@@ -40,6 +40,17 @@ from app.services.letterhead_resolution import (
     LetterheadNotFoundError,
     resolve_effective_letterhead_version,
 )
+# Céluma 1.3 Phase 3, Block F: the domain -> notification integration layer.
+# These are the ONLY notification symbols this module imports —
+# `NotificationService`, the template registry and the delivery machinery are
+# all behind them, which is what keeps report code free of notification
+# internals and notification code free of report internals.
+from app.services.notification_integrations import (
+    notify_report_pdf_ready,
+    notify_report_published,
+    notify_report_retracted,
+    notify_report_submitted,
+)
 from app.services.report_template_autoversion import snapshot_and_activate_template_version
 from app.services.report_publishing import (
     embed_signature_metadata_if_required,
@@ -2017,6 +2028,15 @@ def generate_report_pdf(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Report or version not found")
 
+    # Céluma 1.3 Phase 3, Block F: captured BEFORE the call, because
+    # `generate()` short-circuits on an already-READY version and returns it
+    # unchanged. Without this, an idempotent retry (a double-click, a client
+    # re-post) would look identical to a first success and notify the signers
+    # again. The occurrence marker would still deduplicate it, but "notify
+    # nobody about work that did not happen" is the correct behaviour, not a
+    # duplicate the database happens to absorb.
+    was_already_ready = version.pdf_generation_status == "READY"
+
     service = ReportPdfGenerationService(session)
     try:
         version = service.generate(report, version, user.id)
@@ -2024,6 +2044,21 @@ def generate_report_pdf(
         raise HTTPException(409, exc.message) from None
     except ReportPdfGenerationError as exc:
         raise HTTPException(422, exc.message) from None
+
+    # The generation service commits internally, so the READY transition is
+    # already durable here — this notification is a separate, smaller
+    # transaction over an unchanged domain state. That is the one event whose
+    # notification cannot be atomic with its transition, and it is the safe
+    # asymmetry: the PDF exists whether or not anyone is told about it.
+    if not was_already_ready and version.pdf_generation_status == "READY":
+        notify_report_pdf_ready(
+            session,
+            report=report,
+            order=session.get(Order, report.order_id) if report.order_id else None,
+            version_id=version.id,
+            actor=user,
+        )
+        session.commit()
 
     return _pdf_generation_status_response(version)
 
@@ -2461,11 +2496,25 @@ def submit_report(
         created_by=user.id,
     )
     session.add(submit_event)
-    
+
     # Update order status (DIAGNOSIS -> REVIEW)
     if report.order_id:
         update_order_status_for_report(str(report.order_id), session)
-    
+
+    # Céluma 1.3 Phase 3, Block F: notify the order's reviewers, inside this
+    # transaction and after the transition + OrderEvent are in the session, so
+    # the notification commits atomically with the submission. The service
+    # contains its own failures and returns None rather than raising, so this
+    # cannot stop a report being submitted — asserted by
+    # tests/http/test_notification_integration_failures.py.
+    notify_report_submitted(
+        session,
+        report=report,
+        order=session.get(Order, report.order_id) if report.order_id else None,
+        actor=user,
+        occurrence_marker=str(submit_event.id),
+    )
+
     session.commit()
     session.refresh(report)
     
@@ -2850,14 +2899,26 @@ def sign_report(
         created_by=user.id,
     )
     session.add(sign_event)
-    
+
     # Update order status based on report being published
     if report.order_id:
         update_order_status_for_report(str(report.order_id), session)
-    
+
+    # Céluma 1.3 Phase 3, Block F. This is the legacy two-step `/sign`
+    # endpoint, kept for compatibility; `/sign-and-publish` below is what the
+    # UI calls. Both reach PUBLISHED and both notify, because a report
+    # published through either path is equally published to its recipients.
+    notify_report_published(
+        session,
+        report=report,
+        order=session.get(Order, report.order_id) if report.order_id else None,
+        actor=user,
+        occurrence_marker=str(sign_event.id),
+    )
+
     session.commit()
     session.refresh(report)
-    
+
     logger.info(
         f"Report {report_id} signed and published by pathologist {ctx.user_id}",
         extra={
@@ -3006,6 +3067,19 @@ def sign_and_publish_report(
     if report.order_id:
         update_order_status_for_report(str(report.order_id), session)
 
+    # Céluma 1.3 Phase 3, Block F: the single-action sign-and-publish path.
+    # No REPORT_PDF_READY notification is emitted for the forced regeneration
+    # this endpoint performs — that generation is an internal step of
+    # publishing, not an invitation to sign something that is already being
+    # signed. See notify_report_pdf_ready's docstring.
+    notify_report_published(
+        session,
+        report=report,
+        order=session.get(Order, report.order_id) if report.order_id else None,
+        actor=user,
+        occurrence_marker=str(sign_event.id),
+    )
+
     session.commit()
     session.refresh(report)
     session.refresh(version)
@@ -3099,11 +3173,24 @@ def retract_report(
         created_by=user.id,
     )
     session.add(retract_event)
-    
+
     # Update order status based on report being retracted (CLOSED -> REVIEW)
     if report.order_id:
         update_order_status_for_report(str(report.order_id), session)
-    
+
+    # Céluma 1.3 Phase 3, Block F. `data.changelog` — the retraction reason —
+    # is deliberately NOT forwarded: it is user-authored free text, the
+    # template declares no parameter it could occupy, and `validate_params`
+    # would reject it as `unknown_param` if anyone tried. It remains on the
+    # OrderEvent above, where normal RBAC governs who can read it.
+    notify_report_retracted(
+        session,
+        report=report,
+        order=session.get(Order, report.order_id) if report.order_id else None,
+        actor=user,
+        occurrence_marker=str(retract_event.id),
+    )
+
     session.commit()
     session.refresh(report)
     

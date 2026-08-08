@@ -67,6 +67,7 @@ from app.models.notification import (
 )
 from app.models.user import AppUser
 from app.schemas.notification import NotificationCommand
+from app.services.locale import DEFAULT_LOCALE, resolve_locale
 from app.services.notification_delivery import materialize_email_deliveries
 from app.services.notification_templates import (
     NotificationTemplateError,
@@ -288,7 +289,15 @@ class NotificationService:
 
     @staticmethod
     def _notify(session: Session, command: NotificationCommand) -> UUID:
-        template = get_template(command.type, command.template_key)
+        # Céluma 1.3, Phase 3, Block F: the rendering locale is resolved here,
+        # not supplied. `NotificationCommand` has no locale field for the same
+        # structural reason it has no `title` field — a call site that could
+        # name a locale could name one with no registered copy, and the
+        # resulting fallback would be silent. When a real locale source exists
+        # (user preference, then tenant default, then this default), it is
+        # resolved here and every call site is unaffected.
+        locale = resolve_locale(DEFAULT_LOCALE)
+        template = get_template(command.type, command.template_key, locale)
         title, body, safe_params = render(template, command.template_params)
         idempotency_key = build_idempotency_key(command)
 
@@ -325,6 +334,7 @@ class NotificationService:
                     resource_id=command.resource_id,
                     notification_metadata=metadata,
                     idempotency_key=idempotency_key,
+                    locale=locale,
                     created_at=created_at,
                     created_by=command.created_by,
                 )

@@ -122,6 +122,12 @@ class DeliverySendContext:
     notification_type: Optional[NotificationType]
     template_key: Optional[str]
     template_params: Optional[dict]
+    #: The locale the notification's in-app copy was rendered in (Block F).
+    #: Copied off the row rather than defaulted here, so the email renders in
+    #: the same locale as the notification it accompanies even if the platform
+    #: default changed between creation and delivery. `None` only when the
+    #: notification itself could not be loaded, which is already a failure.
+    locale: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +192,7 @@ def _load_send_contexts(
                 ),
                 template_key=metadata.get("template_key"),
                 template_params=metadata.get("template_params"),
+                locale=(notification.locale if notification else None),
             )
         )
     return contexts
@@ -212,6 +219,7 @@ def _build_message(context: DeliverySendContext) -> EmailMessage:
         notification_type=context.notification_type,
         template_key=context.template_key,
         template_params=context.template_params,
+        locale=context.locale,
     )
     return EmailMessage(
         to_address=context.recipient_address,

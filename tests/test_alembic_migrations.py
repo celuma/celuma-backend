@@ -55,20 +55,27 @@ RELEASE_REVISION = "v1_3_0"
 NOTIFICATIONS_REVISION = "v1_4_0"
 
 #: Céluma 1.3 Phase 3, Block D: the delivery-uniqueness revision, which sits
-#: directly on NOTIFICATIONS_REVISION and is the live head from this block
-#: onward.
+#: directly on NOTIFICATIONS_REVISION.
 DELIVERY_LIFECYCLE_REVISION = "v1_5_0"
+
+#: Céluma 1.3 Phase 3, Block F: the notification-locale revision, which sits
+#: directly on DELIVERY_LIFECYCLE_REVISION and is the live head from this
+#: block onward.
+NOTIFICATION_LOCALE_REVISION = "v1_6_0"
 
 #: Revision ids that existed only on the unreleased `celuma-1.3` branch and
 #: were folded into RELEASE_REVISION. Nothing executable may reference them.
 #:
-#: Phase 3, Block B removed "v1_4_0" from this tuple, and Phase 3, Block D
-#: removed "v1_5_0" for the same reason: both ids belonged to never-shipped
-#: `celuma-1.3` branch revisions that the squash folded into
-#: RELEASE_REVISION, which freed the ids, and both are now legitimately
-#: reused by live migrations continuing the `vMAJOR_MINOR_PATCH` sequence.
-#: The guard below still holds for every id that remains genuinely dead.
-SUPERSEDED_REVISIONS = ("v1_6_0", "v1_7_0", "v1_8_0", "v1_9_0")
+#: Phase 3, Block B removed "v1_4_0" from this tuple, Block D removed
+#: "v1_5_0", and Block F removes "v1_6_0" — all for the same reason: each id
+#: belonged to a never-shipped `celuma-1.3` branch revision that the squash
+#: folded into RELEASE_REVISION. None of them ever reached production,
+#: staging or a customer database (see
+#: docs/celuma-1.3/phase-2-closure/alembic-squash-inventory.md), so no
+#: `alembic_version` row anywhere carries one and the id is genuinely free to
+#: be reused by a live migration continuing the `vMAJOR_MINOR_PATCH`
+#: sequence. The guard below still holds for every id that remains dead.
+SUPERSEDED_REVISIONS = ("v1_7_0", "v1_8_0", "v1_9_0")
 
 _MIGRATION_TEST_DB = "celuma_migration_test"
 
@@ -111,10 +118,10 @@ class TestChainShape:
     def test_exactly_one_head(self):
         assert len(_script_directory().get_heads()) == 1
 
-    def test_head_is_the_delivery_lifecycle_revision(self):
-        """Phase 3, Block D: the head moved from the notifications-core
-        revision to the delivery-uniqueness revision stacked on top of it."""
-        assert _script_directory().get_current_head() == DELIVERY_LIFECYCLE_REVISION
+    def test_head_is_the_notification_locale_revision(self):
+        """Phase 3, Block F: the head moved from the delivery-uniqueness
+        revision to the notification-locale revision stacked on top of it."""
+        assert _script_directory().get_current_head() == NOTIFICATION_LOCALE_REVISION
 
     def test_release_revision_sits_directly_on_the_last_pre_1_3_revision(self):
         revision = _script_directory().get_revision(RELEASE_REVISION)
@@ -130,10 +137,15 @@ class TestChainShape:
         revision = _script_directory().get_revision(DELIVERY_LIFECYCLE_REVISION)
         assert revision.down_revision == NOTIFICATIONS_REVISION
 
+    def test_locale_revision_sits_directly_on_the_delivery_lifecycle_revision(self):
+        revision = _script_directory().get_revision(NOTIFICATION_LOCALE_REVISION)
+        assert revision.down_revision == DELIVERY_LIFECYCLE_REVISION
+
     def test_chain_is_linear_from_base_to_head(self):
         script = _script_directory()
         revisions = list(script.walk_revisions())
         assert [r.revision for r in revisions] == [
+            NOTIFICATION_LOCALE_REVISION,
             DELIVERY_LIFECYCLE_REVISION,
             NOTIFICATIONS_REVISION,
             RELEASE_REVISION,
@@ -225,7 +237,7 @@ class TestReleaseMigration:
         assert _current_revision(migration_db) == RELEASE_REVISION
 
         _alembic("head")
-        assert _current_revision(migration_db) == DELIVERY_LIFECYCLE_REVISION
+        assert _current_revision(migration_db) == NOTIFICATION_LOCALE_REVISION
 
     def test_downgrade_then_re_upgrade(self, migration_db):
         _alembic("head")
@@ -233,7 +245,7 @@ class TestReleaseMigration:
         assert _current_revision(migration_db) == LAST_PRE_1_3_REVISION
 
         _alembic("head")
-        assert _current_revision(migration_db) == DELIVERY_LIFECYCLE_REVISION
+        assert _current_revision(migration_db) == NOTIFICATION_LOCALE_REVISION
 
     def test_downgrade_removes_every_object_the_release_introduced(self, migration_db):
         _alembic("head")
@@ -737,9 +749,9 @@ class TestDeliveryLifecycleRevision:
     def test_downgrade_then_re_upgrade_restores_the_partial_indexes(
         self, migration_db
     ):
-        _alembic("head")
+        _alembic(DELIVERY_LIFECYCLE_REVISION)
         _alembic(NOTIFICATIONS_REVISION, command="downgrade")
-        _alembic("head")
+        _alembic(DELIVERY_LIFECYCLE_REVISION)
 
         assert _current_revision(migration_db) == DELIVERY_LIFECYCLE_REVISION
         indexes = self._index_map(migration_db)
@@ -756,7 +768,7 @@ class TestDeliveryLifecycleRevision:
             for table in inspector.get_table_names()
         }
 
-        _alembic("head")
+        _alembic(DELIVERY_LIFECYCLE_REVISION)
         inspector = inspect(migration_db)
         after = {
             table: {c["name"] for c in inspector.get_columns(table)}
@@ -847,3 +859,95 @@ def _insert_delivery(conn, *, tenant_id, notification_id, recipient_user_id, add
             "address": address,
         },
     )
+
+
+class TestNotificationLocaleRevision:
+    """Céluma 1.3 Phase 3, Block F — `v1_6_0_notification_locale`.
+
+    Same upgrade/downgrade/re-upgrade discipline the two revisions before it
+    get, plus the two properties specific to this one: the backfill lands on
+    pre-existing rows, and the frozen `title`/`body` a user actually read are
+    not rewritten by either direction.
+    """
+
+    def test_upgrade_adds_a_non_null_locale_column(self, migration_db):
+        _alembic("head")
+
+        columns = {
+            c["name"]: c for c in inspect(migration_db).get_columns("notification")
+        }
+        assert "locale" in columns
+        assert columns["locale"]["nullable"] is False
+
+    def test_downgrade_drops_the_column(self, migration_db):
+        _alembic("head")
+        _alembic(DELIVERY_LIFECYCLE_REVISION, command="downgrade")
+
+        columns = {c["name"] for c in inspect(migration_db).get_columns("notification")}
+        assert "locale" not in columns
+
+    def test_downgrade_then_re_upgrade_restores_it(self, migration_db):
+        _alembic("head")
+        _alembic(DELIVERY_LIFECYCLE_REVISION, command="downgrade")
+        _alembic("head")
+
+        assert _current_revision(migration_db) == NOTIFICATION_LOCALE_REVISION
+        columns = {c["name"] for c in inspect(migration_db).get_columns("notification")}
+        assert "locale" in columns
+
+    def test_a_pre_existing_row_is_backfilled_to_es_mx(self, migration_db):
+        """The server default does the backfill in one statement, so there is
+        no window in which the column is nullable and no separate UPDATE.
+
+        The row is inserted while the schema is still at v1_5_0 — i.e. exactly
+        as a Block B–E notification would exist — and then migrated.
+        """
+        import uuid
+
+        _alembic(DELIVERY_LIFECYCLE_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id, notification_id, _, _ = _seed_delivery_context(conn)
+            conn.execute(
+                text("UPDATE notification SET title = :t, body = :b WHERE id = :id"),
+                {
+                    "t": "Reporte publicado — Orden ORD-HIST-1",
+                    "b": "El reporte fue publicado y firmado por Dra. Histórica.",
+                    "id": notification_id,
+                },
+            )
+
+        _alembic("head")
+
+        with migration_db.connect() as conn:
+            row = conn.execute(
+                text("SELECT locale, title, body FROM notification WHERE id = :id"),
+                {"id": notification_id},
+            ).one()
+        assert row[0] == "es-MX"
+        # The frozen copy the user actually read is untouched by the migration.
+        assert row[1] == "Reporte publicado — Orden ORD-HIST-1"
+        assert row[2] == "El reporte fue publicado y firmado por Dra. Histórica."
+
+    def test_the_revision_modifies_no_other_table(self, migration_db):
+        """Additive and narrow: one column on one table, and nothing else —
+        no preference change, no delivery change, no clinical table."""
+        _alembic(DELIVERY_LIFECYCLE_REVISION)
+        before = _schema_fingerprint(migration_db)
+
+        _alembic("head")
+        after = _schema_fingerprint(migration_db)
+
+        changed = {
+            table for table in set(before) | set(after) if before.get(table) != after.get(table)
+        }
+        assert changed == {"notification"}
+
+
+def _schema_fingerprint(engine) -> dict:
+    """`{table: sorted(column names)}` for every table except alembic's own."""
+    inspector = inspect(engine)
+    return {
+        table: sorted(c["name"] for c in inspector.get_columns(table))
+        for table in inspector.get_table_names()
+        if table != "alembic_version"
+    }

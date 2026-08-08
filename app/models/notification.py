@@ -56,6 +56,8 @@ from uuid import UUID, uuid4
 from sqlalchemy import Boolean, Column, DateTime, Integer, String
 from sqlmodel import Field, JSON
 
+from app.services.locale import DEFAULT_LOCALE
+
 from .base import BaseModel, TenantMixin, TimestampMixin
 
 
@@ -170,6 +172,28 @@ class Notification(BaseModel, TimestampMixin, TenantMixin, table=True):
         default=None, sa_type=JSON
     )
     idempotency_key: str = Field(max_length=255)
+    #: The locale `title`/`body` were rendered in (Céluma 1.3, Phase 3, Block
+    #: F). `es-MX` for every row Céluma 1.3 produces.
+    #:
+    #: Not redundant with the frozen text, which is what the "no schema change"
+    #: option assumed. The frozen text makes *in-app display* reproducible; it
+    #: does not say which locale produced it, and two consumers need that:
+    #: the delivery worker, which renders an independent email from
+    #: `template_key`/`template_params` and must render it in the same locale
+    #: as the notification rather than in whatever the default is at delivery
+    #: time; and audit, which cannot otherwise answer "what did this user
+    #: actually read" once a second locale exists. Recording it costs one
+    #: additive column now; reconstructing it later is impossible.
+    #:
+    #: NOT NULL with a server default so the backfill is the default — see
+    #: v1_6_0's migration notes for why `es-MX` is provable rather than
+    #: assumed for every pre-existing row.
+    locale: str = Field(
+        default=DEFAULT_LOCALE,
+        sa_column=Column(
+            "locale", String(35), nullable=False, server_default=DEFAULT_LOCALE
+        ),
+    )
     created_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
 
 

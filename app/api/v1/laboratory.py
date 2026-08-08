@@ -68,6 +68,14 @@ from app.schemas.patient import PatientFullResponse
 from app.schemas.events import EventCreate, EventResponse, EventsListResponse
 from app.services.s3 import S3Service
 from app.services.image_processing import process_image_bytes
+# Céluma 1.3 Phase 3, Block F: the domain -> notification integration layer.
+# The only notification symbols this module imports.
+from app.services.notification_integrations import (
+    notify_order_assignments_added,
+    notify_order_reviewers_added,
+    notify_sample_assignments_added,
+    notify_sample_status_changed,
+)
 from uuid import uuid4, UUID
 import os
 from sqlmodel import select
@@ -1001,10 +1009,25 @@ def update_sample_state(
         created_by=user.id,
     )
     session.add(event)
-    
+
     # Update order status based on sample state change
     update_order_status(str(sample.order_id), session)
-    
+
+    # Céluma 1.3 Phase 3, Block F: in-app only — the delivery policy gives
+    # SAMPLE_STATUS_CHANGED `email_supported = False`, enforced in
+    # materialization, so no delivery row can exist however this is called.
+    # A no-op transition (same state re-sent) is filtered inside the
+    # integration, which still writes its timeline row as it always has.
+    notify_sample_status_changed(
+        session,
+        sample=sample,
+        order=session.get(Order, sample.order_id) if sample.order_id else None,
+        old_state=(old_state.value if hasattr(old_state, "value") else str(old_state)),
+        new_state=new_state.value,
+        actor=user,
+        occurrence_marker=str(event.id),
+    )
+
     session.commit()
     session.refresh(sample)
     
@@ -1659,6 +1682,22 @@ def upload_sample_image(
             created_by=user.id,
         )
         session.add(state_event)
+        # Céluma 1.3 Phase 3, Block F: the automatic RECEIVED -> PROCESSING
+        # transition is a real state change with its own persisted
+        # SAMPLE_STATE_CHANGED event, so it notifies like any other. Notifying
+        # only the explicit PATCH would mean the same visible transition
+        # sometimes reaches assignees and sometimes does not, depending on how
+        # it was triggered. Volume is bounded: this fires once per sample, on
+        # the first image, and only from RECEIVED.
+        notify_sample_status_changed(
+            session,
+            sample=sample,
+            order=session.get(Order, sample.order_id) if sample.order_id else None,
+            old_state=SampleState.RECEIVED.value,
+            new_state=SampleState.PROCESSING.value,
+            actor=user,
+            occurrence_marker=str(state_event.id),
+        )
 
     # Update order status based on sample state change (if it changed)
     if is_first_image and sample.state == SampleState.PROCESSING:
@@ -2563,7 +2602,18 @@ def update_order_assignees(
             created_by=user.id,
         )
         session.add(event)
-    
+        # Céluma 1.3 Phase 3, Block F: one notification per NEWLY added user.
+        # Guarded by `if added`, so a PUT that only removes people — or one
+        # that changes nothing — notifies nobody. That is a correct no-op, not
+        # a missing-recipient case (recipient matrix, Assignment row).
+        notify_order_assignments_added(
+            session,
+            order=order,
+            added_user_ids=sorted(added, key=str),
+            actor=user,
+            order_event_id=event.id,
+        )
+
     if removed:
         removed_users = session.exec(select(AppUser).where(AppUser.id.in_(removed))).all()
         event = OrderEvent(
@@ -2671,7 +2721,17 @@ def update_order_reviewers(
             created_by=user.id,
         )
         session.add(event)
-    
+        # Céluma 1.3 Phase 3, Block F: being made a reviewer is an assignment
+        # from the recipient's side. Being asked to review a *submitted*
+        # report is the separate REPORT_SUBMITTED event, fired at submission.
+        notify_order_reviewers_added(
+            session,
+            order=order,
+            added_user_ids=sorted(added, key=str),
+            actor=user,
+            order_event_id=event.id,
+        )
+
     if removed:
         removed_users = session.exec(select(AppUser).where(AppUser.id.in_(removed))).all()
         event = OrderEvent(
@@ -2892,7 +2952,17 @@ def update_sample_assignees(
             created_by=user.id,
         )
         session.add(event)
-    
+        # Céluma 1.3 Phase 3, Block F: the deep link points at the SAMPLE, not
+        # its order — the assignment is to this specimen.
+        notify_sample_assignments_added(
+            session,
+            sample=sample,
+            order=session.get(Order, sample.order_id) if sample.order_id else None,
+            added_user_ids=sorted(added, key=str),
+            actor=user,
+            order_event_id=event.id,
+        )
+
     if removed:
         removed_users = session.exec(select(AppUser).where(AppUser.id.in_(removed))).all()
         event = OrderEvent(

@@ -55,6 +55,17 @@ Always the same sentence, always pointing at the `FRONTEND_URL` **origin** —
 never a path into the resource, never a signed or pre-authenticated URL, for
 any recipient including a requesting physician (content policy §3, §5). The
 email is a nudge; the application is where authorization happens.
+
+Localization readiness (Céluma 1.3, Phase 3, Block F)
+------------------------------------------------------
+Lookup is `template_key + locale`, mirroring the in-app registry — and the
+registries stay **separate**, which is the whole point of this file. Adding a
+locale must not become a way to widen the email vocabulary: `params` is
+declared per template and screened per value, and every locale of a given key
+shares one declared parameter set (`test_no_locale_widens_the_parameter_vocabulary`).
+A translator can change words; they cannot introduce a deep link, a remote
+image, a tracking pixel or a new parameter, because none of those is
+expressible in an `EmailTemplate`.
 """
 from __future__ import annotations
 
@@ -65,6 +76,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 from app.core.config import settings
 from app.models.notification import NotificationType
+from app.services.locale import DEFAULT_LOCALE, Locale, resolve_locale
 
 
 class EmailTemplateError(ValueError):
@@ -242,7 +254,7 @@ class EmailTemplate:
 #: it would make re-enabling that channel a one-line policy change with no
 #: copy review, when the reason it is in-app only is volume and fan-out.
 #: `TestRegistryCoverage` asserts this file and the policy registry agree.
-EMAIL_TEMPLATES: Dict[str, EmailTemplate] = {
+_EMAIL_TEMPLATES_ES_MX: Dict[str, EmailTemplate] = {
     "report_submitted_v1": EmailTemplate(
         key="report_submitted_v1",
         notification_type=NotificationType.REPORT_SUBMITTED,
@@ -285,24 +297,64 @@ EMAIL_TEMPLATES: Dict[str, EmailTemplate] = {
     ),
 }
 
+#: Superseded email keys, kept resolvable forever — same rule and the same
+#: reason as the in-app registry's `_RETIRED_TEMPLATES`. A delivery row can
+#: outlive a copy revision, and the worker must still be able to render it.
+#: Empty in Céluma 1.3.
+_RETIRED_EMAIL_TEMPLATES: Dict[str, Dict[Locale, EmailTemplate]] = {}
+
+
+def _build_email_registry() -> Dict[str, Dict[Locale, EmailTemplate]]:
+    registry: Dict[str, Dict[Locale, EmailTemplate]] = {}
+    for template in _EMAIL_TEMPLATES_ES_MX.values():
+        registry.setdefault(template.key, {})[DEFAULT_LOCALE] = template
+    for key, by_locale in _RETIRED_EMAIL_TEMPLATES.items():
+        registry.setdefault(key, {}).update(by_locale)
+    return registry
+
+
+#: `template_key -> locale -> template`.
+EMAIL_TEMPLATE_REGISTRY: Dict[str, Dict[Locale, EmailTemplate]] = _build_email_registry()
+
+#: The current default-locale email template per key. Retained under its Block
+#: E name and shape for the same reason as the in-app view.
+EMAIL_TEMPLATES: Dict[str, EmailTemplate] = dict(_EMAIL_TEMPLATES_ES_MX)
+
 #: Every registered key, for tests and for cross-checking the in-app registry.
-EMAIL_TEMPLATE_KEYS: frozenset[str] = frozenset(EMAIL_TEMPLATES)
+EMAIL_TEMPLATE_KEYS: frozenset[str] = frozenset(EMAIL_TEMPLATE_REGISTRY)
 
 
 def get_email_template(
-    notification_type: NotificationType, template_key: str
+    notification_type: NotificationType,
+    template_key: str,
+    locale: Optional[str] = None,
 ) -> EmailTemplate:
-    """Resolve the email template for `(notification_type, template_key)`.
+    """Resolve the email template for `(notification_type, template_key)` in
+    `locale`.
 
-    Both must match, for the reason the in-app registry requires both: a
-    copy/paste that pairs the wrong key with a type would otherwise produce a
-    plausible-looking email about the wrong event.
+    Type and key must both match, for the reason the in-app registry requires
+    both: a copy/paste that pairs the wrong key with a type would otherwise
+    produce a plausible-looking email about the wrong event.
+
+    Locale resolution is the in-app registry's, deliberately reused: an
+    unsupported-but-valid locale falls back to `DEFAULT_LOCALE`, and a
+    malformed one raises. What is *not* reused is the parameter screening —
+    see the module docstring.
     """
-    template = EMAIL_TEMPLATES.get(template_key)
-    if template is None:
+    resolved = resolve_locale(locale)
+
+    by_locale = EMAIL_TEMPLATE_REGISTRY.get(template_key)
+    if by_locale is None:
         raise EmailTemplateError(
             "email_template_not_found",
             f"No email template registered for key {template_key!r}",
+        )
+
+    template = by_locale.get(resolved) or by_locale.get(DEFAULT_LOCALE)
+    if template is None:
+        raise EmailTemplateError(
+            "email_template_not_found",
+            f"Email template {template_key!r} has no copy in any supported locale",
         )
     if template.notification_type != notification_type:
         raise EmailTemplateError(
@@ -328,17 +380,24 @@ def render_notification_email(
     notification_type: NotificationType,
     template_key: str,
     template_params: Optional[Mapping[str, Any]],
+    locale: Optional[str] = None,
 ) -> RenderedEmail:
     """Render one notification as an email.
 
-    The four inputs Story E5 specifies: the tenant, the notification (as its
-    type), the template key and the stored parameters.
+    The four inputs Story E5 specifies — the tenant, the notification (as its
+    type), the template key and the stored parameters — plus, since Block F,
+    the locale the notification was created in. The worker reads it off
+    `Notification.locale`, so an email renders in the same locale as the
+    in-app copy it accompanies rather than in whatever the default happens to
+    be by the time delivery runs.
 
     Every value that reaches the output is screened first — including
     `tenant_name`, which is tenant-editable and therefore exactly as
-    untrusted as a stored parameter.
+    untrusted as a stored parameter. **Locale resolution happens before
+    screening and weakens none of it:** the template chosen may differ, the
+    checks applied to every interpolated value do not.
     """
-    template = get_email_template(notification_type, template_key)
+    template = get_email_template(notification_type, template_key, locale)
 
     values: Dict[str, str] = {"tenant_name": _screen_tenant_name(tenant_name)}
     params = template_params or {}

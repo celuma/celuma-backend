@@ -23,14 +23,39 @@ for markup, URLs and token-shaped values.
 text (content policy §8, the "hybrid" option), so a future localization pass
 can re-render from structured data without rewriting what a user actually
 saw.
+
+Localization readiness (Céluma 1.3, Phase 3, Block F)
+------------------------------------------------------
+Lookup is now `template_key + locale`, not `template_key` alone. Céluma 1.3
+still ships exactly one locale — `es-MX`, see `app/services/locale.py` — so
+this changes no rendered string; it changes the *shape*, so a second locale
+becomes a registry entry rather than a refactor of every call site.
+
+Two rules the structure enforces rather than documents:
+
+**A published key is immutable.** Once `report_published_v1` has rendered a
+notification that is now sitting frozen in somebody's inbox, its copy never
+changes in place. Corrected copy ships as `report_published_v2`, added to
+`NOTIFICATION_TEMPLATE_REGISTRY` beside the `_v1` entry, and
+`CURRENT_TEMPLATE_KEY` is repointed at it. The `_v1` entry stays resolvable
+forever — a historical notification, an audit query, or a delivery row that
+outlived a copy revision must all still be able to look up what produced the
+text. Deprecation here means "no longer selected for new notifications",
+never "removed".
+
+**No call site picks a locale.** `NotificationCommand` has no locale field,
+exactly as it has no `title` field: the two would be the same class of bypass.
+The service renders in `DEFAULT_LOCALE` and records which locale that was on
+`Notification.locale`.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from app.models.notification import NotificationType
+from app.services.locale import DEFAULT_LOCALE, Locale, resolve_locale
 
 
 class NotificationTemplateError(ValueError):
@@ -221,7 +246,14 @@ def render(
 _ORDER_NUMBER = TemplateParam("order_number", max_length=50)
 _ACTOR_NAME = TemplateParam("actor_name", max_length=120)
 
-NOTIFICATION_TEMPLATES: Dict[NotificationType, NotificationTemplate] = {
+#: The `es-MX` copy, one template per approved NotificationType.
+#:
+#: Keyed by type for readability and because Céluma 1.3 has exactly one live
+#: key per type. `NOTIFICATION_TEMPLATE_REGISTRY` below is the structure
+#: lookups actually go through, and it is derived from this plus any retired
+#: keys — so a `_v2` revision adds an entry to `_RETIRED_TEMPLATES` and edits
+#: this map, and nothing else moves.
+_TEMPLATES_ES_MX: Dict[NotificationType, NotificationTemplate] = {
     NotificationType.REPORT_SUBMITTED: NotificationTemplate(
         key="report_submitted_v1",
         notification_type=NotificationType.REPORT_SUBMITTED,
@@ -272,29 +304,97 @@ NOTIFICATION_TEMPLATES: Dict[NotificationType, NotificationTemplate] = {
     ),
 }
 
-#: Every registered key, for schema validation and tests.
-NOTIFICATION_TEMPLATE_KEYS: frozenset[str] = frozenset(
-    template.key for template in NOTIFICATION_TEMPLATES.values()
+#: Superseded template keys, kept resolvable forever.
+#:
+#: Empty in Céluma 1.3 — no copy has been revised yet, and Block F is
+#: explicitly forbidden from inventing a speculative `_v2`. The map exists
+#: because "old keys remain resolvable" has to be somewhere a future revision
+#: can add to without redesigning the registry, and because
+#: `test_a_retired_key_stays_resolvable` needs a place to hang a synthetic
+#: entry.
+_RETIRED_TEMPLATES: Dict[str, Dict[Locale, NotificationTemplate]] = {}
+
+
+def _build_registry() -> Dict[str, Dict[Locale, NotificationTemplate]]:
+    """`template_key -> locale -> template`, the shape every lookup uses.
+
+    Assembled rather than written out because with one locale the literal form
+    would be six dictionaries of one entry each, and the invariant that matters
+    — every current key has copy in every supported locale — is better checked
+    than transcribed.
+    """
+    registry: Dict[str, Dict[Locale, NotificationTemplate]] = {}
+    for template in _TEMPLATES_ES_MX.values():
+        registry.setdefault(template.key, {})[DEFAULT_LOCALE] = template
+    for key, by_locale in _RETIRED_TEMPLATES.items():
+        registry.setdefault(key, {}).update(by_locale)
+    return registry
+
+
+#: The localization-ready lookup structure: `template_key -> locale ->
+#: template`. Includes retired keys, so a historical notification's key still
+#: resolves after its copy has been superseded.
+NOTIFICATION_TEMPLATE_REGISTRY: Dict[str, Dict[Locale, NotificationTemplate]] = (
+    _build_registry()
 )
+
+#: The key new notifications of each type are created with. **This is where
+#: template-version selection lives**: shipping `_v2` copy means registering it
+#: and repointing this map; the `_v1` entry is not touched.
+CURRENT_TEMPLATE_KEY: Dict[NotificationType, str] = {
+    notification_type: template.key
+    for notification_type, template in _TEMPLATES_ES_MX.items()
+}
+
+#: The current default-locale template per type.
+#:
+#: Retained under its Block B name and shape because it is the natural way to
+#: ask "what copy does this event produce today", which is what every existing
+#: consumer wants. It is a *view*: `NOTIFICATION_TEMPLATE_REGISTRY` is the
+#: registry, and this cannot see a retired key.
+NOTIFICATION_TEMPLATES: Dict[NotificationType, NotificationTemplate] = dict(
+    _TEMPLATES_ES_MX
+)
+
+#: Every registered key, current and retired, for schema validation and tests.
+NOTIFICATION_TEMPLATE_KEYS: frozenset[str] = frozenset(NOTIFICATION_TEMPLATE_REGISTRY)
 
 
 def get_template(
-    notification_type: NotificationType, template_key: str
+    notification_type: NotificationType,
+    template_key: str,
+    locale: Optional[str] = None,
 ) -> NotificationTemplate:
-    """Resolve the registered template for `notification_type`.
+    """Resolve the registered template for `(notification_type, template_key)`
+    in `locale`.
 
-    `template_key` must match the type's registered key. Requiring the caller
-    to name both means a copy/paste that pairs the wrong key with a type is
-    caught here rather than producing a plausible-looking but wrong
-    notification.
+    Requiring the caller to name both type and key means a copy/paste that
+    pairs the wrong key with a type is caught here rather than producing a
+    plausible-looking but wrong notification.
+
+    `locale` follows `resolve_locale`: `None` and any well-formed but
+    unsupported identifier both resolve to `DEFAULT_LOCALE`; a malformed one
+    raises `InvalidLocaleError` rather than silently becoming the default.
+    Falling back is then a second, separate step — a key registered in some
+    locale but not this one still yields default-locale copy rather than
+    nothing, which is what keeps a partially translated registry usable.
     """
-    template = NOTIFICATION_TEMPLATES.get(notification_type)
+    resolved = resolve_locale(locale)
+
+    by_locale = NOTIFICATION_TEMPLATE_REGISTRY.get(template_key)
+    if by_locale is None:
+        raise NotificationTemplateError(
+            "unknown_template",
+            f"No template registered for key {template_key!r}",
+        )
+
+    template = by_locale.get(resolved) or by_locale.get(DEFAULT_LOCALE)
     if template is None:
         raise NotificationTemplateError(
             "unknown_template",
-            f"No template registered for notification type {notification_type}",
+            f"Template {template_key!r} has no copy in any supported locale",
         )
-    if template.key != template_key:
+    if template.notification_type != notification_type:
         raise NotificationTemplateError(
             "template_key_mismatch",
             f"Template key does not match the registered template for {notification_type}",
