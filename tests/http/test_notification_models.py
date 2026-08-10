@@ -284,10 +284,10 @@ class TestNotificationDelivery:
     def test_delivery_is_unique_per_notification_channel_and_recipient(
         self, session, world
     ):
-        """Céluma 1.3 Phase 3, Block D (v1_5_0) moved this guarantee from the
-        address to the recipient: one delivery per (event, channel, user).
-        The duplicate defence is still the database's, it just keys on the
-        right thing."""
+        """Céluma 1.3 Phase 3, Block D moved this guarantee from the address
+        to the recipient: one delivery per (event, channel, user). The
+        duplicate defence is still the database's, it just keys on the right
+        thing."""
         notification = create_notification(session, world["tenant"])
         self._delivery(session, world, notification=notification)
 
@@ -298,10 +298,11 @@ class TestNotificationDelivery:
     def test_two_users_sharing_a_mailbox_each_get_their_own_delivery(
         self, session, world
     ):
-        """The concrete case v1_5_0 exists for. Under v1_4_0's
-        UNIQUE(notification_id, channel, recipient_address) the second user's
-        row was rejected, so whoever shared a mailbox with a colleague simply
-        never got email and nothing recorded that they hadn't."""
+        """The concrete case Phase 3 Block D's uniqueness model exists for.
+        Under the earlier UNIQUE(notification_id, channel, recipient_address)
+        the second user's row was rejected, so whoever shared a mailbox with a
+        colleague simply never got email and nothing recorded that they
+        hadn't."""
         notification = create_notification(session, world["tenant"])
         self._delivery(
             session,

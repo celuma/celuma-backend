@@ -345,11 +345,12 @@ def materialize_email_deliveries(
         return 0
 
     # ON CONFLICT DO NOTHING against the per-recipient partial unique index
-    # (v1_5_0). Every row written here carries a non-null recipient_user_id,
-    # so that is the index Postgres infers. The duplicate defence stays in
-    # the database, exactly as it does for the notification insert itself:
-    # a repeated materialization is a zero-row insert, not an exception, so
-    # it cannot poison the caller's transaction.
+    # `uq_notification_delivery_recipient_user`, created by the `v1_3_0`
+    # release migration. Every row written here carries a non-null
+    # recipient_user_id, so that is the index Postgres infers. The duplicate
+    # defence stays in the database, exactly as it does for the notification
+    # insert itself: a repeated materialization is a zero-row insert, not an
+    # exception, so it cannot poison the caller's transaction.
     result = session.exec(
         pg_insert(NotificationDelivery)
         .values(rows)

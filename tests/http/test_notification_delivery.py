@@ -373,10 +373,11 @@ class TestMultipleRecipients:
         assert len(deliveries(session, notification_id)) == 1
 
     def test_two_users_sharing_a_mailbox_each_get_a_row(self, session, world):
-        """The case v1_5_0 exists for. Under v1_4_0's address-keyed unique
-        constraint the second user's row was swallowed by ON CONFLICT DO
-        NOTHING, so whoever shared an inbox with a colleague silently never
-        received email."""
+        """The case the recipient-keyed uniqueness model exists for. Under
+        the address-keyed unique constraint Phase 3 Block B first shipped, the
+        second user's row was swallowed by ON CONFLICT DO NOTHING, so whoever
+        shared an inbox with a colleague silently never received email. Block
+        D replaced it; the release migration creates only the replacement."""
         world["peer"].email = world["user"].email
         session.add(world["peer"])
         session.commit()

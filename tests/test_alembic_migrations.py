@@ -1,24 +1,41 @@
-"""Alembic chain integrity tests (Céluma 1.3, Phase 2 closure).
+"""Alembic chain integrity tests (Céluma 1.3, Phase 2 and Phase 3 closures).
 
-Céluma 1.3 shipped its database delta as seven revisions on the
-`celuma-1.3` branch (v1_3_0 … v1_9_0). None of them ever reached
-production, staging or a customer database, so the release was squashed
-into a single contractual migration on top of `v1_2_0` — see
-docs/celuma-1.3/phase-2-closure/alembic-squash-inventory.md.
+Céluma 1.3 was developed as ten revisions on the `celuma-1.3` branch and
+ships as one. Two squashes got it there, and both folded their work into the
+same contractual revision, `v1_3_0`:
 
-These tests are the regression net for that decision:
+  - **Phase 2 closure** folded in `v1_3_0 … v1_9_0` (Blocks A–E plus five
+    post-Phase-2 remediation rounds) — see
+    docs/celuma-1.3/phase-2-closure/alembic-squash-inventory.md.
+  - **Phase 3 closure** folded in the notification chain that reused three of
+    the identifiers Phase 2 had freed, `v1_4_0 → v1_5_0 → v1_6_0` (Blocks B,
+    D and F) — see
+    docs/celuma-1.3/phase-3-closure/phase-3-alembic-squash-inventory.md.
 
-  - the static ones guarantee the chain stays single-headed and linear, and
-    that no superseded 1.3 revision id can creep back into executable code;
-  - the DB-backed ones guarantee the release migration still upgrades a
-    clean pre-1.3 database, downgrades without residue, and re-upgrades —
-    the Path A/B matrix from the closure brief.
+Development history and release history are therefore different, and the
+per-block documents under docs/celuma-1.3/ record the former on purpose:
 
-Céluma 1.3 Phase 3, Block B extends this file rather than starting a parallel
-one: `v1_4_0_notifications_core` added `TestNotificationsRevision` at the
-bottom, applying the same upgrade/downgrade/re-upgrade discipline to it.
-Phase 3, Block D does the same for
-`v1_5_0_notification_preferences_delivery_lifecycle`, which is now the head.
+    development history:  v1_3_0 → v1_4_0 → v1_5_0 → v1_6_0
+    release history:      v1_3_0 only
+
+These tests are the regression net for both decisions:
+
+  - the static ones guarantee the chain stays single-headed and linear, that
+    the head is the release revision, and that no superseded 1.3 revision id
+    can creep back into executable code;
+  - the DB-backed ones guarantee the release migration still upgrades a clean
+    pre-1.3 database, downgrades without residue — including from a
+    *populated* database — and re-upgrades.
+
+`TestNotificationDomain` replaces the three per-revision classes Phase 3
+Blocks B, D and F each added (`TestNotificationsRevision`,
+`TestDeliveryLifecycleRevision`, `TestNotificationLocaleRevision`). Their
+assertions are kept, not dropped; what changed is that they now describe a
+single revision's finished state rather than three successive ones, because
+the intermediate states no longer exist to assert against. Two of them became
+anti-assertions: the address-keyed delivery constraint and the locale-less
+`notification` table are states the release migration must never pass
+through.
 
 The DB-backed tests use the same ephemeral-Postgres pattern as
 tests/http/conftest.py: a database that is always dropped and recreated by
@@ -30,6 +47,7 @@ import os
 import pathlib
 import subprocess
 import tokenize
+import uuid
 
 import pytest
 from alembic.config import Config
@@ -47,35 +65,54 @@ VERSIONS_DIR = BACKEND_ROOT / "alembic" / "versions"
 #: revision `main` and tag v1.2.0 carry.
 LAST_PRE_1_3_REVISION = "v1_2_0"
 
-#: The single consolidated Céluma 1.3 release revision.
+#: The single consolidated Céluma 1.3 release revision, and the head.
 RELEASE_REVISION = "v1_3_0"
-
-#: Céluma 1.3 Phase 3, Block B: the notifications-core revision, which sits
-#: directly on RELEASE_REVISION.
-NOTIFICATIONS_REVISION = "v1_4_0"
-
-#: Céluma 1.3 Phase 3, Block D: the delivery-uniqueness revision, which sits
-#: directly on NOTIFICATIONS_REVISION.
-DELIVERY_LIFECYCLE_REVISION = "v1_5_0"
-
-#: Céluma 1.3 Phase 3, Block F: the notification-locale revision, which sits
-#: directly on DELIVERY_LIFECYCLE_REVISION and is the live head from this
-#: block onward.
-NOTIFICATION_LOCALE_REVISION = "v1_6_0"
 
 #: Revision ids that existed only on the unreleased `celuma-1.3` branch and
 #: were folded into RELEASE_REVISION. Nothing executable may reference them.
 #:
-#: Phase 3, Block B removed "v1_4_0" from this tuple, Block D removed
-#: "v1_5_0", and Block F removes "v1_6_0" — all for the same reason: each id
-#: belonged to a never-shipped `celuma-1.3` branch revision that the squash
-#: folded into RELEASE_REVISION. None of them ever reached production,
-#: staging or a customer database (see
-#: docs/celuma-1.3/phase-2-closure/alembic-squash-inventory.md), so no
-#: `alembic_version` row anywhere carries one and the id is genuinely free to
-#: be reused by a live migration continuing the `vMAJOR_MINOR_PATCH`
-#: sequence. The guard below still holds for every id that remains dead.
-SUPERSEDED_REVISIONS = ("v1_7_0", "v1_8_0", "v1_9_0")
+#: The tuple has grown and shrunk with the development history and is now
+#: closed. Phase 2 closure retired `v1_4_0 … v1_9_0`; Phase 3 Blocks B, D and
+#: F each removed one entry when they reused a freed id for a live revision
+#: (`v1_4_0`, `v1_5_0`, `v1_6_0`); the Phase 3 closure squash put all three
+#: back, permanently, because those revisions are now folded into
+#: RELEASE_REVISION as well. Every id here belonged to a revision that never
+#: reached production, staging or a customer database, so no `alembic_version`
+#: row anywhere carries one.
+SUPERSEDED_REVISIONS = (
+    "v1_4_0",
+    "v1_5_0",
+    "v1_6_0",
+    "v1_7_0",
+    "v1_8_0",
+    "v1_9_0",
+)
+
+#: Every table the release migration introduces on top of `v1_2_0` — the
+#: Phase 2 objects and the Phase 3 notification domain together.
+RELEASE_TABLES = {
+    "report_template_version",
+    "report_letterhead",
+    "report_letterhead_version",
+    "notification",
+    "notification_recipient",
+    "notification_delivery",
+    "notification_preference",
+}
+
+#: The four notification-domain tables, absorbed from the Phase 3 chain.
+NOTIFICATION_TABLES = {
+    "notification",
+    "notification_recipient",
+    "notification_delivery",
+    "notification_preference",
+}
+
+#: The delivery uniqueness constraint Phase 3 Block B created and Block D
+#: dropped. The consolidated migration must never create it: it assumed one
+#: address belongs to one person, which silently denied email to the second
+#: user sharing a mailbox.
+SUPERSEDED_DELIVERY_CONSTRAINT = "uq_notification_delivery_notification_channel_address"
 
 _MIGRATION_TEST_DB = "celuma_migration_test"
 
@@ -84,7 +121,7 @@ def _executable_source(path: pathlib.Path) -> str:
     """Return a module's source stripped of its module docstring and comments.
 
     The release migration documents its own provenance in prose — the module
-    docstring names the seven revisions it consolidates, and each section of
+    docstring names the revisions it consolidates, and each section of
     `upgrade()` carries an `ex-v1_x_0` comment so a reader can trace any DDL
     statement back to the block that introduced it. Both are inert. What must
     never come back is a revision id that some code path actually resolves,
@@ -118,41 +155,32 @@ class TestChainShape:
     def test_exactly_one_head(self):
         assert len(_script_directory().get_heads()) == 1
 
-    def test_head_is_the_notification_locale_revision(self):
-        """Phase 3, Block F: the head moved from the delivery-uniqueness
-        revision to the notification-locale revision stacked on top of it."""
-        assert _script_directory().get_current_head() == NOTIFICATION_LOCALE_REVISION
+    def test_head_is_the_release_revision(self):
+        """Phase 3 closure: the head moved back from the notification-locale
+        revision to the release revision that now contains it."""
+        assert _script_directory().get_current_head() == RELEASE_REVISION
 
     def test_release_revision_sits_directly_on_the_last_pre_1_3_revision(self):
         revision = _script_directory().get_revision(RELEASE_REVISION)
         assert revision.down_revision == LAST_PRE_1_3_REVISION
 
-    def test_notifications_revision_sits_directly_on_the_release_revision(self):
-        revision = _script_directory().get_revision(NOTIFICATIONS_REVISION)
-        assert revision.down_revision == RELEASE_REVISION
-
-    def test_delivery_lifecycle_revision_sits_directly_on_the_notifications_revision(
-        self,
-    ):
-        revision = _script_directory().get_revision(DELIVERY_LIFECYCLE_REVISION)
-        assert revision.down_revision == NOTIFICATIONS_REVISION
-
-    def test_locale_revision_sits_directly_on_the_delivery_lifecycle_revision(self):
-        revision = _script_directory().get_revision(NOTIFICATION_LOCALE_REVISION)
-        assert revision.down_revision == DELIVERY_LIFECYCLE_REVISION
-
     def test_chain_is_linear_from_base_to_head(self):
         script = _script_directory()
         revisions = list(script.walk_revisions())
         assert [r.revision for r in revisions] == [
-            NOTIFICATION_LOCALE_REVISION,
-            DELIVERY_LIFECYCLE_REVISION,
-            NOTIFICATIONS_REVISION,
             RELEASE_REVISION,
             "v1_2_0",
             "v1_1_0",
             "v1_0_0",
         ]
+
+    def test_no_merge_revision_exists(self):
+        """A squash, not a merge: no revision may have more than one parent."""
+        for revision in _script_directory().walk_revisions():
+            parents = revision.down_revision
+            assert not isinstance(parents, (tuple, list)) or len(parents) <= 1, (
+                f"{revision.revision} is a merge revision"
+            )
 
     def test_no_superseded_revision_file_remains_in_the_versions_directory(self):
         script = _script_directory()
@@ -160,10 +188,21 @@ class TestChainShape:
         assert known.isdisjoint(SUPERSEDED_REVISIONS)
 
     @pytest.mark.parametrize("stale", SUPERSEDED_REVISIONS)
+    def test_no_superseded_revision_file_is_on_disk(self, stale):
+        """Not merely absent from the chain — absent from the directory, so a
+        stray file cannot be revived by editing one `down_revision`."""
+        offenders = [
+            path.name
+            for path in VERSIONS_DIR.glob("*.py")
+            if path.name.startswith(f"{stale}_")
+        ]
+        assert offenders == []
+
+    @pytest.mark.parametrize("stale", SUPERSEDED_REVISIONS)
     def test_no_executable_code_references_a_superseded_revision(self, stale):
         """Documentation intentionally keeps the historical ids as a record
         of how the release was built — docs/celuma-1.3/, and the release
-        migration's own module docstring, which names the seven revisions it
+        migration's own module docstring, which names the revisions it
         consolidates. Executable code must not reference them: nothing may
         resolve, stamp, or branch on a revision that no longer exists.
         """
@@ -233,11 +272,8 @@ class TestReleaseMigration:
         _alembic(LAST_PRE_1_3_REVISION)
         assert _current_revision(migration_db) == LAST_PRE_1_3_REVISION
 
-        _alembic(RELEASE_REVISION)
-        assert _current_revision(migration_db) == RELEASE_REVISION
-
         _alembic("head")
-        assert _current_revision(migration_db) == NOTIFICATION_LOCALE_REVISION
+        assert _current_revision(migration_db) == RELEASE_REVISION
 
     def test_downgrade_then_re_upgrade(self, migration_db):
         _alembic("head")
@@ -245,7 +281,22 @@ class TestReleaseMigration:
         assert _current_revision(migration_db) == LAST_PRE_1_3_REVISION
 
         _alembic("head")
-        assert _current_revision(migration_db) == NOTIFICATION_LOCALE_REVISION
+        assert _current_revision(migration_db) == RELEASE_REVISION
+
+    def test_release_introduces_exactly_the_expected_tables(self, migration_db):
+        """The release migration's table footprint, pinned. Replaces Block B's
+        `test_notifications_revision_modifies_no_existing_table`, which could
+        only be expressed while the notification tables arrived in a separate
+        revision: there is no longer an intermediate state to diff against, so
+        the guard moves to the `v1_2_0 → v1_3_0` boundary instead."""
+        _alembic(LAST_PRE_1_3_REVISION)
+        before = set(inspect(migration_db).get_table_names())
+
+        _alembic("head")
+        after = set(inspect(migration_db).get_table_names())
+
+        assert after - before == RELEASE_TABLES
+        assert before - after == set()
 
     def test_downgrade_removes_every_object_the_release_introduced(self, migration_db):
         _alembic("head")
@@ -253,9 +304,7 @@ class TestReleaseMigration:
 
         inspector = inspect(migration_db)
         tables = set(inspector.get_table_names())
-        assert "report_template_version" not in tables
-        assert "report_letterhead" not in tables
-        assert "report_letterhead_version" not in tables
+        assert RELEASE_TABLES.isdisjoint(tables)
 
         report_version_columns = {c["name"] for c in inspector.get_columns("report_version")}
         assert report_version_columns.isdisjoint(
@@ -272,6 +321,31 @@ class TestReleaseMigration:
         )
         tenant_columns = {c["name"] for c in inspector.get_columns("tenant")}
         assert "reports_v2_enabled" not in tenant_columns
+
+    def test_downgrade_works_on_a_populated_database(self, migration_db):
+        """The notification tables now originate inside the release migration,
+        so its downgrade has to drop tables that hold rows and foreign keys —
+        not merely empty ones. Dependency order is what makes that possible:
+        `notification_recipient` and `notification_delivery` both reference
+        `notification`, so `notification` goes last of the four.
+        """
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id, notification_id, user_a, user_b = _seed_delivery_context(conn)
+            _insert_recipient(conn, tenant_id=tenant_id, notification_id=notification_id,
+                              user_id=user_a)
+            # Two users sharing one mailbox — the shape the final uniqueness
+            # model exists to allow, and the one most likely to obstruct a drop.
+            _insert_delivery(conn, tenant_id=tenant_id, notification_id=notification_id,
+                             recipient_user_id=user_a, address="shared@lab.test")
+            _insert_delivery(conn, tenant_id=tenant_id, notification_id=notification_id,
+                             recipient_user_id=user_b, address="shared@lab.test")
+            _insert_preference(conn, tenant_id=tenant_id, user_id=user_a)
+
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
+
+        assert _current_revision(migration_db) == LAST_PRE_1_3_REVISION
+        assert RELEASE_TABLES.isdisjoint(set(inspect(migration_db).get_table_names()))
 
     def test_upgraded_schema_matches_the_models(self, migration_db):
         """Every table and column the SQLModel metadata declares must exist
@@ -321,7 +395,7 @@ class TestReleaseMigration:
 
     def test_release_migration_performs_no_backfill_on_nullable_columns(self, migration_db):
         """The compatibility decisions the remediation rounds made must
-        survive the squash: consolidating seven migrations into one is not a
+        survive the squash: consolidating migrations into one is not a
         licence to populate columns that were deliberately left empty."""
         _alembic("head")
         inspector = inspect(migration_db)
@@ -359,77 +433,61 @@ class TestReleaseMigration:
         assert "false" in str(tenant_columns["reports_v2_enabled"]["default"]).lower()
 
 
-class TestNotificationsRevision:
-    """Céluma 1.3, Phase 3, Block B — v1_4_0_notifications_core.
+class TestNotificationDomain:
+    """The notification domain, as the release migration now delivers it.
 
-    The chain tests above prove the revision is reachable and reversible.
-    These prove it created the *right* objects: the constraints and indexes
-    the notification domain's correctness actually rests on, rather than
-    merely four tables with the right names.
-
-    Phase 3, Block D note: these upgrade to `NOTIFICATIONS_REVISION`
-    explicitly rather than to `head`, now that a later revision exists. They
-    describe what **v1_4_0** created; asserting them at a moving `head` would
-    turn any deliberate later change into a failure of a test that was never
-    about it. `TestDeliveryLifecycleRevision` below owns v1_5_0's own state.
+    Carries forward every assertion the three Phase 3 revision classes made,
+    retargeted from their own revisions to the single head. The chain tests
+    above prove the revision is reachable and reversible; these prove it
+    created the *right* objects — the constraints and indexes the domain's
+    correctness actually rests on, rather than four tables with the right
+    names — and, for delivery uniqueness, the behaviour those objects exist
+    for.
     """
 
-    NOTIFICATION_TABLES = {
-        "notification",
-        "notification_recipient",
-        "notification_delivery",
-        "notification_preference",
-    }
+    USER_INDEX = "uq_notification_delivery_recipient_user"
+    ADDRESS_INDEX = "uq_notification_delivery_recipient_address"
+
+    def _index_map(self, migration_db, table):
+        with migration_db.connect() as conn:
+            return dict(
+                conn.execute(
+                    text(
+                        "SELECT indexname, indexdef FROM pg_indexes "
+                        "WHERE tablename = :t"
+                    ),
+                    {"t": table},
+                ).all()
+            )
 
     def test_upgrade_creates_the_four_notification_tables(self, migration_db):
-        _alembic(RELEASE_REVISION)
-        assert self.NOTIFICATION_TABLES.isdisjoint(
+        _alembic(LAST_PRE_1_3_REVISION)
+        assert NOTIFICATION_TABLES.isdisjoint(
             set(inspect(migration_db).get_table_names())
         )
 
-        _alembic(NOTIFICATIONS_REVISION)
-        assert self.NOTIFICATION_TABLES <= set(inspect(migration_db).get_table_names())
+        _alembic("head")
+        assert NOTIFICATION_TABLES <= set(inspect(migration_db).get_table_names())
 
     def test_downgrade_drops_every_notification_table(self, migration_db):
-        _alembic(NOTIFICATIONS_REVISION)
-        _alembic(RELEASE_REVISION, command="downgrade")
+        _alembic("head")
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
 
-        assert _current_revision(migration_db) == RELEASE_REVISION
-        assert self.NOTIFICATION_TABLES.isdisjoint(
+        assert _current_revision(migration_db) == LAST_PRE_1_3_REVISION
+        assert NOTIFICATION_TABLES.isdisjoint(
             set(inspect(migration_db).get_table_names())
         )
 
     def test_downgrade_then_re_upgrade_restores_the_tables(self, migration_db):
-        _alembic(NOTIFICATIONS_REVISION)
-        _alembic(RELEASE_REVISION, command="downgrade")
-        _alembic(NOTIFICATIONS_REVISION)
+        _alembic("head")
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
+        _alembic("head")
 
-        assert _current_revision(migration_db) == NOTIFICATIONS_REVISION
-        assert self.NOTIFICATION_TABLES <= set(inspect(migration_db).get_table_names())
-
-    def test_notifications_revision_modifies_no_existing_table(self, migration_db):
-        """The revision is purely additive: every table that existed at
-        v1_3_0 must have exactly the same columns at v1_4_0."""
-        _alembic(RELEASE_REVISION)
-        inspector = inspect(migration_db)
-        before = {
-            table: {c["name"] for c in inspector.get_columns(table)}
-            for table in inspector.get_table_names()
-        }
-
-        _alembic(NOTIFICATIONS_REVISION)
-        inspector = inspect(migration_db)
-        after = {
-            table: {c["name"] for c in inspector.get_columns(table)}
-            for table in inspector.get_table_names()
-        }
-
-        for table, columns in before.items():
-            assert after[table] == columns, f"{table} was modified by v1_4_0"
-        assert set(after) - set(before) == self.NOTIFICATION_TABLES
+        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert NOTIFICATION_TABLES <= set(inspect(migration_db).get_table_names())
 
     def test_unique_constraints_exist(self, migration_db):
-        _alembic(NOTIFICATIONS_REVISION)
+        _alembic("head")
         inspector = inspect(migration_db)
 
         def constraint(table, name):
@@ -448,15 +506,103 @@ class TestNotificationsRevision:
             "notification_recipient", "uq_notification_recipient_notification_user"
         )["column_names"] == ["notification_id", "user_id"]
         assert constraint(
-            "notification_delivery",
-            "uq_notification_delivery_notification_channel_address",
-        )["column_names"] == ["notification_id", "channel", "recipient_address"]
-        assert constraint(
             "notification_preference", "uq_notification_preference_user_type"
         )["column_names"] == ["user_id", "notification_type"]
 
+    def test_the_superseded_address_constraint_is_never_created(self, migration_db):
+        """An anti-assertion, and the reason the consolidated migration is not
+        a concatenation of the three Phase 3 revisions. Block B's
+        `UNIQUE (notification_id, channel, recipient_address)` encoded the
+        assumption that one address belongs to one person; Block D dropped it.
+        Creating it here only to drop it would replay a defect, so it must not
+        exist at any point — including immediately after the upgrade.
+        """
+        _alembic("head")
+        names = {
+            c["name"]
+            for c in inspect(migration_db).get_unique_constraints("notification_delivery")
+        }
+        assert SUPERSEDED_DELIVERY_CONSTRAINT not in names
+        assert SUPERSEDED_DELIVERY_CONSTRAINT not in self._index_map(
+            migration_db, "notification_delivery"
+        )
+
+    def test_both_delivery_indexes_are_unique_and_partial(self, migration_db):
+        """Partial is the whole point: each index covers exactly the half of
+        the table the other cannot key on, so every row is guarded once."""
+        _alembic("head")
+        indexes = self._index_map(migration_db, "notification_delivery")
+
+        user_index = indexes[self.USER_INDEX]
+        assert "CREATE UNIQUE INDEX" in user_index
+        assert "recipient_user_id IS NOT NULL" in user_index
+        assert "notification_id" in user_index and "channel" in user_index
+
+        address_index = indexes[self.ADDRESS_INDEX]
+        assert "CREATE UNIQUE INDEX" in address_index
+        assert "recipient_user_id IS NULL" in address_index
+        assert "recipient_address" in address_index
+
+    def test_two_users_sharing_one_mailbox_each_get_a_delivery_row(self, migration_db):
+        """The delivery model's defining behaviour, asserted as behaviour
+        rather than as DDL: a shared `recepcion@` must not mean the second
+        person silently receives nothing."""
+        _alembic("head")
+        with migration_db.connect() as conn:
+            tenant_id, notification_id, user_a, user_b = _seed_delivery_context(conn)
+
+            _insert_delivery(conn, tenant_id=tenant_id, notification_id=notification_id,
+                             recipient_user_id=user_a, address="shared@lab.test")
+            _insert_delivery(conn, tenant_id=tenant_id, notification_id=notification_id,
+                             recipient_user_id=user_b, address="shared@lab.test")
+            conn.commit()
+
+            count = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM notification_delivery "
+                    "WHERE notification_id = :n"
+                ),
+                {"n": notification_id},
+            ).scalar_one()
+        assert count == 2
+
+    def test_one_user_still_cannot_get_two_rows_for_the_same_event(self, migration_db):
+        """Allowing a shared address must not relax the per-recipient rule:
+        the duplicate defence moved, it did not disappear."""
+        _alembic("head")
+        with migration_db.connect() as conn:
+            tenant_id, notification_id, user_a, _ = _seed_delivery_context(conn)
+            _insert_delivery(conn, tenant_id=tenant_id, notification_id=notification_id,
+                             recipient_user_id=user_a, address="a@lab.test")
+            conn.commit()
+
+            with pytest.raises(Exception):
+                # A different address, same user: still one delivery per
+                # (event, channel, recipient).
+                _insert_delivery(conn, tenant_id=tenant_id,
+                                 notification_id=notification_id,
+                                 recipient_user_id=user_a, address="a.alias@lab.test")
+                conn.commit()
+
+    def test_account_less_recipients_keep_the_address_guarantee(self, migration_db):
+        """A physician resolved straight to an address has no user id to key
+        on, so the original address constraint must still hold for them."""
+        _alembic("head")
+        with migration_db.connect() as conn:
+            tenant_id, notification_id, _, _ = _seed_delivery_context(conn)
+            _insert_delivery(conn, tenant_id=tenant_id, notification_id=notification_id,
+                             recipient_user_id=None, address="physician@practice.test")
+            conn.commit()
+
+            with pytest.raises(Exception):
+                _insert_delivery(conn, tenant_id=tenant_id,
+                                 notification_id=notification_id,
+                                 recipient_user_id=None,
+                                 address="physician@practice.test")
+                conn.commit()
+
     def test_indexes_supporting_the_hot_query_paths_exist(self, migration_db):
-        _alembic(NOTIFICATIONS_REVISION)
+        _alembic("head")
         inspector = inspect(migration_db)
 
         def columns_of(table, index_name):
@@ -482,7 +628,7 @@ class TestNotificationsRevision:
         assert columns_of(
             "notification_recipient", "ix_notification_recipient_inbox_created_at"
         ) == ["tenant_id", "user_id", "created_at"]
-        # The Block E poller's claim query.
+        # The delivery poller's claim query.
         assert columns_of("notification_delivery", "ix_notification_delivery_poller") == [
             "status",
             "next_attempt_at",
@@ -490,9 +636,9 @@ class TestNotificationsRevision:
 
     def test_check_constraints_pin_the_enum_values(self, migration_db):
         """Enums are VARCHAR + CHECK, not native PostgreSQL ENUM types (see
-        the revision's module docstring). Assert the constraints exist and
-        that no native enum type was created behind our back."""
-        _alembic(NOTIFICATIONS_REVISION)
+        the release migration's module docstring). Assert the constraints
+        exist and that no native enum type was created behind our back."""
+        _alembic("head")
         with migration_db.connect() as conn:
             checks = dict(
                 conn.execute(
@@ -516,6 +662,7 @@ class TestNotificationsRevision:
         assert "SENDING" in checks["ck_notification_delivery_status"]
         assert "attempts" in checks["ck_notification_delivery_attempts_non_negative"]
         assert "read_at" in checks["ck_notification_recipient_read_requires_timestamp"]
+        assert "REPORT_PDF_READY" in checks["ck_notification_preference_type"]
 
         with migration_db.connect() as conn:
             enum_types = conn.execute(
@@ -527,7 +674,7 @@ class TestNotificationsRevision:
         assert enum_types == []
 
     def test_nullability_matches_the_contract(self, migration_db):
-        _alembic(NOTIFICATIONS_REVISION)
+        _alembic("head")
         inspector = inspect(migration_db)
 
         def nullable(table):
@@ -552,15 +699,36 @@ class TestNotificationsRevision:
         assert "delivered_at" not in recipient
 
         delivery = nullable("notification_delivery")
-        # NOT NULL is what makes the delivery uniqueness guarantee real.
+        # NOT NULL is what makes the account-less delivery guarantee real.
         assert delivery["recipient_address"] is False
         assert delivery["recipient_user_id"] is True
         assert delivery["attempts"] is False
 
+    def test_locale_is_created_with_the_table_not_added_afterwards(self, migration_db):
+        """Phase 3 Block F's column, absorbed into `CREATE TABLE
+        notification`. It must be non-null with the `es-MX` server default the
+        moment the release migration finishes — there is no later revision to
+        add it, and on a clean database there is no row to backfill.
+
+        `locale` is also asserted to be the table's *last* column: that is
+        where the superseded `ALTER TABLE ... ADD COLUMN` left it, and keeping
+        the physical order is what makes the consolidated schema identical to
+        the former `v1_6_0` schema at the `pg_dump` level rather than merely
+        semantically.
+        """
+        _alembic("head")
+        columns = inspect(migration_db).get_columns("notification")
+        by_name = {c["name"]: c for c in columns}
+
+        assert "locale" in by_name
+        assert by_name["locale"]["nullable"] is False
+        assert "es-MX" in str(by_name["locale"]["default"])
+        assert columns[-1]["name"] == "locale"
+
     def test_notification_foreign_keys_have_no_destructive_cascade(self, migration_db):
         """Deleting a user or tenant must not silently erase notification
         history — no FK may carry ON DELETE CASCADE/SET NULL."""
-        _alembic(NOTIFICATIONS_REVISION)
+        _alembic("head")
         with migration_db.connect() as conn:
             definitions = [
                 row[0]
@@ -577,225 +745,22 @@ class TestNotificationsRevision:
         for definition in definitions:
             assert "ON DELETE" not in definition.upper(), definition
 
-    def test_revision_creates_no_notification_or_preference_rows(self, migration_db):
+    def test_release_creates_no_notification_or_preference_rows(self, migration_db):
         """Additive, no backfill: the tables arrive empty. In particular no
         preference row is seeded per user or per type — absence of a row is
-        what 'use the default' means."""
-        _alembic(NOTIFICATIONS_REVISION)
+        what 'use the default' means, and the preference contract depends on
+        that staying true."""
+        _alembic("head")
         with migration_db.connect() as conn:
-            for table in sorted(self.NOTIFICATION_TABLES):
+            for table in sorted(NOTIFICATION_TABLES):
                 count = conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one()
                 assert count == 0, f"{table} is not empty after upgrade"
 
 
-class TestDeliveryLifecycleRevision:
-    """Céluma 1.3, Phase 3, Block D — v1_5_0_notification_preferences_delivery_lifecycle.
-
-    The revision replaces `notification_delivery`'s single unique constraint
-    with two partial unique indexes, so that two users sharing one mailbox are
-    two recipients rather than one. These tests assert the resulting shape and,
-    more importantly, the *behaviour* it exists for — the shared-address insert
-    that v1_4_0 rejected and v1_5_0 must accept.
-    """
-
-    OLD_CONSTRAINT = "uq_notification_delivery_notification_channel_address"
-    USER_INDEX = "uq_notification_delivery_recipient_user"
-    ADDRESS_INDEX = "uq_notification_delivery_recipient_address"
-
-    def _index_map(self, migration_db):
-        with migration_db.connect() as conn:
-            return dict(
-                conn.execute(
-                    text(
-                        "SELECT indexname, indexdef FROM pg_indexes "
-                        "WHERE tablename = 'notification_delivery'"
-                    )
-                ).all()
-            )
-
-    def _unique_constraint_names(self, migration_db):
-        return {c["name"] for c in inspect(migration_db).get_unique_constraints(
-            "notification_delivery"
-        )}
-
-    def test_upgrade_replaces_the_address_constraint_with_two_partial_indexes(
-        self, migration_db
-    ):
-        _alembic(NOTIFICATIONS_REVISION)
-        assert self.OLD_CONSTRAINT in self._unique_constraint_names(migration_db)
-
-        _alembic("head")
-        assert self.OLD_CONSTRAINT not in self._unique_constraint_names(migration_db)
-
-        indexes = self._index_map(migration_db)
-        assert self.USER_INDEX in indexes
-        assert self.ADDRESS_INDEX in indexes
-
-    def test_both_new_indexes_are_unique_and_partial(self, migration_db):
-        """Partial is the whole point: each index covers exactly the half of
-        the table the other cannot key on, so every row is guarded once."""
-        _alembic("head")
-        indexes = self._index_map(migration_db)
-
-        user_index = indexes[self.USER_INDEX]
-        assert "CREATE UNIQUE INDEX" in user_index
-        assert "recipient_user_id IS NOT NULL" in user_index
-        assert "notification_id" in user_index and "channel" in user_index
-
-        address_index = indexes[self.ADDRESS_INDEX]
-        assert "CREATE UNIQUE INDEX" in address_index
-        assert "recipient_user_id IS NULL" in address_index
-        assert "recipient_address" in address_index
-
-    def test_two_users_sharing_one_mailbox_each_get_a_delivery_row(
-        self, migration_db
-    ):
-        """The defect this revision exists to fix, asserted as behaviour
-        rather than as DDL: under v1_4_0 the second insert violated the
-        address constraint and the second person silently received nothing."""
-        _alembic("head")
-        with migration_db.connect() as conn:
-            tenant_id, notification_id, user_a, user_b = _seed_delivery_context(conn)
-
-            _insert_delivery(
-                conn,
-                tenant_id=tenant_id,
-                notification_id=notification_id,
-                recipient_user_id=user_a,
-                address="shared@lab.test",
-            )
-            _insert_delivery(
-                conn,
-                tenant_id=tenant_id,
-                notification_id=notification_id,
-                recipient_user_id=user_b,
-                address="shared@lab.test",
-            )
-            conn.commit()
-
-            count = conn.execute(
-                text(
-                    "SELECT COUNT(*) FROM notification_delivery "
-                    "WHERE notification_id = :n"
-                ),
-                {"n": notification_id},
-            ).scalar_one()
-        assert count == 2
-
-    def test_one_user_still_cannot_get_two_rows_for_the_same_event(
-        self, migration_db
-    ):
-        """Relaxing the address rule must not relax the per-recipient rule:
-        the duplicate defence moved, it did not disappear."""
-        _alembic("head")
-        with migration_db.connect() as conn:
-            tenant_id, notification_id, user_a, _ = _seed_delivery_context(conn)
-            _insert_delivery(
-                conn,
-                tenant_id=tenant_id,
-                notification_id=notification_id,
-                recipient_user_id=user_a,
-                address="a@lab.test",
-            )
-            conn.commit()
-
-            with pytest.raises(Exception):
-                # A different address, same user: still one delivery per
-                # (event, channel, recipient).
-                _insert_delivery(
-                    conn,
-                    tenant_id=tenant_id,
-                    notification_id=notification_id,
-                    recipient_user_id=user_a,
-                    address="a.alias@lab.test",
-                )
-                conn.commit()
-
-    def test_account_less_recipients_keep_the_address_guarantee(self, migration_db):
-        """A physician resolved straight to an address (Block E) has no user
-        id to key on, so the original constraint must still hold for them."""
-        _alembic("head")
-        with migration_db.connect() as conn:
-            tenant_id, notification_id, _, _ = _seed_delivery_context(conn)
-            _insert_delivery(
-                conn,
-                tenant_id=tenant_id,
-                notification_id=notification_id,
-                recipient_user_id=None,
-                address="physician@practice.test",
-            )
-            conn.commit()
-
-            with pytest.raises(Exception):
-                _insert_delivery(
-                    conn,
-                    tenant_id=tenant_id,
-                    notification_id=notification_id,
-                    recipient_user_id=None,
-                    address="physician@practice.test",
-                )
-                conn.commit()
-
-    def test_downgrade_restores_the_original_constraint(self, migration_db):
-        _alembic("head")
-        _alembic(NOTIFICATIONS_REVISION, command="downgrade")
-
-        assert _current_revision(migration_db) == NOTIFICATIONS_REVISION
-        assert self.OLD_CONSTRAINT in self._unique_constraint_names(migration_db)
-        indexes = self._index_map(migration_db)
-        assert self.USER_INDEX not in indexes
-        assert self.ADDRESS_INDEX not in indexes
-
-    def test_downgrade_then_re_upgrade_restores_the_partial_indexes(
-        self, migration_db
-    ):
-        _alembic(DELIVERY_LIFECYCLE_REVISION)
-        _alembic(NOTIFICATIONS_REVISION, command="downgrade")
-        _alembic(DELIVERY_LIFECYCLE_REVISION)
-
-        assert _current_revision(migration_db) == DELIVERY_LIFECYCLE_REVISION
-        indexes = self._index_map(migration_db)
-        assert self.USER_INDEX in indexes
-        assert self.ADDRESS_INDEX in indexes
-
-    def test_revision_modifies_no_column_anywhere(self, migration_db):
-        """Constraint-correcting, not schema-changing: not one column is
-        added, dropped or altered, in any table."""
-        _alembic(NOTIFICATIONS_REVISION)
-        inspector = inspect(migration_db)
-        before = {
-            table: {c["name"] for c in inspector.get_columns(table)}
-            for table in inspector.get_table_names()
-        }
-
-        _alembic(DELIVERY_LIFECYCLE_REVISION)
-        inspector = inspect(migration_db)
-        after = {
-            table: {c["name"] for c in inspector.get_columns(table)}
-            for table in inspector.get_table_names()
-        }
-
-        assert after == before
-
-    def test_revision_seeds_no_row(self, migration_db):
-        """No preference row and no delivery row is created by the migration.
-        Absence of a preference row is what 'use the default' means, and
-        Block D's API depends on that staying true."""
-        _alembic("head")
-        with migration_db.connect() as conn:
-            for table in ("notification_preference", "notification_delivery"):
-                count = conn.execute(
-                    text(f"SELECT COUNT(*) FROM {table}")
-                ).scalar_one()
-                assert count == 0, f"{table} is not empty after upgrade"
-
-
 def _seed_delivery_context(conn):
-    """Minimal tenant/branch/users/notification needed to insert a delivery
-    row directly, without importing the application's models — these tests
-    assert what the *migration* produced, not what SQLModel thinks it did."""
-    import uuid
-
+    """Minimal tenant/users/notification needed to insert a delivery row
+    directly, without importing the application's models — these tests assert
+    what the *migration* produced, not what SQLModel thinks it did."""
     tenant_id = uuid.uuid4()
     conn.execute(
         text(
@@ -840,9 +805,23 @@ def _seed_delivery_context(conn):
     return tenant_id, notification_id, user_ids[0], user_ids[1]
 
 
-def _insert_delivery(conn, *, tenant_id, notification_id, recipient_user_id, address):
-    import uuid
+def _insert_recipient(conn, *, tenant_id, notification_id, user_id):
+    conn.execute(
+        text(
+            "INSERT INTO notification_recipient (id, notification_id, tenant_id, "
+            "user_id, status, created_at) "
+            "VALUES (:id, :notification_id, :tenant_id, :user_id, 'UNREAD', now())"
+        ),
+        {
+            "id": uuid.uuid4(),
+            "notification_id": notification_id,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+        },
+    )
 
+
+def _insert_delivery(conn, *, tenant_id, notification_id, recipient_user_id, address):
     conn.execute(
         text(
             "INSERT INTO notification_delivery (id, notification_id, tenant_id, "
@@ -861,93 +840,12 @@ def _insert_delivery(conn, *, tenant_id, notification_id, recipient_user_id, add
     )
 
 
-class TestNotificationLocaleRevision:
-    """Céluma 1.3 Phase 3, Block F — `v1_6_0_notification_locale`.
-
-    Same upgrade/downgrade/re-upgrade discipline the two revisions before it
-    get, plus the two properties specific to this one: the backfill lands on
-    pre-existing rows, and the frozen `title`/`body` a user actually read are
-    not rewritten by either direction.
-    """
-
-    def test_upgrade_adds_a_non_null_locale_column(self, migration_db):
-        _alembic("head")
-
-        columns = {
-            c["name"]: c for c in inspect(migration_db).get_columns("notification")
-        }
-        assert "locale" in columns
-        assert columns["locale"]["nullable"] is False
-
-    def test_downgrade_drops_the_column(self, migration_db):
-        _alembic("head")
-        _alembic(DELIVERY_LIFECYCLE_REVISION, command="downgrade")
-
-        columns = {c["name"] for c in inspect(migration_db).get_columns("notification")}
-        assert "locale" not in columns
-
-    def test_downgrade_then_re_upgrade_restores_it(self, migration_db):
-        _alembic("head")
-        _alembic(DELIVERY_LIFECYCLE_REVISION, command="downgrade")
-        _alembic("head")
-
-        assert _current_revision(migration_db) == NOTIFICATION_LOCALE_REVISION
-        columns = {c["name"] for c in inspect(migration_db).get_columns("notification")}
-        assert "locale" in columns
-
-    def test_a_pre_existing_row_is_backfilled_to_es_mx(self, migration_db):
-        """The server default does the backfill in one statement, so there is
-        no window in which the column is nullable and no separate UPDATE.
-
-        The row is inserted while the schema is still at v1_5_0 — i.e. exactly
-        as a Block B–E notification would exist — and then migrated.
-        """
-        import uuid
-
-        _alembic(DELIVERY_LIFECYCLE_REVISION)
-        with migration_db.begin() as conn:
-            tenant_id, notification_id, _, _ = _seed_delivery_context(conn)
-            conn.execute(
-                text("UPDATE notification SET title = :t, body = :b WHERE id = :id"),
-                {
-                    "t": "Reporte publicado — Orden ORD-HIST-1",
-                    "b": "El reporte fue publicado y firmado por Dra. Histórica.",
-                    "id": notification_id,
-                },
-            )
-
-        _alembic("head")
-
-        with migration_db.connect() as conn:
-            row = conn.execute(
-                text("SELECT locale, title, body FROM notification WHERE id = :id"),
-                {"id": notification_id},
-            ).one()
-        assert row[0] == "es-MX"
-        # The frozen copy the user actually read is untouched by the migration.
-        assert row[1] == "Reporte publicado — Orden ORD-HIST-1"
-        assert row[2] == "El reporte fue publicado y firmado por Dra. Histórica."
-
-    def test_the_revision_modifies_no_other_table(self, migration_db):
-        """Additive and narrow: one column on one table, and nothing else —
-        no preference change, no delivery change, no clinical table."""
-        _alembic(DELIVERY_LIFECYCLE_REVISION)
-        before = _schema_fingerprint(migration_db)
-
-        _alembic("head")
-        after = _schema_fingerprint(migration_db)
-
-        changed = {
-            table for table in set(before) | set(after) if before.get(table) != after.get(table)
-        }
-        assert changed == {"notification"}
-
-
-def _schema_fingerprint(engine) -> dict:
-    """`{table: sorted(column names)}` for every table except alembic's own."""
-    inspector = inspect(engine)
-    return {
-        table: sorted(c["name"] for c in inspector.get_columns(table))
-        for table in inspector.get_table_names()
-        if table != "alembic_version"
-    }
+def _insert_preference(conn, *, tenant_id, user_id):
+    conn.execute(
+        text(
+            "INSERT INTO notification_preference (id, tenant_id, user_id, "
+            "notification_type, in_app_enabled, email_enabled, updated_at) "
+            "VALUES (:id, :tenant_id, :user_id, 'REPORT_PUBLISHED', true, false, now())"
+        ),
+        {"id": uuid.uuid4(), "tenant_id": tenant_id, "user_id": user_id},
+    )

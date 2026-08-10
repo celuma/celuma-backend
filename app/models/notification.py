@@ -186,8 +186,10 @@ class Notification(BaseModel, TimestampMixin, TenantMixin, table=True):
     #: additive column now; reconstructing it later is impossible.
     #:
     #: NOT NULL with a server default so the backfill is the default — see
-    #: v1_6_0's migration notes for why `es-MX` is provable rather than
-    #: assumed for every pre-existing row.
+    #: Phase 3 Block F's migration notes for why `es-MX` is provable rather
+    #: than assumed for every pre-existing row. (The column ships inside the
+    #: `v1_3_0` release migration; the revision that originally added it was
+    #: folded in by the Phase 3 closure squash.)
     locale: str = Field(
         default=DEFAULT_LOCALE,
         sa_column=Column(
