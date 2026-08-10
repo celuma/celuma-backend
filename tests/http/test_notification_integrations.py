@@ -607,6 +607,27 @@ class TestAssignmentAdded:
             session, lab["admin"], notification_type=NotificationType.ASSIGNMENT_ADDED
         ) == []
 
+    def test_an_order_assignment_uses_the_order_template(self, client, session, lab):
+        """Pre-release remediation: order-context assignment keeps using the
+        original `assignment_added_v1` key — its meaning did not change."""
+        order = create_order(session, lab["tenant"], lab["branch"], order_code="ORD-ASG-6B")
+
+        response = client.put(
+            f"/api/v1/laboratory/orders/{order.id}/assignees",
+            json={"assignee_ids": [str(lab["assignee"].id)]},
+            headers=auth_headers(lab["admin"]),
+        )
+        assert response.status_code == 200
+
+        notification, _ = notifications_for(
+            session, lab["assignee"], notification_type=NotificationType.ASSIGNMENT_ADDED
+        )[0]
+        assert notification.resource_type == "order"
+        assert notification.resource_id == order.id
+        assert notification.notification_metadata["template_key"] == "assignment_added_v1"
+        assert "ORD-ASG-6B" in notification.title
+        assert "asignó a esta orden" in (notification.body or "")
+
     def test_a_sample_assignment_points_at_the_sample(self, client, session, lab):
         order = create_order(session, lab["tenant"], lab["branch"], order_code="ORD-ASG-6")
         # `SampleDetailResponse` requires a patient; this endpoint's response
@@ -615,7 +636,7 @@ class TestAssignmentAdded:
         order.patient_id = patient.id
         session.add(order)
         session.commit()
-        sample = create_sample(session, lab["tenant"], lab["branch"], order)
+        sample = create_sample(session, lab["tenant"], lab["branch"], order, sample_code="S-ASG-6")
 
         response = client.put(
             f"/api/v1/laboratory/samples/{sample.id}/assignees",
@@ -630,6 +651,15 @@ class TestAssignmentAdded:
         assert notification.resource_type == "sample"
         assert notification.resource_id == sample.id
         assert "ORD-ASG-6" in notification.title
+
+        # Pre-release remediation: sample assignment must not be indistinguishable
+        # from order assignment — it names the sample and uses its own key.
+        assert notification.notification_metadata["template_key"] == "assignment_added_sample_v1"
+        assert "de muestra" in notification.title
+        assert "S-ASG-6" in (notification.body or "")
+        assert notification.resource_type == "sample", (
+            "the deep link must open the sample, not the order"
+        )
 
     def test_adding_a_reviewer_notifies_them(self, client, session, lab):
         order = create_order(session, lab["tenant"], lab["branch"], order_code="ORD-ASG-7")
@@ -646,6 +676,12 @@ class TestAssignmentAdded:
         )[0]
         assert notification.resource_type == "order"
         assert notification.resource_id == order.id
+
+        # Pre-release remediation: reviewer addition must read as "you were
+        # asked to review", not the generic order-assignee copy.
+        assert notification.notification_metadata["template_key"] == "assignment_added_review_v1"
+        assert "revisión" in notification.title.lower()
+        assert "revisión" in (notification.body or "").lower()
 
 
 # ---------------------------------------------------------------------------
@@ -678,6 +714,50 @@ class TestSampleStatusChanged:
         assert deliveries_for(session, notification.id) == [], (
             "SAMPLE_STATUS_CHANGED is email_supported = False — no delivery row, ever"
         )
+
+        # Pre-release remediation: the raw English enum value must never
+        # reach the rendered Spanish body — it must carry the translated
+        # label instead, via the new template version.
+        assert notification.notification_metadata["template_key"] == "sample_status_changed_v2"
+        assert "PROCESSING" not in (notification.body or "")
+        assert "En proceso" in (notification.body or "")
+
+    @pytest.mark.parametrize(
+        "state,label",
+        [
+            (SampleState.RECEIVED, "Recibida"),
+            (SampleState.PROCESSING, "En proceso"),
+            (SampleState.READY, "Lista"),
+            (SampleState.DAMAGED, "Insuficiente"),
+            (SampleState.CANCELLED, "Cancelada"),
+        ],
+    )
+    def test_every_sample_state_renders_its_es_mx_label_not_the_raw_enum(
+        self, client, session, lab, state, label
+    ):
+        # Start from a state guaranteed different from the target — PATCHing
+        # to the sample's current state is a no-op that creates no
+        # notification (tested above), which would make the RECEIVED case
+        # vacuous since RECEIVED is the factory default.
+        initial_state = SampleState.PROCESSING if state == SampleState.RECEIVED else SampleState.RECEIVED
+        order = create_order(session, lab["tenant"], lab["branch"], order_code=f"ORD-LBL-{state.value}")
+        sample = create_sample(
+            session, lab["tenant"], lab["branch"], order, sample_code="S-LBL", state=initial_state
+        )
+        assign_to_order(session, lab["tenant"], order, lab["assignee"])
+
+        response = client.patch(
+            f"/api/v1/laboratory/samples/{sample.id}/state",
+            json={"state": state.value},
+            headers=auth_headers(lab["admin"]),
+        )
+        assert response.status_code == 200
+
+        notification, _ = notifications_for(
+            session, lab["assignee"], notification_type=NotificationType.SAMPLE_STATUS_CHANGED
+        )[0]
+        assert label in (notification.body or "")
+        assert state.value not in (notification.body or "")
 
     def test_a_no_op_state_request_creates_no_notification(self, client, session, lab):
         """The endpoint writes a timeline row regardless; the integration

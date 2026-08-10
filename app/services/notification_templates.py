@@ -292,27 +292,76 @@ _TEMPLATES_ES_MX: Dict[NotificationType, NotificationTemplate] = {
         params=(_ORDER_NUMBER, _ACTOR_NAME),
     ),
     NotificationType.SAMPLE_STATUS_CHANGED: NotificationTemplate(
-        key="sample_status_changed_v1",
+        key="sample_status_changed_v2",
         notification_type=NotificationType.SAMPLE_STATUS_CHANGED,
         title="Muestra actualizada — Orden {order_number}",
-        body="La muestra {sample_code} cambió a estado {new_state}.",
+        body="La muestra {sample_code} cambió a estado {new_status_label}.",
         params=(
             _ORDER_NUMBER,
             TemplateParam("sample_code", max_length=50),
-            TemplateParam("new_state", max_length=30),
+            TemplateParam("new_status_label", max_length=30),
         ),
+    ),
+}
+
+#: Context-specific `ASSIGNMENT_ADDED` keys, pre-release remediation.
+#:
+#: `assignment_added_v1` (above) stays the type's single `CURRENT_TEMPLATE_KEY`
+#: entry and keeps being used for **order**-context assignment — its meaning
+#: does not change, so every historical notification created under it, for
+#: any of the three contexts, stays byte-identical (template immutability).
+#:
+#: `CURRENT_TEMPLATE_KEY` is 1:1 per `NotificationType` and cannot hold three
+#: simultaneous "current" keys for one type, so the sample and reviewer
+#: contexts are not routed through it: their integration functions
+#: (`notify_sample_assignments_added`, `notify_order_reviewers_added` in
+#: `notification_integrations/assignments.py`) import these constants
+#: directly.
+ASSIGNMENT_ADDED_SAMPLE_TEMPLATE_KEY = "assignment_added_sample_v1"
+ASSIGNMENT_ADDED_REVIEW_TEMPLATE_KEY = "assignment_added_review_v1"
+
+_ASSIGNMENT_CONTEXT_TEMPLATES_ES_MX: Dict[str, NotificationTemplate] = {
+    ASSIGNMENT_ADDED_SAMPLE_TEMPLATE_KEY: NotificationTemplate(
+        key=ASSIGNMENT_ADDED_SAMPLE_TEMPLATE_KEY,
+        notification_type=NotificationType.ASSIGNMENT_ADDED,
+        title="Nueva asignación de muestra — Orden {order_number}",
+        body="{actor_name} te asignó la muestra {sample_code} de esta orden.",
+        params=(_ORDER_NUMBER, _ACTOR_NAME, TemplateParam("sample_code", max_length=50)),
+    ),
+    ASSIGNMENT_ADDED_REVIEW_TEMPLATE_KEY: NotificationTemplate(
+        key=ASSIGNMENT_ADDED_REVIEW_TEMPLATE_KEY,
+        notification_type=NotificationType.ASSIGNMENT_ADDED,
+        title="Nueva revisión asignada — Orden {order_number}",
+        body="{actor_name} te asignó la revisión del reporte de esta orden.",
+        params=(_ORDER_NUMBER, _ACTOR_NAME),
     ),
 }
 
 #: Superseded template keys, kept resolvable forever.
 #:
-#: Empty in Céluma 1.3 — no copy has been revised yet, and Block F is
-#: explicitly forbidden from inventing a speculative `_v2`. The map exists
-#: because "old keys remain resolvable" has to be somewhere a future revision
-#: can add to without redesigning the registry, and because
-#: `test_a_retired_key_stays_resolvable` needs a place to hang a synthetic
-#: entry.
-_RETIRED_TEMPLATES: Dict[str, Dict[Locale, NotificationTemplate]] = {}
+#: `sample_status_changed_v1` is retired here (pre-release remediation): it
+#: persisted the raw `SampleState` enum value as final Spanish text
+#: (`new_state`, e.g. "PROCESSING") instead of a translated label. It is not
+#: edited in place — a notification created under it is frozen in somebody's
+#: inbox — so `sample_status_changed_v2` (above) is registered instead and
+#: `CURRENT_TEMPLATE_KEY` is repointed at it. This entry stays resolvable
+#: forever for the historical rows and any delivery row that outlives the
+#: revision.
+_RETIRED_TEMPLATES: Dict[str, Dict[Locale, NotificationTemplate]] = {
+    "sample_status_changed_v1": {
+        DEFAULT_LOCALE: NotificationTemplate(
+            key="sample_status_changed_v1",
+            notification_type=NotificationType.SAMPLE_STATUS_CHANGED,
+            title="Muestra actualizada — Orden {order_number}",
+            body="La muestra {sample_code} cambió a estado {new_state}.",
+            params=(
+                _ORDER_NUMBER,
+                TemplateParam("sample_code", max_length=50),
+                TemplateParam("new_state", max_length=30),
+            ),
+        ),
+    },
+}
 
 
 def _build_registry() -> Dict[str, Dict[Locale, NotificationTemplate]]:
@@ -325,6 +374,8 @@ def _build_registry() -> Dict[str, Dict[Locale, NotificationTemplate]]:
     """
     registry: Dict[str, Dict[Locale, NotificationTemplate]] = {}
     for template in _TEMPLATES_ES_MX.values():
+        registry.setdefault(template.key, {})[DEFAULT_LOCALE] = template
+    for template in _ASSIGNMENT_CONTEXT_TEMPLATES_ES_MX.values():
         registry.setdefault(template.key, {})[DEFAULT_LOCALE] = template
     for key, by_locale in _RETIRED_TEMPLATES.items():
         registry.setdefault(key, {}).update(by_locale)

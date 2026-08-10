@@ -30,7 +30,7 @@ the user carries "which recipient".
 from __future__ import annotations
 
 import logging
-from typing import Optional, Sequence
+from typing import Dict, Optional, Sequence
 from uuid import UUID
 
 from sqlmodel import Session
@@ -43,7 +43,11 @@ from app.services.notification import NotificationService
 from app.services.notification_integrations.recipients import (
     resolve_assignment_added_recipients,
 )
-from app.services.notification_templates import CURRENT_TEMPLATE_KEY
+from app.services.notification_templates import (
+    ASSIGNMENT_ADDED_REVIEW_TEMPLATE_KEY,
+    ASSIGNMENT_ADDED_SAMPLE_TEMPLATE_KEY,
+    CURRENT_TEMPLATE_KEY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +68,8 @@ def _notify_assignment_added(
     added_user_ids: Sequence[UUID],
     actor: Optional[AppUser],
     order_event_id: UUID,
+    template_key: str,
+    extra_template_params: Optional[Dict[str, str]] = None,
 ) -> int:
     """One notification per newly added user. Returns how many were created.
 
@@ -71,6 +77,12 @@ def _notify_assignment_added(
     recipients: each row's marker embeds its own recipient, which is what
     makes "adding Ana today and Bruno tomorrow" two independent occurrences
     rather than one that Ana already consumed.
+
+    `template_key` is passed in by the caller rather than derived from
+    `CURRENT_TEMPLATE_KEY[ASSIGNMENT_ADDED]` here: that map is 1:1 per
+    `NotificationType` and this one type now has three valid contexts
+    (order/sample/review), each with its own copy — see
+    `notification_templates.py`'s `ASSIGNMENT_ADDED_*_TEMPLATE_KEY` constants.
 
     Every iteration goes through `NotificationService.notify()`, which
     contains its own failures — so one user's notification failing does not
@@ -92,10 +104,11 @@ def _notify_assignment_added(
                 resource_type=resource_type,
                 resource_id=resource_id,
                 occurrence_marker=f"{order_event_id}:{user_id}",
-                template_key=CURRENT_TEMPLATE_KEY[NotificationType.ASSIGNMENT_ADDED],
+                template_key=template_key,
                 template_params={
                     "order_number": order.order_code,
                     "actor_name": _actor_name(actor),
+                    **(extra_template_params or {}),
                 },
                 recipient_user_ids=[user_id],
                 created_by=(actor.id if actor else None),
@@ -129,6 +142,7 @@ def notify_order_assignments_added(
         added_user_ids=added_user_ids,
         actor=actor,
         order_event_id=order_event_id,
+        template_key=CURRENT_TEMPLATE_KEY[NotificationType.ASSIGNMENT_ADDED],
     )
 
 
@@ -149,6 +163,11 @@ def notify_order_reviewers_added(
     is the separate event, and it already has its own type
     (`REPORT_SUBMITTED`), fired when the report is actually submitted rather
     than when the reviewer list changes.
+
+    Pre-release remediation: uses `assignment_added_review_v1`, not the
+    order-assignee key, so the copy says "revisión asignada" rather than the
+    generic "te asignó a esta orden" — the two are different facts and were
+    previously indistinguishable in the Notification Center.
     """
     return _notify_assignment_added(
         session,
@@ -159,6 +178,7 @@ def notify_order_reviewers_added(
         added_user_ids=added_user_ids,
         actor=actor,
         order_event_id=order_event_id,
+        template_key=ASSIGNMENT_ADDED_REVIEW_TEMPLATE_KEY,
     )
 
 
@@ -178,6 +198,11 @@ def notify_sample_assignments_added(
     order page would not show the recipient what they were actually given. The
     copy still names the order number, which is the identifier staff work
     from.
+
+    Pre-release remediation: uses `assignment_added_sample_v1`, which adds a
+    `sample_code` parameter, so the copy names the sample explicitly ("te
+    asignó la muestra M-02 de esta orden") instead of the generic
+    order-assignee copy the sample context previously reused.
     """
     return _notify_assignment_added(
         session,
@@ -188,4 +213,6 @@ def notify_sample_assignments_added(
         added_user_ids=added_user_ids,
         actor=actor,
         order_event_id=order_event_id,
+        template_key=ASSIGNMENT_ADDED_SAMPLE_TEMPLATE_KEY,
+        extra_template_params={"sample_code": sample.sample_code},
     )

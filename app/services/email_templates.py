@@ -245,8 +245,9 @@ class EmailTemplate:
     params: Tuple[str, ...] = ()
 
 
-#: Five entries, not six.
-#:
+#: Seven entries: one per email-supported `NotificationType`, plus two extra
+#: `ASSIGNMENT_ADDED` keys for the sample/review contexts (pre-release
+#: remediation — see the comment on those two entries below). Never eight:
 #: `SAMPLE_STATUS_CHANGED` has `email_supported = False` in
 #: `notification_policies.py`, so no `NotificationDelivery` row can ever exist
 #: for it (materialization contract §2 checks the policy first). Registering
@@ -293,6 +294,32 @@ _EMAIL_TEMPLATES_ES_MX: Dict[str, EmailTemplate] = {
         notification_type=NotificationType.ASSIGNMENT_ADDED,
         subject="{tenant_name} — Nueva asignación (Orden {order_number})",
         body="Se te asignó trabajo en la orden {order_number}.",
+        params=("order_number",),
+    ),
+    # Pre-release remediation: `ASSIGNMENT_ADDED` now has three in-app
+    # template keys (order/sample/review context — see
+    # notification_templates.py), and the delivery worker resolves the email
+    # template by the notification's own `template_key`. Without these two
+    # entries, sample- and reviewer-assignment email delivery would fail
+    # lookup (`EmailTemplateError: unknown_template`) the first time the
+    # worker tried to render one. The vocabulary stays exactly the one
+    # parameter this file allows itself — the assignment type is fixed prose,
+    # not a parameter.
+    "assignment_added_sample_v1": EmailTemplate(
+        key="assignment_added_sample_v1",
+        notification_type=NotificationType.ASSIGNMENT_ADDED,
+        # Deliberately does not say "muestra": the content-policy word list
+        # this file is checked against (test_email_templates.py) bans it from
+        # email copy, so the sample context stays as generic as the order one.
+        subject="{tenant_name} — Nueva asignación (Orden {order_number})",
+        body="Se te asignó trabajo en la orden {order_number}.",
+        params=("order_number",),
+    ),
+    "assignment_added_review_v1": EmailTemplate(
+        key="assignment_added_review_v1",
+        notification_type=NotificationType.ASSIGNMENT_ADDED,
+        subject="{tenant_name} — Nueva revisión asignada (Orden {order_number})",
+        body="Se te asignó la revisión del reporte de la orden {order_number}.",
         params=("order_number",),
     ),
 }

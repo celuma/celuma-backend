@@ -164,7 +164,9 @@ class TestTemplateVersioning:
 
     def test_the_existing_v1_keys_are_all_still_valid(self):
         """The Block B/E keys are in production data. Block F must not have
-        renamed one."""
+        renamed one, and none of them may vanish from the registry — even the
+        pre-release remediation's `sample_status_changed_v1`, superseded but
+        still resolvable (§ below)."""
         expected = {
             "report_submitted_v1",
             "report_pdf_ready_v1",
@@ -174,7 +176,29 @@ class TestTemplateVersioning:
             "sample_status_changed_v1",
         }
         assert expected <= set(NOTIFICATION_TEMPLATE_REGISTRY)
+
+    def test_current_keys_after_the_pre_release_remediation(self):
+        """`sample_status_changed_v1` persisted the raw `SampleState` enum as
+        final Spanish text and was superseded by `_v2`, which does not.
+        `assignment_added_v1` is unchanged: it is still `ASSIGNMENT_ADDED`'s
+        one `CURRENT_TEMPLATE_KEY` entry, used for order-context assignment;
+        the sample/reviewer contexts now use their own keys, selected
+        directly by their integration functions rather than through this
+        1:1-per-type map (see `notification_integrations/assignments.py`)."""
+        expected = {
+            "report_submitted_v1",
+            "report_pdf_ready_v1",
+            "report_published_v1",
+            "report_retracted_v1",
+            "assignment_added_v1",
+            "sample_status_changed_v2",
+        }
         assert set(CURRENT_TEMPLATE_KEY.values()) == expected
+        assert "sample_status_changed_v1" in NOTIFICATION_TEMPLATE_REGISTRY
+        assert "sample_status_changed_v1" not in CURRENT_TEMPLATE_KEY.values()
+        for key in ("assignment_added_sample_v1", "assignment_added_review_v1"):
+            assert key in NOTIFICATION_TEMPLATE_REGISTRY
+            assert key not in CURRENT_TEMPLATE_KEY.values()
 
     def test_a_retired_key_stays_resolvable(self, monkeypatch):
         """The deprecation policy, exercised.

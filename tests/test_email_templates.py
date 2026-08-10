@@ -28,7 +28,11 @@ from app.services.notification_policies import (
     NOTIFICATION_DELIVERY_POLICIES,
     email_supported,
 )
-from app.services.notification_templates import NOTIFICATION_TEMPLATES
+from app.services.locale import DEFAULT_LOCALE
+from app.services.notification_templates import (
+    NOTIFICATION_TEMPLATE_REGISTRY,
+    NOTIFICATION_TEMPLATES,
+)
 
 TENANT = "Patología y Nefropatología"
 ORDER = "ORD-2026-00152"
@@ -74,17 +78,31 @@ class TestRegistryCoverage:
             template.notification_type != NotificationType.SAMPLE_STATUS_CHANGED
             for template in EMAIL_TEMPLATES.values()
         )
-        assert len(EMAIL_TEMPLATES) == 5
+        # Seven, not five: pre-release remediation adds
+        # `assignment_added_sample_v1` and `assignment_added_review_v1`
+        # alongside the original five, so the sample/reviewer assignment
+        # contexts (which now have their own in-app copy) can still be
+        # emailed — see notification_templates.py's
+        # `ASSIGNMENT_ADDED_*_TEMPLATE_KEY` constants.
+        assert len(EMAIL_TEMPLATES) == 7
 
     def test_every_email_key_matches_an_in_app_key(self):
         """The two registries are separate by design, but they must stay
         auditably aligned: a `_v2` copy revision on one side should be visible
-        as a mismatch rather than a silent divergence."""
-        in_app_keys = {template.key for template in NOTIFICATION_TEMPLATES.values()}
-        assert EMAIL_TEMPLATE_KEYS <= in_app_keys
+        as a mismatch rather than a silent divergence.
+
+        Checked against the full in-app registry
+        (`NOTIFICATION_TEMPLATE_REGISTRY`), not just `NOTIFICATION_TEMPLATES`
+        (the one-key-per-type "current" view): `ASSIGNMENT_ADDED` now has two
+        additional, non-"current" in-app keys for the sample/review contexts,
+        each with its own email counterpart."""
+        assert EMAIL_TEMPLATE_KEYS <= set(NOTIFICATION_TEMPLATE_REGISTRY)
 
     def test_each_template_declares_the_type_its_key_belongs_to(self):
-        by_key = {t.key: t for t in NOTIFICATION_TEMPLATES.values()}
+        by_key = {
+            key: by_locale[DEFAULT_LOCALE]
+            for key, by_locale in NOTIFICATION_TEMPLATE_REGISTRY.items()
+        }
         for key, template in EMAIL_TEMPLATES.items():
             assert template.key == key
             assert by_key[key].notification_type == template.notification_type

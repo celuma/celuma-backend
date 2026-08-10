@@ -70,7 +70,10 @@ VALID_PARAMS = {
     NotificationType.SAMPLE_STATUS_CHANGED: {
         "order_number": "ORD-2026-00152",
         "sample_code": "M-0031",
-        "new_state": "READY",
+        # Pre-release remediation: `sample_status_changed_v2` takes the
+        # already-translated label, not the raw `SampleState` enum value —
+        # see app/services/sample_status_labels.py.
+        "new_status_label": "Lista",
     },
 }
 
@@ -606,7 +609,12 @@ class TestTemplateSafety:
     def test_every_approved_type_has_a_registered_template(self, notification_type):
         template = NOTIFICATION_TEMPLATES[notification_type]
         assert template.notification_type is notification_type
-        assert template.key.endswith("_v1")
+        # Not hardcoded to "_v1": pre-release remediation shipped
+        # `sample_status_changed_v2`, so this checks the general versioned-key
+        # shape instead (see test_every_in_app_key_carries_an_explicit_version_suffix
+        # in test_notification_localization.py, the canonical form of this check).
+        suffix = template.key.rsplit("_", 1)[-1]
+        assert suffix.startswith("v") and suffix[1:].isdigit(), template.key
         assert template.title
 
     @pytest.mark.parametrize("notification_type", list(NotificationType))
@@ -742,7 +750,7 @@ class TestTemplateSafety:
             for template in NOTIFICATION_TEMPLATES.values()
             for param in template.params
         }
-        assert declared == {"order_number", "actor_name", "sample_code", "new_state"}
+        assert declared == {"order_number", "actor_name", "sample_code", "new_status_label"}
 
         retracted = NOTIFICATION_TEMPLATES[NotificationType.REPORT_RETRACTED]
         assert "reason" not in retracted.allowed_param_names

@@ -37,10 +37,12 @@ from app.models.report import Report
 from app.schemas.notification import NotificationCommand
 from app.models.user import AppUser
 from app.services.notification import NotificationService
+from app.models.enums import SampleState
 from app.services.notification_integrations.recipients import (
     resolve_sample_status_changed_recipients,
 )
 from app.services.notification_templates import CURRENT_TEMPLATE_KEY
+from app.services.sample_status_labels import sample_status_label
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +103,12 @@ def notify_sample_status_changed(
             template_params={
                 "order_number": order.order_code,
                 "sample_code": sample.sample_code,
-                "new_state": new_state,
+                # Pre-release remediation: the raw `SampleState` enum value
+                # (e.g. "PROCESSING") must never reach a rendered Spanish
+                # notification — translated once, centrally, in
+                # sample_status_labels.py. The enum itself is still used for
+                # the no-op guard above and for `OrderEvent.event_metadata`.
+                "new_status_label": sample_status_label(SampleState(new_state)),
             },
             recipient_user_ids=recipients,
             created_by=(actor.id if actor else None),
