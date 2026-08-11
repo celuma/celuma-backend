@@ -112,6 +112,16 @@ def _reset_fake_s3():
 
 @pytest.fixture(autouse=True)
 def _patch_s3(monkeypatch):
+    # Céluma 1.3 Phase 4, Block C: `StorageBillingService`/tenant-logo
+    # replacement resolve `Tenant.logo_url` back to a StorageObject by
+    # inverting `S3Service.object_public_url()` against the *real*
+    # `settings.media_public_base_url`. `FakeS3Service.object_public_url`
+    # below is hardcoded to `https://fake-cdn.example/...` regardless of
+    # what real environment variable is configured, so the setting is
+    # pinned to match here — otherwise every logo-resolution test would
+    # silently fail to find "the current logo" in a way that has nothing
+    # to do with the code under test.
+    monkeypatch.setattr(settings, "media_public_base_url", "https://fake-cdn.example")
     monkeypatch.setattr("app.api.v1.reports.S3Service", FakeS3Service)
     monkeypatch.setattr("app.api.v1.portal.S3Service", FakeS3Service)
     # Céluma 1.3 Phase 2, Block E: ReportPdfGenerationService uploads the
@@ -133,6 +143,12 @@ def _patch_s3(monkeypatch):
     # this remediation.
     monkeypatch.setattr("app.services.letterhead_portability.S3Service", FakeS3Service)
     monkeypatch.setattr("app.services.letterhead_resources.S3Service", FakeS3Service)
+    # Céluma 1.3 Phase 4, Block C: sample-image upload/delete and signature
+    # upload/replace/delete had no HTTP-level test coverage before this
+    # block (confirmed by grep — neither module was ever patched here), so
+    # this block's own new tests are the first callers that need it.
+    monkeypatch.setattr("app.api.v1.laboratory.S3Service", FakeS3Service)
+    monkeypatch.setattr("app.api.v1.users.S3Service", FakeS3Service)
 
 
 def make_pdf_bytes(num_pages: int = 1) -> bytes:

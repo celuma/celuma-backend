@@ -6,6 +6,8 @@ from app.core.rbac import has_permission, get_user_roles
 from app.models.tenant import Tenant
 from app.models.user import AppUser
 from app.schemas.tenant import TenantCreate, TenantResponse, TenantDetailResponse
+from app.services.storage_billing import resolve_current_tenant_logo_storage_object
+from app.services.usage import UsageService
 from app.services.managed_tenant_image_service import (
     ManagedTenantImageService,
     InvalidImageError,
@@ -51,6 +53,13 @@ def create_tenant(tenant_data: TenantCreate, session: Session = Depends(get_sess
     """Create a new tenant"""
     tenant = Tenant(name=tenant_data.name, legal_name=tenant_data.legal_name, tax_id=tenant_data.tax_id)
     session.add(tenant)
+    session.flush()
+    # Céluma 1.3 Phase 4, Block C §3: a brand-new tenant has no historical
+    # storage, so a zero baseline is valid to initialize right away, in the
+    # same transaction as the tenant itself — this is the only case where
+    # initializing at creation time (rather than via the historical
+    # backfill) is correct. See tenant-usage-initialization-contract.md.
+    UsageService.initialize_usage(session, tenant.id, billable_storage_bytes=0, source="tenant_creation")
     session.commit()
     session.refresh(tenant)
     return TenantResponse(id=str(tenant.id), name=tenant.name, legal_name=tenant.legal_name, reports_v2_enabled=tenant.reports_v2_enabled)
@@ -206,6 +215,15 @@ def upload_tenant_logo(
     if str(tenant.id) != ctx.tenant_id:
         raise HTTPException(403, "Cannot update different tenant")
 
+    # Céluma 1.3 Phase 4, Block C: resolve the currently-referenced logo
+    # BEFORE it is superseded below — only the *current* tenant logo is
+    # billable (§12), so a replacement must decrement the outgoing one.
+    # `Tenant.logo_url` is a plain string, not a FK, so this is the
+    # deterministic inverse of `S3Service.object_public_url()` — see
+    # storage-tenant-attribution-contract.md for the documented limitation.
+    previous_logo = resolve_current_tenant_logo_storage_object(session, tenant)
+    previous_logo_size_bytes = previous_logo.size_bytes or 0 if previous_logo else 0
+
     file_bytes = file.file.read()
     try:
         result = ManagedTenantImageService().upload(
@@ -227,6 +245,13 @@ def upload_tenant_logo(
     # it is just not referenced by id from Tenant.
     tenant.logo_url = result.url
     session.add(tenant)
+    UsageService.record_storage_delta(
+        session,
+        tenant.id,
+        result.size_bytes - previous_logo_size_bytes,
+        source="tenant_logo",
+        resource_type="tenant_logo",
+    )
     session.commit()
     
     logger.info(

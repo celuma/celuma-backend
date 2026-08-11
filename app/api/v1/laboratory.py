@@ -17,6 +17,7 @@ from app.models.events import OrderEvent
 from app.models.enums import EventType, SampleState, AssignmentItemType, ReviewStatus
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
+from app.services.usage import UsageService
 from datetime import datetime
 from app.schemas.laboratory import (
     OrderCreate,
@@ -1567,6 +1568,7 @@ def upload_sample_image(
         etag=processed_info.etag,
         content_type="image/jpeg",
         size_bytes=processed_info.size_bytes,
+        tenant_id=sample.tenant_id,
     )
     session.add(processed_storage)
     session.flush()
@@ -1580,6 +1582,7 @@ def upload_sample_image(
         etag=thumb_info.etag,
         content_type="image/jpeg",
         size_bytes=thumb_info.size_bytes,
+        tenant_id=sample.tenant_id,
     )
     session.add(thumb_storage)
     session.flush()
@@ -1621,6 +1624,7 @@ def upload_sample_image(
             etag=raw_info.etag,
             content_type=file.content_type,
             size_bytes=raw_info.size_bytes,
+            tenant_id=sample.tenant_id,
         )
         session.add(original_storage)
         session.flush()
@@ -1702,6 +1706,21 @@ def upload_sample_image(
     # Update order status based on sample state change (if it changed)
     if is_first_image and sample.state == SampleState.PROCESSING:
         update_order_status(str(sample.order_id), session)
+
+    # Céluma 1.3 Phase 4, Block C: one aggregated delta for the whole
+    # upload (processed + thumbnail + optional RAW) rather than one
+    # adjustment per StorageObject, in the same transaction as the inserts
+    # above — see storage-flow-accounting-matrix.md "sample image upload".
+    upload_total_bytes = (processed_info.size_bytes or 0) + (thumb_info.size_bytes or 0)
+    if original_storage is not None:
+        upload_total_bytes += original_storage.size_bytes or 0
+    UsageService.record_storage_delta(
+        session,
+        sample.tenant_id,
+        upload_total_bytes,
+        source="sample_image_upload",
+        resource_type="sample_image",
+    )
 
     session.commit()
 
@@ -1802,19 +1821,29 @@ def delete_sample_image(
     
     # Collect storage IDs before deleting anything
     storage_ids_to_delete = [sample_image.storage_id]
-    
+
     # Delete renditions first (thumbnail, original_raw, etc.)
     renditions = session.exec(
         select(SampleImageRendition).where(SampleImageRendition.sample_image_id == sample_image.id)
     ).all()
-    
+
     for rendition in renditions:
         storage_ids_to_delete.append(rendition.storage_id)
         session.delete(rendition)
-    
+
+    # Céluma 1.3 Phase 4, Block C: capture billable bytes before the
+    # StorageObject rows are deleted below — the accounting delta reflects
+    # DB-row removal, not S3 cleanup (there is none here, by design — see
+    # storage-flow-accounting-matrix.md "sample image delete").
+    deleted_bytes = sum(
+        (obj.size_bytes or 0)
+        for obj in (session.get(StorageObject, sid) for sid in storage_ids_to_delete)
+        if obj is not None
+    )
+
     # Delete the sample image record
     session.delete(sample_image)
-    
+
     # Flush to ensure SampleImage and renditions are deleted before we delete storage objects
     session.flush()
     
@@ -1842,9 +1871,17 @@ def delete_sample_image(
         created_by=user.id,
     )
     session.add(event)
-    
+
+    UsageService.record_storage_delta(
+        session,
+        sample.tenant_id,
+        -deleted_bytes,
+        source="sample_image_delete",
+        resource_type="sample_image",
+    )
+
     session.commit()
-    
+
     logger.info(
         f"Image deleted from sample {sample_id}",
         extra={

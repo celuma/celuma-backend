@@ -65,8 +65,31 @@ VERSIONS_DIR = BACKEND_ROOT / "alembic" / "versions"
 #: revision `main` and tag v1.2.0 carry.
 LAST_PRE_1_3_REVISION = "v1_2_0"
 
-#: The single consolidated Céluma 1.3 release revision, and the head.
+#: The single consolidated Céluma 1.3 release revision. No longer the head
+#: — Céluma 1.3, Phase 4, Block B adds the first post-release revision on
+#: top of it — but it remains the fixed, closed boundary every pre-1.3
+#: revision test still targets explicitly (never "head") so those tests
+#: keep describing the release migration's own footprint, unaffected by
+#: whatever lands on top of it in later phases.
 RELEASE_REVISION = "v1_3_0"
+
+#: Céluma 1.3, Phase 4, Block B — the usage domain model. The first revision
+#: built on top of the closed v1_3_0 release. No longer the head — Block C
+#: adds one more revision on top — but still the fixed boundary
+#: `TestUsageDomainMigration` targets explicitly.
+#: Not v1_4_0: that id (and v1_5_0 through v1_9_0) is permanently retired by
+#: SUPERSEDED_REVISIONS below — the Phase 3 closure squash folded them into
+#: v1_3_0 and forbids their ever being resolvable again. v1_10_0 is the
+#: first id after v1_3_0 that chain never used.
+USAGE_DOMAIN_REVISION = "v1_10_0"
+
+#: Céluma 1.3, Phase 4, Block C — storage attribution & usage
+#: initialization. Built directly on top of v1_10_0 and the current alembic
+#: head. Data-only (no new table/column) — see the revision's own module
+#: docstring for why it still deserves a dedicated id rather than being
+#: folded into v1_10_0 (that revision is closed, per the master spec's
+#: "do not rewrite v1_10_0/v1_3_0" instruction).
+STORAGE_ATTRIBUTION_REVISION = "v1_11_0"
 
 #: Revision ids that existed only on the unreleased `celuma-1.3` branch and
 #: were folded into RELEASE_REVISION. Nothing executable may reference them.
@@ -106,6 +129,14 @@ NOTIFICATION_TABLES = {
     "notification_recipient",
     "notification_delivery",
     "notification_preference",
+}
+
+#: The three tables Céluma 1.3, Phase 4, Block B introduces on top of the
+#: release revision.
+USAGE_DOMAIN_TABLES = {
+    "tenant_usage",
+    "tenant_limits",
+    "tenant_usage_reconciliation",
 }
 
 #: The delivery uniqueness constraint Phase 3 Block B created and Block D
@@ -155,19 +186,40 @@ class TestChainShape:
     def test_exactly_one_head(self):
         assert len(_script_directory().get_heads()) == 1
 
-    def test_head_is_the_release_revision(self):
-        """Phase 3 closure: the head moved back from the notification-locale
-        revision to the release revision that now contains it."""
-        assert _script_directory().get_current_head() == RELEASE_REVISION
+    def test_head_is_the_storage_attribution_revision(self):
+        """Céluma 1.3, Phase 4, Block C: the head moves forward again, from
+        the usage-domain revision to the storage-attribution revision.
+        Replaces the Block B-era `test_head_is_the_usage_domain_revision`
+        — that assertion was true only while v1_10_0 was the newest
+        revision, which stopped being the case the moment Block C's
+        migration landed.
+        """
+        assert _script_directory().get_current_head() == STORAGE_ATTRIBUTION_REVISION
 
     def test_release_revision_sits_directly_on_the_last_pre_1_3_revision(self):
         revision = _script_directory().get_revision(RELEASE_REVISION)
         assert revision.down_revision == LAST_PRE_1_3_REVISION
 
+    def test_usage_domain_revision_sits_directly_on_the_release_revision(self):
+        """The new revision is additive on top of the closed release, not a
+        rewrite of it: `v1_3_0` is untouched, and `v1_4_0` is its only
+        child."""
+        revision = _script_directory().get_revision(USAGE_DOMAIN_REVISION)
+        assert revision.down_revision == RELEASE_REVISION
+
+    def test_storage_attribution_revision_sits_directly_on_the_usage_domain_revision(self):
+        """Block C is additive on top of the closed Block B revision, not a
+        rewrite of it: `v1_10_0` is untouched, and `v1_11_0` is its only
+        child."""
+        revision = _script_directory().get_revision(STORAGE_ATTRIBUTION_REVISION)
+        assert revision.down_revision == USAGE_DOMAIN_REVISION
+
     def test_chain_is_linear_from_base_to_head(self):
         script = _script_directory()
         revisions = list(script.walk_revisions())
         assert [r.revision for r in revisions] == [
+            STORAGE_ATTRIBUTION_REVISION,
+            USAGE_DOMAIN_REVISION,
             RELEASE_REVISION,
             "v1_2_0",
             "v1_1_0",
@@ -215,6 +267,83 @@ class TestChainShape:
             if stale in _executable_source(path):
                 offenders.append(str(path.relative_to(BACKEND_ROOT)))
         assert offenders == []
+
+
+class TestMigrationHistoricalDeterminism:
+    """Céluma 1.3, Phase 4, Block C remediation — a migration must produce
+    the same result forever, independent of the application code around
+    it. `app.services.*` modules carry evolvable business logic (a future
+    change to `StorageBillingService`'s billable categories, for example);
+    if a historical migration imported one, upgrading a fresh environment
+    through the full chain later would silently apply *today's* rules to a
+    *historical* revision's data, instead of the rules that revision
+    actually shipped with. See v1_11_0's own module docstring
+    ("Historical determinism") and docs/celuma-1.3/phase-4-block-c/
+    block-c-remediation-report.md.
+
+    A structural AST guard, not a DB-backed test — this is about what a
+    migration file imports, not what it does once run.
+    """
+
+    def _imported_modules(self, path: pathlib.Path) -> set[str]:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        modules: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                modules.add(node.module)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    modules.add(alias.name)
+        return modules
+
+    def test_v1_11_0_does_not_import_application_services(self):
+        path = VERSIONS_DIR / "v1_11_0_block_c_storage_attribution.py"
+        modules = self._imported_modules(path)
+        offenders = {
+            m for m in modules if m == "app.services" or m.startswith("app.services.")
+        }
+        assert offenders == set(), (
+            f"v1_11_0 must not import runtime business services; found {offenders}"
+        )
+
+    def test_v1_11_0_does_not_import_the_usage_service(self):
+        path = VERSIONS_DIR / "v1_11_0_block_c_storage_attribution.py"
+        modules = self._imported_modules(path)
+        assert "app.services.usage" not in modules
+        assert not any(m.startswith("app.services.usage") for m in modules)
+
+    def test_v1_11_0_does_not_import_the_storage_billing_service(self):
+        path = VERSIONS_DIR / "v1_11_0_block_c_storage_attribution.py"
+        modules = self._imported_modules(path)
+        assert "app.services.storage_billing" not in modules
+        assert not any(m.startswith("app.services.storage_billing") for m in modules)
+
+    def test_no_migration_file_imports_an_application_service(self):
+        """The general rule this remediation establishes for every
+        migration, not only v1_11_0 — a regression guard against the same
+        mistake recurring in a later revision."""
+        offenders = []
+        for path in sorted(VERSIONS_DIR.glob("*.py")):
+            modules = self._imported_modules(path)
+            bad = {m for m in modules if m == "app.services" or m.startswith("app.services.")}
+            if bad:
+                offenders.append((path.name, sorted(bad)))
+        assert offenders == []
+
+    def test_v1_11_0_only_imports_stable_primitives(self):
+        """Whitelist, not blacklist — proves the migration's import surface
+        is exactly the small, stable set this remediation intends (`os`,
+        `typing`, `alembic.op`, `sqlalchemy.text`), not merely "no
+        app.services", which a differently-shaped business-logic import
+        (e.g. a direct app.models import performing hidden computation)
+        could technically satisfy while still reintroducing drift risk."""
+        path = VERSIONS_DIR / "v1_11_0_block_c_storage_attribution.py"
+        modules = self._imported_modules(path)
+        allowed_prefixes = ("os", "typing", "alembic", "sqlalchemy")
+        offenders = {
+            m for m in modules if not any(m == p or m.startswith(p + ".") for p in allowed_prefixes)
+        }
+        assert offenders == set(), f"unexpected import surface: {offenders}"
 
 
 def _admin_engine():
@@ -269,18 +398,21 @@ class TestReleaseMigration:
     """Path A and Path B of the closure verification matrix."""
 
     def test_clean_upgrade_from_last_pre_1_3_revision(self, migration_db):
+        """Pinned to RELEASE_REVISION, not "head": this test is about the
+        v1_2_0 -> v1_3_0 transition specifically, isolated from whatever
+        later phases (Block B's v1_4_0 onward) add on top."""
         _alembic(LAST_PRE_1_3_REVISION)
         assert _current_revision(migration_db) == LAST_PRE_1_3_REVISION
 
-        _alembic("head")
+        _alembic(RELEASE_REVISION)
         assert _current_revision(migration_db) == RELEASE_REVISION
 
     def test_downgrade_then_re_upgrade(self, migration_db):
-        _alembic("head")
+        _alembic(RELEASE_REVISION)
         _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
         assert _current_revision(migration_db) == LAST_PRE_1_3_REVISION
 
-        _alembic("head")
+        _alembic(RELEASE_REVISION)
         assert _current_revision(migration_db) == RELEASE_REVISION
 
     def test_release_introduces_exactly_the_expected_tables(self, migration_db):
@@ -288,18 +420,22 @@ class TestReleaseMigration:
         `test_notifications_revision_modifies_no_existing_table`, which could
         only be expressed while the notification tables arrived in a separate
         revision: there is no longer an intermediate state to diff against, so
-        the guard moves to the `v1_2_0 → v1_3_0` boundary instead."""
+        the guard moves to the `v1_2_0 → v1_3_0` boundary instead.
+
+        Pinned to RELEASE_REVISION rather than "head": Céluma 1.3, Phase 4,
+        Block B adds three more tables on top, and this test's whole point is
+        an *exact* set match on what v1_3_0 alone introduced."""
         _alembic(LAST_PRE_1_3_REVISION)
         before = set(inspect(migration_db).get_table_names())
 
-        _alembic("head")
+        _alembic(RELEASE_REVISION)
         after = set(inspect(migration_db).get_table_names())
 
         assert after - before == RELEASE_TABLES
         assert before - after == set()
 
     def test_downgrade_removes_every_object_the_release_introduced(self, migration_db):
-        _alembic("head")
+        _alembic(RELEASE_REVISION)
         _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
 
         inspector = inspect(migration_db)
@@ -328,8 +464,11 @@ class TestReleaseMigration:
         not merely empty ones. Dependency order is what makes that possible:
         `notification_recipient` and `notification_delivery` both reference
         `notification`, so `notification` goes last of the four.
+
+        Pinned to RELEASE_REVISION: this is the release migration's own
+        populated-downgrade guarantee, isolated from Block B's.
         """
-        _alembic("head")
+        _alembic(RELEASE_REVISION)
         with migration_db.begin() as conn:
             tenant_id, notification_id, user_a, user_b = _seed_delivery_context(conn)
             _insert_recipient(conn, tenant_id=tenant_id, notification_id=notification_id,
@@ -366,7 +505,7 @@ class TestReleaseMigration:
             )
 
     def test_release_migration_creates_the_partial_unique_indexes(self, migration_db):
-        _alembic("head")
+        _alembic(RELEASE_REVISION)
         with migration_db.connect() as conn:
             predicates = dict(
                 conn.execute(
@@ -397,7 +536,7 @@ class TestReleaseMigration:
         """The compatibility decisions the remediation rounds made must
         survive the squash: consolidating migrations into one is not a
         licence to populate columns that were deliberately left empty."""
-        _alembic("head")
+        _alembic(RELEASE_REVISION)
         inspector = inspect(migration_db)
 
         nullable_by_design = {
@@ -483,7 +622,7 @@ class TestNotificationDomain:
         _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
         _alembic("head")
 
-        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert _current_revision(migration_db) == STORAGE_ATTRIBUTION_REVISION
         assert NOTIFICATION_TABLES <= set(inspect(migration_db).get_table_names())
 
     def test_unique_constraints_exist(self, migration_db):
@@ -755,6 +894,982 @@ class TestNotificationDomain:
             for table in sorted(NOTIFICATION_TABLES):
                 count = conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one()
                 assert count == 0, f"{table} is not empty after upgrade"
+
+
+class TestUsageDomainMigration:
+    """Céluma 1.3, Phase 4, Block B — the usage domain revision (`v1_4_0`),
+    additive on top of the closed release revision (`v1_3_0`). Mirrors the
+    discipline `TestNotificationDomain` established: the chain tests above
+    prove the revision is reachable and reversible; these prove it created
+    the right tables, columns, constraints and indexes.
+    """
+
+    def test_upgrade_creates_the_three_usage_tables(self, migration_db):
+        _alembic(RELEASE_REVISION)
+        assert USAGE_DOMAIN_TABLES.isdisjoint(
+            set(inspect(migration_db).get_table_names())
+        )
+
+        _alembic("head")
+        assert USAGE_DOMAIN_TABLES <= set(inspect(migration_db).get_table_names())
+
+    def test_introduces_exactly_the_expected_tables(self, migration_db):
+        _alembic(RELEASE_REVISION)
+        before = set(inspect(migration_db).get_table_names())
+
+        _alembic("head")
+        after = set(inspect(migration_db).get_table_names())
+
+        assert after - before == USAGE_DOMAIN_TABLES
+
+    def test_downgrade_drops_every_usage_table(self, migration_db):
+        _alembic("head")
+        _alembic(RELEASE_REVISION, command="downgrade")
+
+        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert USAGE_DOMAIN_TABLES.isdisjoint(
+            set(inspect(migration_db).get_table_names())
+        )
+
+    def test_downgrade_then_re_upgrade_restores_the_tables(self, migration_db):
+        _alembic("head")
+        _alembic(RELEASE_REVISION, command="downgrade")
+        _alembic("head")
+
+        assert _current_revision(migration_db) == STORAGE_ATTRIBUTION_REVISION
+        assert USAGE_DOMAIN_TABLES <= set(inspect(migration_db).get_table_names())
+
+    def test_downgrade_removes_the_app_user_index(self, migration_db):
+        """Confirmed absent before this revision (module docstring) — must
+        also be confirmed absent again after a downgrade."""
+        _alembic("head")
+        indexes_before = {
+            i["name"] for i in inspect(migration_db).get_indexes("app_user")
+        }
+        assert "ix_app_user_tenant_id_is_active" in indexes_before
+
+        _alembic(RELEASE_REVISION, command="downgrade")
+        indexes_after = {
+            i["name"] for i in inspect(migration_db).get_indexes("app_user")
+        }
+        assert "ix_app_user_tenant_id_is_active" not in indexes_after
+
+    def test_downgrade_works_on_a_populated_database(self, migration_db):
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            conn.execute(
+                text(
+                    "INSERT INTO tenant_usage "
+                    "(tenant_id, billable_storage_bytes, last_updated) "
+                    "VALUES (:tenant_id, 1024, now())"
+                ),
+                {"tenant_id": tenant_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO tenant_limits "
+                    "(tenant_id, storage_limit_bytes, user_limit, updated_at) "
+                    "VALUES (:tenant_id, 1073741824, 10, now())"
+                ),
+                {"tenant_id": tenant_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO tenant_usage_reconciliation "
+                    "(id, tenant_id, status, started_at, completed_at) "
+                    "VALUES (:id, :tenant_id, 'SUCCEEDED', now(), now())"
+                ),
+                {"id": uuid.uuid4(), "tenant_id": tenant_id},
+            )
+
+        _alembic(RELEASE_REVISION, command="downgrade")
+
+        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert USAGE_DOMAIN_TABLES.isdisjoint(
+            set(inspect(migration_db).get_table_names())
+        )
+
+    def test_columns_nullability_and_defaults(self, migration_db):
+        _alembic("head")
+        inspector = inspect(migration_db)
+
+        usage = {c["name"]: c for c in inspector.get_columns("tenant_usage")}
+        assert usage["tenant_id"]["nullable"] is False
+        assert usage["billable_storage_bytes"]["nullable"] is False
+        assert "0" in str(usage["billable_storage_bytes"]["default"])
+        assert usage["last_updated"]["nullable"] is False
+
+        limits = {c["name"]: c for c in inspector.get_columns("tenant_limits")}
+        assert limits["tenant_id"]["nullable"] is False
+        assert limits["storage_limit_bytes"]["nullable"] is True
+        assert limits["user_limit"]["nullable"] is True
+        assert limits["updated_at"]["nullable"] is False
+
+        recon = {
+            c["name"]: c
+            for c in inspector.get_columns("tenant_usage_reconciliation")
+        }
+        assert recon["id"]["nullable"] is False
+        assert recon["tenant_id"]["nullable"] is False
+        assert recon["status"]["nullable"] is False
+        assert "RUNNING" in str(recon["status"]["default"])
+        assert recon["started_at"]["nullable"] is False
+        for nullable_field in (
+            "completed_at",
+            "expected_storage_bytes",
+            "actual_storage_bytes",
+            "difference_bytes",
+            "objects_checked",
+            "orphans_found",
+            "missing_objects_found",
+            "repaired",
+            "error_code",
+        ):
+            assert recon[nullable_field]["nullable"] is True, nullable_field
+
+    def test_primary_keys_and_foreign_keys(self, migration_db):
+        _alembic("head")
+        inspector = inspect(migration_db)
+
+        assert inspector.get_pk_constraint("tenant_usage")[
+            "constrained_columns"
+        ] == ["tenant_id"]
+        assert inspector.get_pk_constraint("tenant_limits")[
+            "constrained_columns"
+        ] == ["tenant_id"]
+        assert inspector.get_pk_constraint("tenant_usage_reconciliation")[
+            "constrained_columns"
+        ] == ["id"]
+
+        for table in USAGE_DOMAIN_TABLES:
+            fks = inspector.get_foreign_keys(table)
+            assert any(
+                fk["referred_table"] == "tenant"
+                and fk["constrained_columns"] == ["tenant_id"]
+                for fk in fks
+            ), f"{table} missing tenant_id -> tenant.id foreign key"
+            # No FK carries ON DELETE — same no-cascade convention as the
+            # notification domain (deleting a tenant with usage/limits/
+            # reconciliation history must be refused, not silently erased).
+            for fk in fks:
+                assert not fk.get("options", {}).get("ondelete")
+
+    def test_check_constraints(self, migration_db):
+        _alembic("head")
+        with migration_db.connect() as conn:
+            checks = dict(
+                conn.execute(
+                    text(
+                        "SELECT con.conname, pg_get_constraintdef(con.oid) "
+                        "FROM pg_constraint con "
+                        "JOIN pg_class rel ON rel.oid = con.conrelid "
+                        "WHERE con.contype = 'c' AND rel.relname IN "
+                        "('tenant_usage', 'tenant_limits', "
+                        "'tenant_usage_reconciliation')"
+                    )
+                ).all()
+            )
+
+        assert "billable_storage_bytes" in checks["ck_tenant_usage_storage_non_negative"]
+        assert "storage_limit_bytes" in checks["ck_tenant_limits_storage_limit_positive"]
+        assert "user_limit" in checks["ck_tenant_limits_user_limit_positive"]
+        assert "RUNNING" in checks["ck_tenant_usage_reconciliation_status"]
+        assert "SUCCEEDED" in checks["ck_tenant_usage_reconciliation_status"]
+        assert "FAILED" in checks["ck_tenant_usage_reconciliation_status"]
+
+        # Enums are VARCHAR + CHECK here too, not a native Postgres ENUM.
+        with migration_db.connect() as conn:
+            enum_types = conn.execute(
+                text(
+                    "SELECT typname FROM pg_type WHERE typtype = 'e' "
+                    "AND typname LIKE 'tenant_usage%'"
+                )
+            ).all()
+        assert enum_types == []
+
+    def test_reconciliation_lifecycle_constraints_reject_invalid_rows(
+        self, migration_db
+    ):
+        """RUNNING must have no completed_at; a terminal status must have
+        one; SUCCEEDED must not carry an error_code; an unrecognized status
+        is rejected outright."""
+        _alembic("head")
+        with migration_db.connect() as conn:
+            tenant_id = _seed_tenant(conn)
+            conn.commit()
+
+        def _insert(status, completed_at_sql, error_code_sql):
+            with migration_db.connect() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO tenant_usage_reconciliation "
+                        "(id, tenant_id, status, started_at, completed_at, "
+                        "error_code) VALUES (:id, :tenant_id, :status, "
+                        f"now(), {completed_at_sql}, {error_code_sql})"
+                    ),
+                    {"id": uuid.uuid4(), "tenant_id": tenant_id, "status": status},
+                )
+                conn.commit()
+
+        # Valid combinations.
+        _insert("RUNNING", "NULL", "NULL")
+        _insert("SUCCEEDED", "now()", "NULL")
+        _insert("FAILED", "now()", "'s3_timeout'")
+
+        # Invalid: RUNNING with a completed_at already set.
+        with pytest.raises(Exception):
+            _insert("RUNNING", "now()", "NULL")
+        # Invalid: SUCCEEDED with no completed_at.
+        with pytest.raises(Exception):
+            _insert("SUCCEEDED", "NULL", "NULL")
+        # Invalid: SUCCEEDED carrying an error_code.
+        with pytest.raises(Exception):
+            _insert("SUCCEEDED", "now()", "'oops'")
+        # Invalid: an unrecognized status value.
+        with pytest.raises(Exception):
+            _insert("CANCELLED", "now()", "NULL")
+
+    def test_counters_reject_negative_values(self, migration_db):
+        _alembic("head")
+        with migration_db.connect() as conn:
+            tenant_id = _seed_tenant(conn)
+            conn.commit()
+
+        with pytest.raises(Exception):
+            with migration_db.connect() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO tenant_usage_reconciliation "
+                        "(id, tenant_id, status, started_at, completed_at, "
+                        "objects_checked) "
+                        "VALUES (:id, :tenant_id, 'SUCCEEDED', now(), now(), -1)"
+                    ),
+                    {"id": uuid.uuid4(), "tenant_id": tenant_id},
+                )
+                conn.commit()
+
+    def test_tenant_usage_storage_rejects_negative(self, migration_db):
+        _alembic("head")
+        with migration_db.connect() as conn:
+            tenant_id = _seed_tenant(conn)
+            conn.commit()
+
+        with pytest.raises(Exception):
+            with migration_db.connect() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO tenant_usage "
+                        "(tenant_id, billable_storage_bytes, last_updated) "
+                        "VALUES (:tenant_id, -1, now())"
+                    ),
+                    {"tenant_id": tenant_id},
+                )
+                conn.commit()
+
+    def test_tenant_usage_default_is_zero(self, migration_db):
+        _alembic("head")
+        with migration_db.connect() as conn:
+            tenant_id = _seed_tenant(conn)
+            conn.execute(
+                text(
+                    "INSERT INTO tenant_usage (tenant_id, last_updated) "
+                    "VALUES (:tenant_id, now())"
+                ),
+                {"tenant_id": tenant_id},
+            )
+            conn.commit()
+            value = conn.execute(
+                text(
+                    "SELECT billable_storage_bytes FROM tenant_usage "
+                    "WHERE tenant_id = :tenant_id"
+                ),
+                {"tenant_id": tenant_id},
+            ).scalar_one()
+        assert value == 0
+
+    def test_tenant_limits_rejects_zero_and_negative(self, migration_db):
+        _alembic("head")
+        with migration_db.connect() as conn:
+            tenant_id = _seed_tenant(conn)
+            conn.commit()
+
+        for bad_value in (0, -1):
+            with pytest.raises(Exception):
+                with migration_db.connect() as conn:
+                    conn.execute(
+                        text(
+                            "INSERT INTO tenant_limits "
+                            "(tenant_id, storage_limit_bytes, updated_at) "
+                            "VALUES (:tenant_id, :value, now())"
+                        ),
+                        {"tenant_id": tenant_id, "value": bad_value},
+                    )
+                    conn.commit()
+
+    def test_tenant_limits_accepts_null_limits(self, migration_db):
+        """NULL means unlimited/unconfigured — must be accepted, not
+        rejected by the positive-only check."""
+        _alembic("head")
+        with migration_db.connect() as conn:
+            tenant_id = _seed_tenant(conn)
+            conn.execute(
+                text(
+                    "INSERT INTO tenant_limits (tenant_id, updated_at) "
+                    "VALUES (:tenant_id, now())"
+                ),
+                {"tenant_id": tenant_id},
+            )
+            conn.commit()
+
+    def test_indexes_supporting_the_hot_query_paths_exist(self, migration_db):
+        _alembic("head")
+        inspector = inspect(migration_db)
+
+        def columns_of(table, index_name):
+            found = [
+                i for i in inspector.get_indexes(table) if i["name"] == index_name
+            ]
+            assert found, f"missing index {index_name} on {table}"
+            return found[0]["column_names"]
+
+        assert columns_of(
+            "tenant_usage_reconciliation",
+            "ix_tenant_usage_reconciliation_tenant_started_at",
+        ) == ["tenant_id", "started_at"]
+        assert columns_of(
+            "tenant_usage_reconciliation",
+            "ix_tenant_usage_reconciliation_status_started_at",
+        ) == ["status", "started_at"]
+        assert columns_of("app_user", "ix_app_user_tenant_id_is_active") == [
+            "tenant_id",
+            "is_active",
+        ]
+
+    def test_no_backfill_or_seed_rows(self, migration_db):
+        """Additive, no backfill: all three tables arrive empty."""
+        _alembic("head")
+        with migration_db.connect() as conn:
+            for table in sorted(USAGE_DOMAIN_TABLES):
+                count = conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one()
+                assert count == 0, f"{table} is not empty after upgrade"
+
+
+class TestStorageAttributionMigration:
+    """Céluma 1.3, Phase 4, Block C — `v1_11_0`, the storage-attribution and
+    usage-initialization revision. Data-only: these tests exercise the
+    backfill and initialization logic directly against a populated
+    database, the same way `TestUsageDomainMigration` proves v1_10_0's
+    schema rather than merely that it is reachable.
+    """
+
+    def test_backfills_tenant_id_for_the_four_gapped_categories(self, migration_db):
+        _alembic(USAGE_DOMAIN_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            branch_id = _seed_branch(conn, tenant_id)
+            patient_id = _seed_patient(conn, tenant_id, branch_id)
+            order_id = _seed_order(conn, tenant_id, branch_id, patient_id)
+            report_id = _seed_report(conn, tenant_id, branch_id, order_id)
+            sample_id = _seed_sample(conn, tenant_id, branch_id, order_id)
+
+            # Sample image (processed) — tenant_id NULL before backfill.
+            processed_storage_id = _seed_storage_object(
+                conn, key="samples/processed/a.jpg", size_bytes=1000, tenant_id=None
+            )
+            sample_image_id = _seed_sample_image(
+                conn, tenant_id, branch_id, sample_id, processed_storage_id
+            )
+            # Sample image rendition (thumbnail) — tenant_id NULL before backfill.
+            thumb_storage_id = _seed_storage_object(
+                conn, key="samples/thumb/a.jpg", size_bytes=100, tenant_id=None
+            )
+            _seed_sample_image_rendition(conn, sample_image_id, "thumbnail", thumb_storage_id)
+
+            # Legacy PDF — tenant_id NULL before backfill (sha256_hex NULL
+            # distinguishes it from an official PDF sharing the same FK).
+            legacy_pdf_storage_id = _seed_storage_object(
+                conn, key="reports/x/report.pdf", size_bytes=5000, tenant_id=None,
+                content_type="application/pdf",
+            )
+            # Report JSON — tenant_id NULL before backfill.
+            json_storage_id = _seed_storage_object(
+                conn, key="reports/x/report.json", size_bytes=200, tenant_id=None,
+                content_type="application/json",
+            )
+            _seed_report_version(
+                conn, report_id, version_no=1,
+                pdf_storage_id=legacy_pdf_storage_id, json_storage_id=json_storage_id,
+            )
+
+            # Live signature — tenant_id NULL before backfill.
+            signature_storage_id = _seed_storage_object(
+                conn, key="users/x/signature/a.png", size_bytes=50, tenant_id=None,
+                content_type="image/png",
+            )
+            user_id = _seed_app_user(
+                conn, tenant_id, email="sig@test.example",
+                signature_storage_id=signature_storage_id,
+            )
+
+        _alembic("head")
+
+        with migration_db.connect() as conn:
+            rows = dict(
+                conn.execute(
+                    text(
+                        "SELECT id, tenant_id FROM storage_object WHERE id IN "
+                        "(:a, :b, :c, :d, :e)"
+                    ),
+                    {
+                        "a": processed_storage_id,
+                        "b": thumb_storage_id,
+                        "c": legacy_pdf_storage_id,
+                        "d": json_storage_id,
+                        "e": signature_storage_id,
+                    },
+                ).all()
+            )
+        for storage_id in (
+            processed_storage_id,
+            thumb_storage_id,
+            legacy_pdf_storage_id,
+            json_storage_id,
+            signature_storage_id,
+        ):
+            assert rows[storage_id] == tenant_id, f"{storage_id} not backfilled"
+
+    def test_never_overwrites_an_existing_non_null_tenant_id(self, migration_db):
+        _alembic(USAGE_DOMAIN_REVISION)
+        with migration_db.begin() as conn:
+            tenant_a = _seed_tenant(conn)
+            tenant_b = _seed_tenant(conn)
+            branch_id = _seed_branch(conn, tenant_a)
+            patient_id = _seed_patient(conn, tenant_a, branch_id)
+            order_id = _seed_order(conn, tenant_a, branch_id, patient_id)
+            sample_id = _seed_sample(conn, tenant_a, branch_id, order_id)
+
+            # Deliberately wrong tenant already set — a pre-Block-C row
+            # that, for whatever reason, already carries a tenant_id. The
+            # backfill must leave it exactly as-is.
+            storage_id = _seed_storage_object(
+                conn, key="samples/processed/b.jpg", size_bytes=999, tenant_id=tenant_b
+            )
+            _seed_sample_image(conn, tenant_a, branch_id, sample_id, storage_id)
+
+        _alembic("head")
+
+        with migration_db.connect() as conn:
+            actual = conn.execute(
+                text("SELECT tenant_id FROM storage_object WHERE id = :id"),
+                {"id": storage_id},
+            ).scalar_one()
+        assert actual == tenant_b
+
+    def test_initializes_usage_with_the_computed_baseline_per_tenant(self, migration_db):
+        _alembic(USAGE_DOMAIN_REVISION)
+        with migration_db.begin() as conn:
+            tenant_a = _seed_tenant(conn)
+            tenant_b = _seed_tenant(conn)
+            tenant_c = _seed_tenant(conn)  # zero billable objects
+
+            branch_a = _seed_branch(conn, tenant_a)
+            patient_a = _seed_patient(conn, tenant_a, branch_a)
+            order_a = _seed_order(conn, tenant_a, branch_a, patient_a)
+            report_a = _seed_report(conn, tenant_a, branch_a, order_a)
+
+            # Tenant A: one official PDF (sha256_hex set) — 10 bytes.
+            official_storage = _seed_storage_object(
+                conn, key="reports/a/official/1.pdf", size_bytes=10, tenant_id=tenant_a,
+                content_type="application/pdf", sha256_hex="deadbeef",
+            )
+            _seed_report_version(conn, report_a, version_no=1, pdf_storage_id=official_storage)
+
+            branch_b = _seed_branch(conn, tenant_b)
+            patient_b = _seed_patient(conn, tenant_b, branch_b)
+            order_b = _seed_order(conn, tenant_b, branch_b, patient_b)
+            report_b = _seed_report(conn, tenant_b, branch_b, order_b)
+
+            # Tenant B: one report JSON body — 77 bytes.
+            json_storage = _seed_storage_object(
+                conn, key="reports/b/report.json", size_bytes=77, tenant_id=None,
+                content_type="application/json",
+            )
+            _seed_report_version(conn, report_b, version_no=1, json_storage_id=json_storage)
+
+        _alembic("head")
+
+        with migration_db.connect() as conn:
+            usage = dict(
+                conn.execute(
+                    text(
+                        "SELECT tenant_id, billable_storage_bytes FROM tenant_usage "
+                        "WHERE tenant_id IN (:a, :b, :c)"
+                    ),
+                    {"a": tenant_a, "b": tenant_b, "c": tenant_c},
+                ).all()
+            )
+        assert usage[tenant_a] == 10
+        assert usage[tenant_b] == 77
+        assert usage[tenant_c] == 0
+
+    def test_initialization_is_idempotent_across_a_downgrade_and_re_upgrade(self, migration_db):
+        """`downgrade()` is a deliberate no-op (see the revision's module
+        docstring), which means re-running `alembic upgrade head` after a
+        downgrade genuinely re-executes upgrade() — this is the natural way
+        to prove replay safety with this test harness's subprocess-based
+        `_alembic()` helper, without reaching into the migration's Python
+        function directly."""
+        _alembic(USAGE_DOMAIN_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            branch_id = _seed_branch(conn, tenant_id)
+            patient_id = _seed_patient(conn, tenant_id, branch_id)
+            order_id = _seed_order(conn, tenant_id, branch_id, patient_id)
+            report_id = _seed_report(conn, tenant_id, branch_id, order_id)
+            official_storage = _seed_storage_object(
+                conn, key="reports/idem/official/1.pdf", size_bytes=4096, tenant_id=tenant_id,
+                content_type="application/pdf", sha256_hex="abc123",
+            )
+            _seed_report_version(conn, report_id, version_no=1, pdf_storage_id=official_storage)
+
+        _alembic("head")
+        with migration_db.connect() as conn:
+            first_run = conn.execute(
+                text(
+                    "SELECT billable_storage_bytes FROM tenant_usage WHERE tenant_id = :id"
+                ),
+                {"id": tenant_id},
+            ).scalar_one()
+        assert first_run == 4096
+
+        _alembic(USAGE_DOMAIN_REVISION, command="downgrade")
+        _alembic("head")
+
+        with migration_db.connect() as conn:
+            second_run = conn.execute(
+                text(
+                    "SELECT billable_storage_bytes FROM tenant_usage WHERE tenant_id = :id"
+                ),
+                {"id": tenant_id},
+            ).scalar_one()
+            row_count = conn.execute(
+                text("SELECT COUNT(*) FROM tenant_usage WHERE tenant_id = :id"),
+                {"id": tenant_id},
+            ).scalar_one()
+        assert second_run == 4096, "second run must not change usage"
+        assert row_count == 1, "second run must not create a duplicate row"
+
+    def test_downgrade_is_a_no_op(self, migration_db):
+        """No schema to revert (data-only revision) — downgrading must not
+        drop any Block B table or fail."""
+        _alembic("head")
+        before = set(inspect(migration_db).get_table_names())
+
+        _alembic(USAGE_DOMAIN_REVISION, command="downgrade")
+
+        assert _current_revision(migration_db) == USAGE_DOMAIN_REVISION
+        after = set(inspect(migration_db).get_table_names())
+        assert before == after
+        assert USAGE_DOMAIN_TABLES <= after
+
+
+class TestMigrationRuntimeParity:
+    """Céluma 1.3, Phase 4, Block C remediation — a release-time guard,
+    not a promise that these two will always agree.
+
+    `v1_11_0` now freezes its own copy of the Céluma 1.3 billable-storage
+    calculation (see that revision's module docstring). This class proves
+    the frozen SQL and the current
+    `app.services.storage_billing.StorageBillingService` agree, for the
+    schema as it exists *today*. If a future release legitimately changes
+    billable semantics, `StorageBillingService` will change and this test
+    will start failing — that is the intended signal that the new
+    semantics need their own migration/reconciliation step to transition
+    existing `TenantUsage` rows explicitly, not a signal that `v1_11_0`
+    itself needs to change (it must not, once externally released — see
+    the revision's own docstring).
+    """
+
+    def test_frozen_baseline_matches_storage_billing_service_across_every_category(
+        self, migration_db
+    ):
+        from sqlmodel import Session as SQLModelSession
+
+        from app.core.config import settings
+        from app.services.storage_billing import StorageBillingService
+
+        _alembic(USAGE_DOMAIN_REVISION)
+        with migration_db.begin() as conn:
+            # ---- Tenant A: one of every category, including the tricky
+            # superseded/stale special cases. ----
+            tenant_a = _seed_tenant(conn)
+            branch_a = _seed_branch(conn, tenant_a)
+            patient_a = _seed_patient(conn, tenant_a, branch_a)
+            order_a = _seed_order(conn, tenant_a, branch_a, patient_a)
+            report_a = _seed_report(conn, tenant_a, branch_a, order_a)
+            sample_a = _seed_sample(conn, tenant_a, branch_a, order_a)
+
+            # Sample processed image + thumbnail rendition.
+            processed_storage = _seed_storage_object(
+                conn, key="samples/a/processed/1.jpg", size_bytes=3000, tenant_id=tenant_a,
+            )
+            sample_image_a = _seed_sample_image(
+                conn, tenant_a, branch_a, sample_a, processed_storage
+            )
+            thumb_storage = _seed_storage_object(
+                conn, key="samples/a/thumb/1.jpg", size_bytes=300, tenant_id=tenant_a,
+            )
+            _seed_sample_image_rendition(conn, sample_image_a, "thumbnail", thumb_storage)
+
+            # Official PDF — historically superseded by a second generation,
+            # both must remain billable (never decremented).
+            official_1 = _seed_storage_object(
+                conn, key="reports/a/official/1.pdf", size_bytes=5000, tenant_id=tenant_a,
+                content_type="application/pdf", sha256_hex="official-hash-1",
+            )
+            official_2 = _seed_storage_object(
+                conn, key="reports/a/official/2.pdf", size_bytes=6000, tenant_id=tenant_a,
+                content_type="application/pdf", sha256_hex="official-hash-2",
+            )
+
+            # Legacy PDF — a stale, superseded same-version row (must be
+            # excluded) plus the currently-referenced one (must count).
+            legacy_stale = _seed_storage_object(
+                conn, key="reports/a/report.pdf", size_bytes=9_999_999, tenant_id=tenant_a,
+                content_type="application/pdf",
+            )
+            legacy_current = _seed_storage_object(
+                conn, key="reports/a/report.pdf", size_bytes=4_000_000, tenant_id=tenant_a,
+                content_type="application/pdf",
+            )
+
+            # Report JSON.
+            json_storage = _seed_storage_object(
+                conn, key="reports/a/report.json", size_bytes=800, tenant_id=tenant_a,
+                content_type="application/json",
+            )
+            _seed_report_version(
+                conn, report_a, version_no=1,
+                pdf_storage_id=legacy_current, json_storage_id=json_storage,
+            )
+            # official_1/official_2/legacy_stale are deliberately NOT
+            # referenced by any report_version.pdf_storage_id — official
+            # PDFs count by tenant_id + sha256_hex alone (never via the FK),
+            # and legacy_stale is exactly the "superseded, no longer
+            # reachable" row the delta rule exists to exclude.
+
+            # Tenant logo — current + superseded.
+            base = (settings.media_public_base_url or "").rstrip("/")
+            old_logo = _seed_storage_object(
+                conn, key="tenants/a/logo/old.png", size_bytes=1500, tenant_id=tenant_a,
+                content_type="image/png",
+            )
+            new_logo = _seed_storage_object(
+                conn, key="tenants/a/logo/new.png", size_bytes=2500, tenant_id=tenant_a,
+                content_type="image/png",
+            )
+            conn.execute(
+                text("UPDATE tenant SET logo_url = :url WHERE id = :id"),
+                {"url": f"{base}/tenants/a/logo/new.png", "id": tenant_a},
+            )
+
+            # Letterhead/template asset — billable while retained, whether
+            # or not any version still references it (the ratified policy).
+            letterhead_asset = _seed_storage_object(
+                conn, key="report-letterheads/xyz/logos/1.png", size_bytes=1200,
+                tenant_id=tenant_a, content_type="image/png",
+            )
+            template_asset = _seed_storage_object(
+                conn, key="report-templates/xyz/logos/1.png", size_bytes=1300,
+                tenant_id=tenant_a, content_type="image/png",
+            )
+
+            # Live signature.
+            sig_storage = _seed_storage_object(
+                conn, key="users/a/signature/1.png", size_bytes=64, tenant_id=tenant_a,
+                content_type="image/png",
+            )
+            _seed_app_user(
+                conn, tenant_a, email="parity-a@t.example", signature_storage_id=sig_storage,
+            )
+            # A replaced signature's retained-but-detached PNG is, by
+            # construction, not representable as a StorageObject row at all
+            # (its row is deleted the moment the user replaces/deletes their
+            # signature — see storage-tenant-attribution-contract.md). No
+            # seed call is the correct way to represent it: proving the
+            # calculation counts only `sig_storage` above already proves
+            # nothing else leaks in.
+
+            # ---- Tenant B: zero billable objects. ----
+            tenant_b = _seed_tenant(conn)
+
+            # ---- Tenant C: an independent, disjoint slice, to prove
+            # multi-tenant isolation in the same run. ----
+            tenant_c = _seed_tenant(conn)
+            branch_c = _seed_branch(conn, tenant_c)
+            patient_c = _seed_patient(conn, tenant_c, branch_c)
+            order_c = _seed_order(conn, tenant_c, branch_c, patient_c)
+            report_c = _seed_report(conn, tenant_c, branch_c, order_c)
+            json_storage_c = _seed_storage_object(
+                conn, key="reports/c/report.json", size_bytes=42, tenant_id=tenant_c,
+                content_type="application/json",
+            )
+            _seed_report_version(conn, report_c, version_no=1, json_storage_id=json_storage_c)
+
+        _alembic("head")
+
+        with SQLModelSession(migration_db) as session:
+            for tenant_id in (tenant_a, tenant_b, tenant_c):
+                frozen_baseline = migration_db.connect().execute(
+                    text(
+                        "SELECT billable_storage_bytes FROM tenant_usage WHERE tenant_id = :id"
+                    ),
+                    {"id": tenant_id},
+                ).scalar_one()
+                runtime_total = StorageBillingService.compute_billable_storage_bytes(
+                    session, tenant_id
+                )
+                assert frozen_baseline == runtime_total, (
+                    f"tenant {tenant_id}: migration baseline {frozen_baseline} != "
+                    f"runtime StorageBillingService total {runtime_total}"
+                )
+
+        # And the numbers are exactly what the seeded fixture implies —
+        # not just "equal to each other by coincidence."
+        with migration_db.connect() as conn:
+            usage = dict(
+                conn.execute(
+                    text(
+                        "SELECT tenant_id, billable_storage_bytes FROM tenant_usage "
+                        "WHERE tenant_id IN (:a, :b, :c)"
+                    ),
+                    {"a": tenant_a, "b": tenant_b, "c": tenant_c},
+                ).all()
+            )
+        expected_a = (
+            3000 + 300  # sample processed + thumbnail
+            + 5000 + 6000  # both official PDFs, historically superseded included
+            + 4_000_000  # only the current legacy PDF, stale excluded
+            + 800  # report JSON
+            + 2500  # only the current tenant logo, superseded excluded
+            + 1200 + 1300  # letterhead + template asset, retained
+            + 64  # live signature
+        )
+        assert usage[tenant_a] == expected_a
+        assert usage[tenant_b] == 0
+        assert usage[tenant_c] == 42
+
+
+def _seed_tenant(conn) -> uuid.UUID:
+    """A minimal tenant row — everything `tenant_usage`/`tenant_limits`/
+    `tenant_usage_reconciliation` need to satisfy their tenant_id FK."""
+    tenant_id = uuid.uuid4()
+    conn.execute(
+        text("INSERT INTO tenant (id, name, created_at) VALUES (:id, :name, now())"),
+        {"id": tenant_id, "name": f"T-{tenant_id.hex[:8]}"},
+    )
+    return tenant_id
+
+
+def _seed_branch(conn, tenant_id: uuid.UUID) -> uuid.UUID:
+    branch_id = uuid.uuid4()
+    conn.execute(
+        text(
+            "INSERT INTO branch (id, tenant_id, code, name, timezone, country, "
+            "is_active, created_at) "
+            "VALUES (:id, :tenant_id, :code, 'Main', 'America/Mexico_City', 'MX', "
+            "true, now())"
+        ),
+        {"id": branch_id, "tenant_id": tenant_id, "code": f"B-{branch_id.hex[:6]}"},
+    )
+    return branch_id
+
+
+def _seed_patient(conn, tenant_id: uuid.UUID, branch_id: uuid.UUID) -> uuid.UUID:
+    patient_id = uuid.uuid4()
+    conn.execute(
+        text(
+            "INSERT INTO patient (id, tenant_id, branch_id, patient_code, "
+            "first_name, last_name, created_at) "
+            "VALUES (:id, :tenant_id, :branch_id, :code, 'Jane', 'Doe', now())"
+        ),
+        {
+            "id": patient_id,
+            "tenant_id": tenant_id,
+            "branch_id": branch_id,
+            "code": f"P-{patient_id.hex[:6]}",
+        },
+    )
+    return patient_id
+
+
+def _seed_order(conn, tenant_id: uuid.UUID, branch_id: uuid.UUID, patient_id: uuid.UUID) -> uuid.UUID:
+    order_id = uuid.uuid4()
+    conn.execute(
+        text(
+            "INSERT INTO \"order\" (id, tenant_id, branch_id, patient_id, "
+            "order_code, status, billed_lock, created_at) "
+            "VALUES (:id, :tenant_id, :branch_id, :patient_id, :code, 'RECEIVED', "
+            "false, now())"
+        ),
+        {
+            "id": order_id,
+            "tenant_id": tenant_id,
+            "branch_id": branch_id,
+            "patient_id": patient_id,
+            "code": f"O-{order_id.hex[:6]}",
+        },
+    )
+    return order_id
+
+
+def _seed_report(conn, tenant_id: uuid.UUID, branch_id: uuid.UUID, order_id: uuid.UUID) -> uuid.UUID:
+    report_id = uuid.uuid4()
+    conn.execute(
+        text(
+            "INSERT INTO report (id, tenant_id, branch_id, order_id, status, created_at) "
+            "VALUES (:id, :tenant_id, :branch_id, :order_id, 'DRAFT', now())"
+        ),
+        {"id": report_id, "tenant_id": tenant_id, "branch_id": branch_id, "order_id": order_id},
+    )
+    return report_id
+
+
+def _seed_report_version(
+    conn,
+    report_id: uuid.UUID,
+    *,
+    version_no: int,
+    pdf_storage_id: uuid.UUID | None = None,
+    json_storage_id: uuid.UUID | None = None,
+) -> uuid.UUID:
+    version_id = uuid.uuid4()
+    conn.execute(
+        text(
+            "INSERT INTO report_version (id, report_id, version_no, pdf_storage_id, "
+            "json_storage_id, authored_at, is_current, created_at) "
+            "VALUES (:id, :report_id, :version_no, :pdf_storage_id, :json_storage_id, "
+            "now(), true, now())"
+        ),
+        {
+            "id": version_id,
+            "report_id": report_id,
+            "version_no": version_no,
+            "pdf_storage_id": pdf_storage_id,
+            "json_storage_id": json_storage_id,
+        },
+    )
+    return version_id
+
+
+def _seed_sample(conn, tenant_id: uuid.UUID, branch_id: uuid.UUID, order_id: uuid.UUID) -> uuid.UUID:
+    sample_id = uuid.uuid4()
+    conn.execute(
+        text(
+            "INSERT INTO sample (id, tenant_id, branch_id, order_id, sample_code, "
+            "type, state) "
+            "VALUES (:id, :tenant_id, :branch_id, :order_id, :code, 'TEJIDO', 'RECEIVED')"
+        ),
+        {
+            "id": sample_id,
+            "tenant_id": tenant_id,
+            "branch_id": branch_id,
+            "order_id": order_id,
+            "code": f"S-{sample_id.hex[:6]}",
+        },
+    )
+    return sample_id
+
+
+def _seed_sample_image(
+    conn, tenant_id: uuid.UUID, branch_id: uuid.UUID, sample_id: uuid.UUID, storage_id: uuid.UUID
+) -> uuid.UUID:
+    sample_image_id = uuid.uuid4()
+    conn.execute(
+        text(
+            "INSERT INTO sample_image (id, tenant_id, branch_id, sample_id, storage_id, "
+            "is_primary, created_at) "
+            "VALUES (:id, :tenant_id, :branch_id, :sample_id, :storage_id, false, now())"
+        ),
+        {
+            "id": sample_image_id,
+            "tenant_id": tenant_id,
+            "branch_id": branch_id,
+            "sample_id": sample_id,
+            "storage_id": storage_id,
+        },
+    )
+    return sample_image_id
+
+
+def _seed_sample_image_rendition(
+    conn, sample_image_id: uuid.UUID, kind: str, storage_id: uuid.UUID
+) -> uuid.UUID:
+    rendition_id = uuid.uuid4()
+    conn.execute(
+        text(
+            "INSERT INTO sample_image_rendition (id, sample_image_id, kind, storage_id) "
+            "VALUES (:id, :sample_image_id, :kind, :storage_id)"
+        ),
+        {
+            "id": rendition_id,
+            "sample_image_id": sample_image_id,
+            "kind": kind,
+            "storage_id": storage_id,
+        },
+    )
+    return rendition_id
+
+
+def _seed_storage_object(
+    conn,
+    *,
+    key: str,
+    size_bytes: int,
+    tenant_id: uuid.UUID | None,
+    content_type: str = "image/jpeg",
+    sha256_hex: str | None = None,
+) -> uuid.UUID:
+    storage_id = uuid.uuid4()
+    conn.execute(
+        text(
+            "INSERT INTO storage_object (id, provider, region, bucket, object_key, "
+            "content_type, size_bytes, sha256_hex, tenant_id, created_at) "
+            "VALUES (:id, 'aws', 'mx-test-1', 'celuma-test-bucket', :key, "
+            ":content_type, :size_bytes, :sha256_hex, :tenant_id, now())"
+        ),
+        {
+            "id": storage_id,
+            "key": key,
+            "content_type": content_type,
+            "size_bytes": size_bytes,
+            "sha256_hex": sha256_hex,
+            "tenant_id": tenant_id,
+        },
+    )
+    return storage_id
+
+
+def _seed_app_user(
+    conn, tenant_id: uuid.UUID, *, email: str, signature_storage_id: uuid.UUID | None = None
+) -> uuid.UUID:
+    user_id = uuid.uuid4()
+    conn.execute(
+        text(
+            "INSERT INTO app_user (id, tenant_id, email, full_name, hashed_password, "
+            "is_active, signature_storage_id, created_at) "
+            "VALUES (:id, :tenant_id, :email, 'Test User', 'x', true, "
+            ":signature_storage_id, now())"
+        ),
+        {
+            "id": user_id,
+            "tenant_id": tenant_id,
+            "email": email,
+            "signature_storage_id": signature_storage_id,
+        },
+    )
+    return user_id
 
 
 def _seed_delivery_context(conn):

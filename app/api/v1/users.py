@@ -23,6 +23,7 @@ from app.core.security import hash_password
 from app.core.config import settings
 from app.services.email import EmailService
 from app.services.s3 import S3Service
+from app.services.usage import UsageService
 from app.schemas.user import (
     UserCreateByAdmin,
     UserUpdateByAdmin,
@@ -680,6 +681,17 @@ def upload_my_signature(
         raise HTTPException(400, "Signature file size must be less than 2MB")
 
     s3 = S3Service()
+    # Céluma 1.3 Phase 4, Block C: only the *live* signature is billable —
+    # capture the outgoing row's size before it is deleted below, so a
+    # replace applies a delta instead of counting the new upload twice (see
+    # storage-flow-accounting-matrix.md "signature upload/replace").
+    previous_signature = (
+        session.get(StorageObject, user.signature_storage_id)
+        if user.signature_storage_id
+        else None
+    )
+    previous_size_bytes = previous_signature.size_bytes or 0 if previous_signature else 0
+
     _delete_existing_signature(user, session, s3)
     session.flush()
 
@@ -696,9 +708,18 @@ def upload_my_signature(
         content_type="image/png",
         size_bytes=info.size_bytes,
         created_by=user.id,
+        tenant_id=user.tenant_id,
     )
     session.add(storage)
     session.flush()
+
+    UsageService.record_storage_delta(
+        session,
+        user.tenant_id,
+        (storage.size_bytes or 0) - previous_size_bytes,
+        source="signature",
+        resource_type="signature",
+    )
 
     user.signature_storage_id = storage.id
     session.add(user)
@@ -756,8 +777,18 @@ def delete_my_signature(
     if user.signature_storage_id is None:
         return None
 
+    previous_signature = session.get(StorageObject, user.signature_storage_id)
+    previous_size_bytes = previous_signature.size_bytes or 0 if previous_signature else 0
+
     s3 = S3Service()
     _delete_existing_signature(user, session, s3)
+    UsageService.record_storage_delta(
+        session,
+        user.tenant_id,
+        -previous_size_bytes,
+        source="signature",
+        resource_type="signature",
+    )
     session.add(user)
     session.commit()
 

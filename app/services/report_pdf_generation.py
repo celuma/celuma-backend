@@ -22,6 +22,7 @@ from app.models.enums import ReportStatus
 from app.models.report import Report, ReportVersion
 from app.models.storage import StorageObject
 from app.services.s3 import S3Service
+from app.services.usage import UsageService
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +316,18 @@ class ReportPdfGenerationService:
                 tenant_id=report.tenant_id,
             )
             self.session.add(storage)
+            self.session.flush()
+            # Céluma 1.3 Phase 4, Block C: every retained official PDF is
+            # permanently billable — no decrement on a later regeneration
+            # (see storage-flow-accounting-matrix.md "official PDF
+            # generation"). Same transaction as the StorageObject insert.
+            UsageService.record_storage_delta(
+                self.session,
+                report.tenant_id,
+                storage.size_bytes or 0,
+                source="official_pdf",
+                resource_type="report_pdf",
+            )
             self.session.commit()
             self.session.refresh(storage)
         except Exception as exc:  # noqa: BLE001

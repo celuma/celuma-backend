@@ -52,6 +52,7 @@ from app.services.notification_integrations import (
     notify_report_submitted,
 )
 from app.services.report_template_autoversion import snapshot_and_activate_template_version
+from app.services.usage import UsageService
 from app.services.report_publishing import (
     embed_signature_metadata_if_required,
     claim_publish,
@@ -566,9 +567,21 @@ def create_report(
                 content_type="application/json",
                 size_bytes=info.size_bytes,
                 created_by=report.created_by,
+                tenant_id=report.tenant_id,
             )
             session.add(storage)
             session.flush()
+            # Céluma 1.3 Phase 4, Block C: report JSON bodies are billable,
+            # permanent once created (see storage-flow-accounting-matrix.md
+            # "report JSON create"). Same transaction as the insert/commit
+            # below.
+            UsageService.record_storage_delta(
+                session,
+                report.tenant_id,
+                storage.size_bytes or 0,
+                source="report_json",
+                resource_type="report_json",
+            )
 
             # Mark existing versions as not current (none expected on create)
             # Create version 1 as current
@@ -925,10 +938,21 @@ def create_report_new_version(
             content_type="application/json",
             size_bytes=info.size_bytes,
             created_by=report_data.created_by,
+            tenant_id=report.tenant_id,
         )
         session.add(storage)
         session.flush()
         json_storage_id = storage.id
+        # Céluma 1.3 Phase 4, Block C: see the equivalent comment in
+        # create_report above — same billable/permanent rule for every
+        # report JSON body, one per version.
+        UsageService.record_storage_delta(
+            session,
+            report.tenant_id,
+            storage.size_bytes or 0,
+            source="report_json",
+            resource_type="report_json",
+        )
 
     # Mark previous current version as not current
     if current_version:
@@ -1722,6 +1746,17 @@ def upload_template_logo(
     except ImageRegistrationError:
         raise HTTPException(500, "Failed to register uploaded logo") from None
 
+    # Céluma 1.3 Phase 4, Block C: same rule as the letterhead-logo endpoint
+    # — see the equivalent comment in report_letterheads.upload_letterhead_logo.
+    UsageService.record_storage_delta(
+        session,
+        template.tenant_id,
+        result.size_bytes,
+        source="letterhead_asset",
+        resource_type="template_logo",
+    )
+    session.commit()
+
     logger.info(
         f"Report template logo uploaded for template {template_id}",
         extra={
@@ -2113,6 +2148,16 @@ def upload_pdf_to_specific_version(
     if not file_bytes:
         raise HTTPException(400, "Uploaded file is empty")
 
+    # Céluma 1.3 Phase 4, Block C: capture the previously-referenced PDF
+    # BEFORE repointing — this endpoint's key is deterministic, so a second
+    # upload for the same version physically overwrites the S3 bytes under
+    # the *previous* StorageObject row (R1 in storage-drift-risk-
+    # analysis.md). See storage-flow-accounting-matrix.md "legacy PDF
+    # replacement" for the delta rule this implements.
+    previous_pdf_storage = (
+        session.get(StorageObject, version.pdf_storage_id) if version.pdf_storage_id else None
+    )
+
     s3 = S3Service()
     key = (
         f"reports/{report.tenant_id}/{report.branch_id}/{report.id}/"
@@ -2130,9 +2175,23 @@ def upload_pdf_to_specific_version(
         content_type="application/pdf",
         size_bytes=info.size_bytes,
         created_by=report.created_by,
+        tenant_id=report.tenant_id,
     )
     session.add(storage)
     session.flush()
+
+    # Legacy-PDF-replacing-legacy-PDF (same sha256_hex-less category, same
+    # slot): apply only the delta so the stale row's bytes are not
+    # double-counted. An official PDF being repointed away from (sha256_hex
+    # IS NOT NULL) is a different, permanently-billable category — it is
+    # never decremented here (see billable-storage-calculation-contract.md).
+    if previous_pdf_storage is not None and previous_pdf_storage.sha256_hex is None:
+        delta = (storage.size_bytes or 0) - (previous_pdf_storage.size_bytes or 0)
+    else:
+        delta = storage.size_bytes or 0
+    UsageService.record_storage_delta(
+        session, report.tenant_id, delta, source="legacy_pdf", resource_type="report_pdf"
+    )
 
     version.pdf_storage_id = storage.id
     # Céluma 1.3 Phase 2, Block E: this manual endpoint bypasses
@@ -2211,6 +2270,15 @@ def upload_pdf_to_latest_version(
     if not file_bytes:
         raise HTTPException(400, "Uploaded file is empty")
 
+    # Céluma 1.3 Phase 4, Block C: see the equivalent comment in
+    # upload_pdf_to_specific_version above — same overwrite-under-a-stale-
+    # row risk, same delta rule.
+    previous_pdf_storage = (
+        session.get(StorageObject, latest_version.pdf_storage_id)
+        if latest_version.pdf_storage_id
+        else None
+    )
+
     s3 = S3Service()
     key = (
         f"reports/{report.tenant_id}/{report.branch_id}/{report.id}/"
@@ -2228,9 +2296,18 @@ def upload_pdf_to_latest_version(
         content_type="application/pdf",
         size_bytes=info.size_bytes,
         created_by=report.created_by,
+        tenant_id=report.tenant_id,
     )
     session.add(storage)
     session.flush()
+
+    if previous_pdf_storage is not None and previous_pdf_storage.sha256_hex is None:
+        delta = (storage.size_bytes or 0) - (previous_pdf_storage.size_bytes or 0)
+    else:
+        delta = storage.size_bytes or 0
+    UsageService.record_storage_delta(
+        session, report.tenant_id, delta, source="legacy_pdf", resource_type="report_pdf"
+    )
 
     latest_version.pdf_storage_id = storage.id
     # See the equivalent reset in upload_pdf_to_specific_version above.
