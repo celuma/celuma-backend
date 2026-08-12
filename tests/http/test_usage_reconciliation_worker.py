@@ -7,6 +7,7 @@ wiring. The loop body is driven synchronously — same approach as
 `test_notification_delivery_worker.py`, no event loop and no sleeping.
 """
 import asyncio
+import logging
 import uuid
 from datetime import datetime, timedelta
 
@@ -28,7 +29,13 @@ from app.services.usage_reconciliation_worker import (
     start_reconciliation_worker,
     stop_reconciliation_worker,
 )
-from tests.http.conftest import FakeS3Service
+from tests.http.conftest import (
+    ClientError,
+    FakeS3Service,
+    assert_no_secret_markers,
+    log_records_for,
+    rendered_log_text,
+)
 from tests.http.factories import create_tenant
 
 
@@ -256,3 +263,73 @@ class _NullSession:
 
     def exec(self, *args, **kwargs):
         raise RuntimeError("no database in the lifecycle tests")
+
+
+# ---------------------------------------------------------------------------
+# Céluma 1.3, Phase 4, Block E — logging sanitization closure
+# ---------------------------------------------------------------------------
+
+
+class TestWorkerErrorLoggingSanitization:
+    """The worker's two catch-alls (per-tenant and per-iteration) printed
+    the traceback of whatever raised. A boto3 error's message quotes the
+    bucket ARN, the object key and a presigned query string, so that
+    traceback was a leak into ordinary application logs."""
+
+    def test_a_tenant_failure_is_logged_without_the_exception_message(
+        self, session, caplog
+    ):
+        tenant = create_tenant(session)
+        _billable_object(session, tenant, size_bytes=50)
+        _init_usage(session, tenant.id)
+
+        class BrokenService(UsageReconciliationService):
+            def reconcile_tenant(self, session, tenant_id, **kwargs):
+                raise ClientError()
+
+        with caplog.at_level(logging.DEBUG):
+            result = run_reconciliation_cycle(
+                session, BrokenService(s3=FakeS3Service())
+            )
+
+        assert result.failed == 1
+        assert_no_secret_markers(rendered_log_text(caplog), "the worker's logs")
+
+        failures = log_records_for(caplog, "usage_reconciliation.tenant_failed")
+        assert failures, "the tenant failure must still be logged"
+        record = failures[0]
+        assert record.tenant_id == str(tenant.id)
+        assert record.exception_type == "ClientError"
+        assert record.error_code == "unexpected_error"
+        assert record.exc_info is None, "no traceback of an external exception"
+
+    def test_an_iteration_failure_is_logged_without_the_exception_message(
+        self, caplog
+    ):
+        """The outer catch-all: an iteration that fails as a whole — here,
+        before it can even open its session."""
+
+        def _broken_session_factory():
+            raise ClientError()
+
+        async def run():
+            worker = UsageReconciliationWorker(
+                interval_seconds=3600, session_factory=_broken_session_factory
+            )
+            await worker.start()
+            await asyncio.sleep(0.05)
+            await worker.stop()
+
+        with caplog.at_level(logging.DEBUG):
+            asyncio.run(run())
+
+        assert_no_secret_markers(
+            rendered_log_text(caplog), "the worker's iteration logs"
+        )
+
+        failures = log_records_for(caplog, "usage_reconciliation.iteration_failed")
+        assert failures, "the iteration failure must still be logged"
+        record = failures[0]
+        assert record.exception_type == "ClientError"
+        assert record.error_code == "unexpected_error"
+        assert record.exc_info is None, "no traceback of an external exception"

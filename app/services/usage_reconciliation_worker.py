@@ -23,6 +23,13 @@ A failure for one tenant never stops the others: every tenant is logged,
 attempted and contained on its own. That is why the loop catches around
 each tenant rather than around the batch.
 
+Both catch-alls log a structured, sanitized record (`error_code`,
+`exception_type`, `phase`, `tenant_id`) and never ask the logging
+framework to render the exception: an AWS error's message and traceback
+quote bucket ARNs, object keys and presigned URLs, which must not reach
+ordinary application logs (Céluma 1.3, Phase 4, Block E — see
+logging-sanitization-remediation.md).
+
 Threading: `psycopg2` and `boto3` are synchronous, so an iteration runs in
 a worker thread via `asyncio.to_thread` — the event loop is also serving
 HTTP and must never block on an S3 sweep.
@@ -47,6 +54,9 @@ from app.core.config import settings
 from app.core.db import engine
 from app.models.tenant import Tenant
 from app.services.usage_reconciliation import (
+    ERROR_UNEXPECTED,
+    PHASE_TENANT_RUN,
+    PHASE_WORKER_ITERATION,
     ConcurrentReconciliationError,
     UsageReconciliationService,
     recover_stale_runs,
@@ -121,18 +131,23 @@ def run_reconciliation_cycle(
             # reconciling this tenant. Not an error — the DB said so.
             skipped += 1
             continue
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             # One tenant's failure must not cost every later tenant its
             # cycle. `reconcile_tenant` already contains expected failures;
             # reaching here means something unanticipated, which is logged
-            # without its message (it can quote object keys) and left
-            # behind.
+            # without its message or its traceback — either can quote a
+            # bucket ARN, an object key or a presigned URL (Block E) — and
+            # left behind. The exception's type is kept: it names the fault
+            # without carrying the payload.
             failed += 1
-            logger.exception(
+            logger.error(
                 "Reconciliation failed for a tenant; continuing with the rest",
                 extra={
                     "event": "usage_reconciliation.tenant_failed",
                     "tenant_id": str(tenant_id),
+                    "error_code": ERROR_UNEXPECTED,
+                    "exception_type": type(exc).__name__,
+                    "phase": PHASE_TENANT_RUN,
                 },
             )
             session.rollback()
@@ -256,10 +271,18 @@ class UsageReconciliationWorker:
         while not self._stop_event.is_set():
             try:
                 await asyncio.to_thread(self._run_once_blocking)
-            except Exception:  # noqa: BLE001
-                logger.exception(
+            except Exception as exc:  # noqa: BLE001
+                # Same content policy as the per-tenant catch above: an
+                # iteration that fails as a whole is reported by type and
+                # code, never by rendering the exception itself.
+                logger.error(
                     "Usage reconciliation iteration failed",
-                    extra={"event": "usage_reconciliation.iteration_failed"},
+                    extra={
+                        "event": "usage_reconciliation.iteration_failed",
+                        "error_code": ERROR_UNEXPECTED,
+                        "exception_type": type(exc).__name__,
+                        "phase": PHASE_WORKER_ITERATION,
+                    },
                 )
             finally:
                 self._iterations += 1

@@ -56,6 +56,16 @@ Privacy: no log line here carries a patient name, a report title, an
 object key, a presigned URL, a bucket name or a raw AWS exception. What
 they carry is ids, counts, byte totals, a category label and a sanitized
 error code.
+
+Céluma 1.3, Phase 4, Block E closes that rule's remaining gap: no failure
+path in this module (or in the worker) may hand an exception to the
+logging framework for it to render. A boto3 error's message routinely
+quotes the bucket ARN, the object key and a presigned URL's signature, and
+a printed traceback carries that text verbatim into ordinary application
+logs — where the sanitized `error_code` column was specifically designed
+to keep it out. Failures are logged as structured records carrying
+`error_code`, `exception_type` (the class name only), `phase`, `tenant_id`
+and `reconciliation_id`. See logging-sanitization-remediation.md.
 """
 from __future__ import annotations
 
@@ -102,6 +112,19 @@ ERROR_S3_UNAVAILABLE = "s3_unavailable"
 ERROR_CONCURRENT_RECONCILIATION = "concurrent_reconciliation"
 ERROR_STALE_RUN_RECOVERED = "stale_run_recovered"
 ERROR_UNEXPECTED = "unexpected_error"
+
+# ---------------------------------------------------------------------------
+# Failure phases (Céluma 1.3, Phase 4, Block E)
+# ---------------------------------------------------------------------------
+#
+# Which half of a run failed. Logged as a structured field so an operator can
+# tell "the counter comparison broke" from "S3 was unreachable" without a
+# message to read — see logging-sanitization-remediation.md.
+
+PHASE_ACCOUNTING = "accounting"
+PHASE_S3_INTEGRITY = "s3_integrity"
+PHASE_TENANT_RUN = "tenant_run"
+PHASE_WORKER_ITERATION = "worker_iteration"
 
 # There is deliberately no `usage_not_initialized` failure code. Block D's
 # ratified policy for a missing `TenantUsage` row is *recovery*, not
@@ -376,14 +399,22 @@ class UsageReconciliationService:
 
         try:
             snapshot = self._run_accounting(session, tenant_id, repair=repair)
-        except Exception:  # noqa: BLE001
-            logger.exception(
+        except Exception as exc:  # noqa: BLE001
+            # Structured, sanitized, and deliberately *not* traceback-printing
+            # (Block E): the accounting phase calls into SQLAlchemy and
+            # StorageBillingService, and an exception from either can quote a
+            # statement, a parameter value, or — for anything that wraps an
+            # AWS error — a bucket ARN and an object key. The exception's
+            # type is safe and identifies the fault; its message is not.
+            logger.error(
                 "Usage reconciliation accounting phase failed",
                 extra={
                     "event": "usage_reconciliation.failed",
                     "tenant_id": str(tenant_id),
                     "reconciliation_id": str(run.id),
                     "error_code": ERROR_UNEXPECTED,
+                    "exception_type": type(exc).__name__,
+                    "phase": PHASE_ACCOUNTING,
                 },
             )
             return self._finish_failed(session, run, ERROR_UNEXPECTED)
@@ -404,6 +435,8 @@ class UsageReconciliationService:
                         "tenant_id": str(tenant_id),
                         "reconciliation_id": str(run.id),
                         "error_code": s3_error,
+                        "exception_type": type(exc).__name__,
+                        "phase": PHASE_S3_INTEGRITY,
                     },
                 )
 

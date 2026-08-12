@@ -341,10 +341,11 @@ app.include_router(portal_router, prefix="/api/v1")  # Portal has mixed auth req
 # — must NOT inherit reports_router's blanket Depends(current_user) above.
 app.include_router(internal_render_router, prefix="/api/v1")
 app.include_router(rbac_router, prefix="/api/v1", dependencies=[Depends(current_user)])
-# Céluma 1.3 Phase 4, Block D: the manual reconciliation trigger. Takes no
-# tenant identifier — it always reconciles the caller's own tenant — and
-# gates on admin:manage_tenant inside the handler. The general usage-read
-# API is Block E's, not this router's.
+# Céluma 1.3 Phase 4, Blocks D and E: the manual reconciliation trigger
+# (POST /tenant/usage/reconcile) and the tenant usage dashboard read
+# (GET /tenant/usage). Neither takes a tenant identifier — both always act
+# on the caller's own tenant — and both gate on admin:manage_tenant inside
+# their handler.
 app.include_router(tenant_usage_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 # Céluma 1.3 Phase 3, Block B: the notifications router resolves the bearer
 # credential itself so a request with no Authorization header gets 401 rather

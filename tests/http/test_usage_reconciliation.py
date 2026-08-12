@@ -12,6 +12,9 @@ database `tests/http/conftest.py` builds through the real migration chain)
 — the row-lock and unique-index behaviors under test do not exist in any
 mock. S3 is the in-memory `FakeS3Service`; no test reaches AWS.
 """
+import ast
+import inspect
+import logging
 import uuid
 from datetime import datetime, timedelta
 
@@ -29,7 +32,14 @@ from app.services.usage_reconciliation import (
     UsageReconciliationService,
     recover_stale_runs,
 )
-from tests.http.conftest import FakeS3Service
+from tests.http.conftest import (
+    ClientError,
+    FailingS3Service,
+    FakeS3Service,
+    assert_no_secret_markers,
+    log_records_for,
+    rendered_log_text,
+)
 from tests.http.factories import (
     auth_headers,
     create_branch,
@@ -803,3 +813,167 @@ class TestManualReconciliationEndpoint:
         session.commit()
 
         assert self._post(client, admin).status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Céluma 1.3, Phase 4, Block E — logging sanitization closure
+# ---------------------------------------------------------------------------
+
+
+class TestErrorLoggingSanitization:
+    """Block D's open finding, closed: no reconciliation path may emit
+    external exception content into ordinary logs. The database already
+    stored only sanitized codes; the logs now obey the same standard.
+
+    The markers below stand in for what a real AWS exception message
+    carries — a bucket ARN, a bucket name, an object key and a presigned
+    URL's signature.
+    """
+
+    def test_a_failing_s3_sweep_logs_no_external_exception_content(
+        self, session, caplog
+    ):
+        tenant = create_tenant(session)
+        _billable_official_pdf(session, tenant, size_bytes=100)
+        _init_usage(session, tenant.id, billable_storage_bytes=100)
+
+        with caplog.at_level(logging.DEBUG):
+            outcome = UsageReconciliationService(
+                s3=FailingS3Service()
+            ).reconcile_tenant(session, tenant.id)
+
+        assert outcome.status == "FAILED"
+        assert outcome.error_code == "s3_unavailable"
+        assert_no_secret_markers(rendered_log_text(caplog), "the reconciliation logs")
+
+        row = session.get(TenantUsageReconciliation, outcome.reconciliation_id)
+        assert row.error_code == "s3_unavailable"
+        assert_no_secret_markers(str(row.error_code), "the database row")
+
+    def test_the_failure_log_still_carries_useful_sanitized_fields(
+        self, session, caplog
+    ):
+        """Sanitized is not the same as useless: an operator still gets the
+        tenant, the run, a stable code, the failing phase and the exception
+        *type* — everything except the untrusted payload."""
+        tenant = create_tenant(session)
+        _billable_official_pdf(session, tenant, size_bytes=100)
+        _init_usage(session, tenant.id, billable_storage_bytes=100)
+
+        with caplog.at_level(logging.DEBUG):
+            outcome = UsageReconciliationService(
+                s3=FailingS3Service()
+            ).reconcile_tenant(session, tenant.id)
+
+        failures = log_records_for(caplog, "usage_reconciliation.failed")
+        assert failures, "the failure must still be logged"
+        record = failures[0]
+        assert record.error_code == "s3_unavailable"
+        assert record.exception_type == "ClientError"
+        assert record.phase == "s3_integrity"
+        assert record.tenant_id == str(tenant.id)
+        assert record.reconciliation_id == str(outcome.reconciliation_id)
+        assert record.exc_info is None, "no traceback of an external exception"
+
+    def test_access_denied_keeps_its_block_d_classification(self, session, caplog):
+        tenant = create_tenant(session)
+        _billable_official_pdf(session, tenant, size_bytes=10)
+        _init_usage(session, tenant.id, billable_storage_bytes=10)
+
+        with caplog.at_level(logging.DEBUG):
+            outcome = UsageReconciliationService(
+                s3=FailingS3Service("AccessDenied")
+            ).reconcile_tenant(session, tenant.id)
+
+        assert outcome.error_code == "s3_access_denied", "error semantics unchanged"
+        assert_no_secret_markers(rendered_log_text(caplog), "the reconciliation logs")
+
+    def test_an_unexpected_accounting_error_is_logged_without_its_message(
+        self, session, caplog, monkeypatch
+    ):
+        """The other half of the finding: the accounting phase's catch-all
+        printed the traceback of whatever raised — including its message."""
+        tenant = create_tenant(session)
+        _init_usage(session, tenant.id, billable_storage_bytes=1)
+
+        def _explode(*args, **kwargs):
+            raise ClientError()
+
+        monkeypatch.setattr(
+            "app.services.storage_billing.StorageBillingService."
+            "compute_billable_storage_bytes",
+            staticmethod(_explode),
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            outcome = UsageReconciliationService(s3=FakeS3Service()).reconcile_tenant(
+                session, tenant.id
+            )
+
+        assert outcome.status == "FAILED"
+        assert outcome.error_code == "unexpected_error"
+        assert_no_secret_markers(
+            rendered_log_text(caplog), "the accounting failure logs"
+        )
+
+        failures = log_records_for(caplog, "usage_reconciliation.failed")
+        assert any(
+            getattr(r, "exception_type", None) == "ClientError"
+            and getattr(r, "phase", None) == "accounting"
+            and r.error_code == "unexpected_error"
+            for r in failures
+        ), "the unexpected failure must stay observable, just sanitized"
+
+    def test_the_manual_endpoint_leaks_nothing_through_body_or_logs(
+        self, client, session, caplog, monkeypatch
+    ):
+        tenant = create_tenant(session)
+        admin = create_user(
+            session, tenant, email="leak-admin@t.example", roles=("admin",)
+        )
+        _billable_official_pdf(session, tenant, size_bytes=100)
+        _init_usage(session, tenant.id, billable_storage_bytes=100)
+        monkeypatch.setattr(
+            "app.services.usage_reconciliation.S3Service", FailingS3Service
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            resp = client.post(
+                "/api/v1/tenant/usage/reconcile", headers=auth_headers(admin)
+            )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "FAILED"
+        assert body["error_code"] == "s3_unavailable"
+        assert_no_secret_markers(resp.text, "the HTTP response")
+        assert_no_secret_markers(rendered_log_text(caplog), "the request's logs")
+
+    def test_no_reconciliation_module_prints_a_traceback(self):
+        """A structural guard, not a behavioral one: these two modules
+        handle exceptions whose payload may be external, so neither may
+        call `logging.Logger.exception()` or pass `exc_info` at all. Every
+        future failure path in them inherits the rule by default.
+
+        Checked over the parsed AST rather than the raw text, so prose in a
+        docstring (including this one) cannot satisfy or break it.
+        """
+        import app.services.usage_reconciliation as reconciliation_module
+        import app.services.usage_reconciliation_worker as worker_module
+
+        for module in (reconciliation_module, worker_module):
+            tree = ast.parse(inspect.getsource(module))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if isinstance(func, ast.Attribute) and func.attr == "exception":
+                    raise AssertionError(
+                        f"{module.__name__} line {node.lineno}: "
+                        "an exception-printing log call"
+                    )
+                for keyword in node.keywords:
+                    if keyword.arg == "exc_info":
+                        raise AssertionError(
+                            f"{module.__name__} line {node.lineno}: exc_info passed"
+                        )
