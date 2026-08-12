@@ -37,9 +37,20 @@ delete signature PNGs). `difference_bytes` is defined as
 counter under-counted, negative means it over-counted, zero means the two
 agree. This is a fixed convention, not a per-run choice.
 
-Counters (`objects_checked`, `orphans_found`, `missing_objects_found`) are
-NULL while a run is RUNNING and populated once it reaches SUCCEEDED. `repaired`
-records whether this run corrected `TenantUsage`; Block B never sets it.
+Counters (`objects_checked`, `orphans_found`, `missing_objects_found`,
+`metadata_mismatches_found`) are NULL while a run is RUNNING and populated
+once it reaches SUCCEEDED. `repaired` records whether this run corrected
+`TenantUsage`.
+
+One RUNNING row per tenant (Céluma 1.3, Phase 4, Block D)
+----------------------------------------------------------
+`ix_tenant_usage_reconciliation_one_running` — a partial unique index on
+`(tenant_id) WHERE status = 'RUNNING'` — makes two concurrent runs for the
+same tenant unrepresentable. A second attempt fails on the constraint and
+is surfaced as `ConcurrentReconciliationError`, not as a duplicate history
+row. A run abandoned by a process that died mid-flight is recovered by
+`recover_stale_runs()` (FAILED, `error_code = "stale_run_recovered"`),
+which is what stops that index from blocking a tenant forever.
 """
 from datetime import datetime
 from enum import Enum
@@ -107,6 +118,18 @@ class TenantUsageReconciliation(BaseModel, table=True):
     missing_objects_found: Optional[int] = Field(
         default=None,
         sa_column=Column("missing_objects_found", BigInteger, nullable=True),
+    )
+    # Céluma 1.3 Phase 4, Block D: a *distinct* integrity class from
+    # `missing_objects_found`, never an overload of it. A metadata mismatch
+    # (the S3 object's size or ETag disagrees with the StorageObject row)
+    # means the bytes are still there and the row describing them is stale;
+    # a missing object may mean clinical data loss. Collapsing the two would
+    # make the second indistinguishable from the first in every report.
+    # Block D detects and reports both, and repairs neither — see
+    # s3-integrity-reconciliation-contract.md.
+    metadata_mismatches_found: Optional[int] = Field(
+        default=None,
+        sa_column=Column("metadata_mismatches_found", BigInteger, nullable=True),
     )
 
     repaired: Optional[bool] = Field(

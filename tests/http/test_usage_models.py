@@ -241,11 +241,25 @@ class TestTenantUsageReconciliation:
 
     def test_a_tenant_may_have_many_reconciliation_rows(self, session):
         """Append-only history, not a one-row-per-tenant table like
-        TenantUsage/TenantLimits."""
+        TenantUsage/TenantLimits.
+
+        Céluma 1.3 Phase 4, Block D narrowed this in one specific way: a
+        tenant's *completed* history is still unbounded, but at most one row
+        may be RUNNING at a time (`ix_tenant_usage_reconciliation_one_running`
+        — see test_one_running_reconciliation_per_tenant below). This test
+        therefore builds three terminal rows rather than three RUNNING ones,
+        which is what a real history looks like anyway.
+        """
         tenant = create_tenant(session, name="Tenant A")
 
         for _ in range(3):
-            session.add(TenantUsageReconciliation(tenant_id=tenant.id))
+            session.add(
+                TenantUsageReconciliation(
+                    tenant_id=tenant.id,
+                    status=TenantUsageReconciliationStatus.SUCCEEDED,
+                    completed_at=datetime.utcnow(),
+                )
+            )
         session.commit()
 
         rows = session.exec(
@@ -254,6 +268,68 @@ class TestTenantUsageReconciliation:
             )
         ).all()
         assert len(rows) == 3
+
+    def test_one_running_reconciliation_per_tenant(self, session):
+        """Céluma 1.3 Phase 4, Block D: two concurrent runs for one tenant
+        are unrepresentable at the database level, so a second worker (or a
+        double-clicked admin trigger) cannot start one alongside an active
+        run."""
+        tenant = create_tenant(session, name="Tenant A")
+
+        session.add(
+            TenantUsageReconciliation(
+                tenant_id=tenant.id,
+                status=TenantUsageReconciliationStatus.RUNNING,
+            )
+        )
+        session.commit()
+
+        with pytest.raises(IntegrityError):
+            session.add(
+                TenantUsageReconciliation(
+                    tenant_id=tenant.id,
+                    status=TenantUsageReconciliationStatus.RUNNING,
+                )
+            )
+            session.commit()
+        session.rollback()
+
+    def test_a_second_tenant_may_run_concurrently(self, session):
+        """The constraint is per tenant, not global — reconciling tenant A
+        must never block tenant B."""
+        tenant_a = create_tenant(session, name="Tenant A")
+        tenant_b = create_tenant(session, name="Tenant B")
+
+        session.add(
+            TenantUsageReconciliation(
+                tenant_id=tenant_a.id,
+                status=TenantUsageReconciliationStatus.RUNNING,
+            )
+        )
+        session.add(
+            TenantUsageReconciliation(
+                tenant_id=tenant_b.id,
+                status=TenantUsageReconciliationStatus.RUNNING,
+            )
+        )
+        session.commit()
+
+    def test_negative_metadata_mismatches_are_rejected(self, session):
+        """Céluma 1.3 Phase 4, Block D's own counter, with the same
+        non-negative guarantee as the three Block B counters above."""
+        tenant = create_tenant(session, name="Tenant A")
+
+        with pytest.raises(IntegrityError):
+            session.add(
+                TenantUsageReconciliation(
+                    tenant_id=tenant.id,
+                    status=TenantUsageReconciliationStatus.SUCCEEDED,
+                    completed_at=datetime.utcnow(),
+                    metadata_mismatches_found=-1,
+                )
+            )
+            session.commit()
+        session.rollback()
 
     def test_difference_bytes_is_actual_minus_expected(self, session):
         """Ratified convention: actual - expected. Positive means the

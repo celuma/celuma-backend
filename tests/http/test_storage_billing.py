@@ -12,10 +12,7 @@ from app.models.laboratory import Order, Sample
 from app.models.report import Report, ReportVersion
 from app.models.storage import SampleImageRendition, StorageObject
 from app.models.user import AppUser
-from app.services.storage_billing import (
-    StorageBillingService,
-    resolve_object_key_from_public_url,
-)
+from app.services.storage_billing import StorageBillingService
 from tests.http.factories import (
     create_branch,
     create_letterhead,
@@ -190,38 +187,102 @@ class TestReportJsonCategory:
 
 
 class TestTenantLogoCategory:
+    """Céluma 1.3 Phase 4, Block D: the current logo is `Tenant.
+    logo_storage_id`, a real FK. These tests set the FK, not a URL —
+    before Block D they set `logo_url` and the calculation parsed it back
+    into an object key against the configured CDN prefix."""
+
     def test_only_current_logo_counts(self, session):
         tenant = create_tenant(session)
         old_logo = StorageObject(
             provider="aws", region="mx-test-1", bucket="celuma-test-bucket",
-            object_key="tenants/x/logo/old.png", content_type="image/png", size_bytes=500,
-            tenant_id=tenant.id,
+            object_key=f"tenants/{tenant.id}/logo/old.png", content_type="image/png",
+            size_bytes=500, tenant_id=tenant.id,
         )
         new_logo = StorageObject(
             provider="aws", region="mx-test-1", bucket="celuma-test-bucket",
-            object_key="tenants/x/logo/new.png", content_type="image/png", size_bytes=800,
-            tenant_id=tenant.id,
+            object_key=f"tenants/{tenant.id}/logo/new.png", content_type="image/png",
+            size_bytes=800, tenant_id=tenant.id,
         )
         session.add(old_logo)
         session.add(new_logo)
         session.commit()
 
-        base = (settings.media_public_base_url or "").rstrip("/")
-        tenant.logo_url = f"{base}/{new_logo.object_key}"
+        tenant.logo_storage_id = new_logo.id
+        tenant.logo_url = f"https://fake-cdn.example/{new_logo.object_key}"
         session.add(tenant)
         session.commit()
 
         breakdown = StorageBillingService.compute_breakdown(session, tenant.id)
         assert breakdown.tenant_logo_bytes == 800
 
-    def test_no_logo_url_means_zero(self, session):
+    def test_no_logo_means_zero(self, session):
         tenant = create_tenant(session)
         breakdown = StorageBillingService.compute_breakdown(session, tenant.id)
         assert breakdown.tenant_logo_bytes == 0
 
-    def test_resolve_object_key_from_public_url_roundtrips(self):
-        assert resolve_object_key_from_public_url(None) is None
-        assert resolve_object_key_from_public_url("") is None
+    def test_a_changed_cdn_base_url_no_longer_hides_the_logo(self, session, monkeypatch):
+        """The regression Block D closes. With URL parsing, a logo stored
+        under one `MEDIA_PUBLIC_BASE_URL` became unresolvable — and
+        therefore silently unbillable — the moment that setting changed.
+        The FK does not care what hostname the stored URL carries."""
+        tenant = create_tenant(session)
+        logo = StorageObject(
+            provider="aws", region="mx-test-1", bucket="celuma-test-bucket",
+            object_key=f"tenants/{tenant.id}/logo/current.png",
+            content_type="image/png", size_bytes=640, tenant_id=tenant.id,
+        )
+        session.add(logo)
+        session.commit()
+        tenant.logo_storage_id = logo.id
+        tenant.logo_url = f"https://cdn-a.example/{logo.object_key}"
+        session.add(tenant)
+        session.commit()
+
+        monkeypatch.setattr(settings, "media_public_base_url", "https://cdn-b.example")
+
+        breakdown = StorageBillingService.compute_breakdown(session, tenant.id)
+        assert breakdown.tenant_logo_bytes == 640
+
+    def test_a_cross_tenant_logo_reference_is_never_billed(self, session):
+        """A FK guarantees the row exists, not that it belongs to this
+        tenant. An object owned by another tenant is billed to neither."""
+        tenant_a = create_tenant(session, name="A")
+        tenant_b = create_tenant(session, name="B")
+        b_logo = StorageObject(
+            provider="aws", region="mx-test-1", bucket="celuma-test-bucket",
+            object_key=f"tenants/{tenant_b.id}/logo/b.png", content_type="image/png",
+            size_bytes=700, tenant_id=tenant_b.id,
+        )
+        session.add(b_logo)
+        session.commit()
+
+        tenant_a.logo_storage_id = b_logo.id
+        session.add(tenant_a)
+        session.commit()
+
+        assert StorageBillingService.compute_breakdown(session, tenant_a.id).tenant_logo_bytes == 0
+        assert StorageBillingService.compute_breakdown(session, tenant_b.id).tenant_logo_bytes == 0
+
+    def test_a_legacy_logo_url_without_the_fk_counts_zero(self, session):
+        """`logo_url` set with no `logo_storage_id` is the unresolved legacy
+        case the Block D migration deliberately leaves NULL. It is not
+        billed (nothing identifies which object it is) and is reported by
+        reconciliation instead of being guessed at."""
+        tenant = create_tenant(session)
+        orphaned_logo = StorageObject(
+            provider="aws", region="mx-test-1", bucket="celuma-test-bucket",
+            object_key=f"tenants/{tenant.id}/logo/unknown.png",
+            content_type="image/png", size_bytes=900, tenant_id=tenant.id,
+        )
+        session.add(orphaned_logo)
+        session.commit()
+        tenant.logo_url = "https://some-old-cdn.example/tenants/who/logo/unknown.png"
+        session.add(tenant)
+        session.commit()
+
+        breakdown = StorageBillingService.compute_breakdown(session, tenant.id)
+        assert breakdown.tenant_logo_bytes == 0
 
 
 class TestLetterheadAssetCategory:

@@ -69,6 +69,39 @@ frozen SQL below the sole source of truth for what this revision computes,
 with nothing left to accidentally re-resolve against a model class that
 could itself change shape later.
 
+Environment independence — the D0 correction (Céluma 1.3, Phase 4, Block D)
+---------------------------------------------------------------------------
+Removing the service imports was necessary but not sufficient. The
+tenant-logo half of the baseline still read *mutable environment settings*
+(`MEDIA_PUBLIC_BASE_URL`, `S3_BUCKET_NAME`, `AWS_REGION`) to rebuild the
+public-URL prefix a stored `Tenant.logo_url` was expected to start with.
+That made the revision's result depend on the environment it happened to
+run in: the same DB rows plus the same migration source could produce a
+different `TenantUsage` baseline in an environment whose CDN hostname had
+changed, or in one that had none configured at all. Historical determinism
+means the same rows and the same source always produce the same result —
+including across environments, not merely across time in one of them.
+
+The tenant-logo CTE below therefore resolves the current logo from
+persisted DB values only:
+
+    tenant.logo_url          (as stored, whenever it was stored)
+    storage_object.tenant_id (relational ownership — never inferred from a key)
+    storage_object.object_key
+
+A candidate must belong to the tenant, fall in the tenant-logo key family
+(`tenants/%/logo/%`), and have an `object_key` the persisted URL actually
+ends with — `'/' || object_key`, after any query string or fragment is
+stripped. Whatever hostname produced the stored URL, the same row resolves.
+Ambiguity is not guessed: a tenant whose URL matches two or more candidate
+rows contributes zero logo bytes rather than an arbitrary pick (`HAVING
+COUNT(*) = 1`). Block D's own migration (`v1_12_0`) backfills
+`Tenant.logo_storage_id` with exactly this rule, so the frozen historical
+baseline and the new canonical FK agree by construction.
+
+This is the last change this revision will ever receive: after the D0
+correction it is frozen.
+
 `downgrade()` is a deliberate no-op — this is a pure data migration with no
 schema to revert, and reverting the data would be actively destructive:
 tenant_id backfill cannot distinguish "we set this" from "was already set"
@@ -79,7 +112,6 @@ historical baseline from scratch would UNDER-count relative to whatever
 was actually accumulated). Unchanged by the remediation — see
 database-migration-notes.md §"Why downgrade is a no-op".
 """
-import os
 from typing import Sequence, Union
 
 from alembic import op
@@ -158,10 +190,12 @@ _BACKFILL_LIVE_SIGNATURES = """
 #     excluded by construction (they are no longer reachable via the FK).
 #   - Report JSON bodies: every report_version.json_storage_id, current or
 #     historical — permanent, one row per version.
-#   - Tenant logo: only the tenant's CURRENT logo, resolved by recovering
-#     the S3 object key from Tenant.logo_url (the exact inverse of
-#     S3Service.object_public_url()) and matching it against
-#     storage_object.object_key for that tenant.
+#   - Tenant logo: only the tenant's CURRENT logo, resolved from persisted
+#     DB values alone — the tenant's own storage_object rows in the
+#     tenant-logo key family whose object_key the stored Tenant.logo_url
+#     ends with. No environment setting is read (see "Environment
+#     independence" in the module docstring); an ambiguous match counts
+#     zero rather than guessing.
 #   - Letterhead/report-template assets: every StorageObject whose
 #     object_key falls under the report-letterheads/ or report-templates/
 #     prefix, for that tenant — billable once persistently stored,
@@ -208,13 +242,23 @@ _BASELINE_INSERT = """
         JOIN storage_object so ON so.id = rv.json_storage_id
         GROUP BY r.tenant_id
     ),
-    tenant_logo AS (
+    tenant_logo_candidate AS (
         SELECT t.id AS tenant_id, so.size_bytes AS bytes
         FROM tenant t
         JOIN storage_object so
             ON so.tenant_id = t.id
-           AND t.logo_url = :logo_url_prefix || so.object_key
+           AND so.object_key LIKE 'tenants/%/logo/%'
+           AND right(
+                   split_part(split_part(t.logo_url, '#', 1), '?', 1),
+                   length(so.object_key) + 1
+               ) = '/' || so.object_key
         WHERE t.logo_url IS NOT NULL
+    ),
+    tenant_logo AS (
+        SELECT tenant_id, MIN(bytes) AS bytes
+        FROM tenant_logo_candidate
+        GROUP BY tenant_id
+        HAVING COUNT(*) = 1
     ),
     letterhead_asset AS (
         SELECT tenant_id, SUM(size_bytes) AS bytes
@@ -258,28 +302,6 @@ _BASELINE_INSERT = """
 """
 
 
-def _tenant_logo_url_prefix() -> str:
-    """The exact prefix a tenant's CURRENT-logo public URL starts with,
-    frozen-reimplemented from `S3Service.object_public_url()`'s own logic
-    (app/services/s3.py) at authoring time — not imported from it, so a
-    future change to that method cannot retroactively change what this
-    already-released revision computed.
-
-    Reads the same environment variables `app.core.config.Settings` reads
-    (`MEDIA_PUBLIC_BASE_URL`, `S3_BUCKET_NAME`, `AWS_REGION`) directly via
-    `os.environ`, the same technique `alembic/env.py` already uses for
-    `DATABASE_URL` — this is reading configuration, not calling business
-    logic, so it does not reintroduce the dependency this remediation
-    removes.
-    """
-    media_base = os.environ.get("MEDIA_PUBLIC_BASE_URL")
-    if media_base:
-        return media_base.rstrip("/") + "/"
-    bucket = os.environ.get("S3_BUCKET_NAME") or ""
-    region = os.environ.get("AWS_REGION") or "mx-central-1"
-    return f"https://{bucket}.s3.{region}.amazonaws.com/"
-
-
 def upgrade() -> None:
     # ------------------------------------------------------------------
     # 1. Historical tenant_id backfill
@@ -293,11 +315,7 @@ def upgrade() -> None:
     # 2. TenantUsage initialization — one row per tenant, missing rows
     #    only, frozen SQL baseline (see module docstring).
     # ------------------------------------------------------------------
-    bind = op.get_bind()
-    bind.execute(
-        text(_BASELINE_INSERT),
-        {"logo_url_prefix": _tenant_logo_url_prefix()},
-    )
+    op.get_bind().execute(text(_BASELINE_INSERT))
 
 
 def downgrade() -> None:

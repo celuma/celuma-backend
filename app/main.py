@@ -38,7 +38,16 @@ from app.core.config import settings
 # file has no access to the claim primitive at all — the worker owns the queue.
 # `test_main_cannot_drive_the_queue_itself` asserts that from this source, so
 # an HTTP handler added here could not reach into the queue by accident.
+from app.api.v1.tenant_usage import router as tenant_usage_router
 from app.services.notification_delivery_worker import start_worker, stop_worker
+# Céluma 1.3 Phase 4, Block D: the usage reconciliation worker. A second,
+# separate in-process poller — reconciliation and email delivery share a
+# process, not a loop, so a failure or a slow cycle in one never delays the
+# other. Disabled by default (USAGE_RECONCILIATION_ENABLED).
+from app.services.usage_reconciliation_worker import (
+    start_reconciliation_worker,
+    stop_reconciliation_worker,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -66,12 +75,16 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("🚀 Celuma API starting up...")
     await start_worker()
+    await start_reconciliation_worker()
     try:
         yield
     finally:
         # In a `finally` so a failure anywhere in shutdown still stops the
-        # poller: a worker left running against a closing process is a worker
-        # holding claimed rows nothing will resolve.
+        # pollers: a worker left running against a closing process is a
+        # worker holding claimed rows nothing will resolve. Reconciliation
+        # is stopped first and independently — its own `stop()` never
+        # raises, so the delivery worker is stopped either way.
+        await stop_reconciliation_worker()
         await stop_worker()
         logger.info("🛑 Celuma API shutting down...")
 
@@ -328,6 +341,11 @@ app.include_router(portal_router, prefix="/api/v1")  # Portal has mixed auth req
 # — must NOT inherit reports_router's blanket Depends(current_user) above.
 app.include_router(internal_render_router, prefix="/api/v1")
 app.include_router(rbac_router, prefix="/api/v1", dependencies=[Depends(current_user)])
+# Céluma 1.3 Phase 4, Block D: the manual reconciliation trigger. Takes no
+# tenant identifier — it always reconciles the caller's own tenant — and
+# gates on admin:manage_tenant inside the handler. The general usage-read
+# API is Block E's, not this router's.
+app.include_router(tenant_usage_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 # Céluma 1.3 Phase 3, Block B: the notifications router resolves the bearer
 # credential itself so a request with no Authorization header gets 401 rather
 # than the shared scheme's 403 — it must NOT inherit a blanket

@@ -84,12 +84,19 @@ RELEASE_REVISION = "v1_3_0"
 USAGE_DOMAIN_REVISION = "v1_10_0"
 
 #: Céluma 1.3, Phase 4, Block C — storage attribution & usage
-#: initialization. Built directly on top of v1_10_0 and the current alembic
-#: head. Data-only (no new table/column) — see the revision's own module
-#: docstring for why it still deserves a dedicated id rather than being
-#: folded into v1_10_0 (that revision is closed, per the master spec's
-#: "do not rewrite v1_10_0/v1_3_0" instruction).
+#: initialization. Built directly on top of v1_10_0. No longer the head —
+#: Block D adds one more revision on top. Data-only (no new table/column) —
+#: see the revision's own module docstring for why it still deserves a
+#: dedicated id rather than being folded into v1_10_0 (that revision is
+#: closed, per the master spec's "do not rewrite v1_10_0/v1_3_0"
+#: instruction).
 STORAGE_ATTRIBUTION_REVISION = "v1_11_0"
+
+#: Céluma 1.3, Phase 4, Block D — DB-scoped tenant logo (`tenant.
+#: logo_storage_id` + backfill) and reconciliation hardening
+#: (`tenant_usage_reconciliation.metadata_mismatches_found`, one-RUNNING-
+#: per-tenant partial unique index). The current alembic head.
+BLOCK_D_REVISION = "v1_12_0"
 
 #: Revision ids that existed only on the unreleased `celuma-1.3` branch and
 #: were folded into RELEASE_REVISION. Nothing executable may reference them.
@@ -186,15 +193,14 @@ class TestChainShape:
     def test_exactly_one_head(self):
         assert len(_script_directory().get_heads()) == 1
 
-    def test_head_is_the_storage_attribution_revision(self):
-        """Céluma 1.3, Phase 4, Block C: the head moves forward again, from
-        the usage-domain revision to the storage-attribution revision.
-        Replaces the Block B-era `test_head_is_the_usage_domain_revision`
-        — that assertion was true only while v1_10_0 was the newest
-        revision, which stopped being the case the moment Block C's
-        migration landed.
+    def test_head_is_the_block_d_revision(self):
+        """Céluma 1.3, Phase 4, Block D: the head moves forward again, from
+        the storage-attribution revision to Block D's. Same reasoning as
+        every previous move of this assertion — it names the newest
+        revision, and is expected to be updated (not deleted) by the next
+        block that adds one.
         """
-        assert _script_directory().get_current_head() == STORAGE_ATTRIBUTION_REVISION
+        assert _script_directory().get_current_head() == BLOCK_D_REVISION
 
     def test_release_revision_sits_directly_on_the_last_pre_1_3_revision(self):
         revision = _script_directory().get_revision(RELEASE_REVISION)
@@ -214,10 +220,18 @@ class TestChainShape:
         revision = _script_directory().get_revision(STORAGE_ATTRIBUTION_REVISION)
         assert revision.down_revision == USAGE_DOMAIN_REVISION
 
+    def test_block_d_revision_sits_directly_on_the_storage_attribution_revision(self):
+        """Block D is additive on top of the closed Block C revision: after
+        its own D0 determinism correction, `v1_11_0` is frozen and
+        `v1_12_0` is its only child."""
+        revision = _script_directory().get_revision(BLOCK_D_REVISION)
+        assert revision.down_revision == STORAGE_ATTRIBUTION_REVISION
+
     def test_chain_is_linear_from_base_to_head(self):
         script = _script_directory()
         revisions = list(script.walk_revisions())
         assert [r.revision for r in revisions] == [
+            BLOCK_D_REVISION,
             STORAGE_ATTRIBUTION_REVISION,
             USAGE_DOMAIN_REVISION,
             RELEASE_REVISION,
@@ -332,18 +346,56 @@ class TestMigrationHistoricalDeterminism:
 
     def test_v1_11_0_only_imports_stable_primitives(self):
         """Whitelist, not blacklist — proves the migration's import surface
-        is exactly the small, stable set this remediation intends (`os`,
-        `typing`, `alembic.op`, `sqlalchemy.text`), not merely "no
-        app.services", which a differently-shaped business-logic import
-        (e.g. a direct app.models import performing hidden computation)
-        could technically satisfy while still reintroducing drift risk."""
+        is exactly the small, stable set intended (`typing`, `alembic.op`,
+        `sqlalchemy.text`), not merely "no app.services", which a
+        differently-shaped business-logic import (e.g. a direct app.models
+        import performing hidden computation) could technically satisfy
+        while still reintroducing drift risk.
+
+        `os` was on this list until Block D's D0 correction, because the
+        tenant-logo baseline read `os.environ` for the CDN prefix. It is
+        deliberately no longer allowed: that read is exactly what made the
+        revision environment-dependent.
+        """
         path = VERSIONS_DIR / "v1_11_0_block_c_storage_attribution.py"
         modules = self._imported_modules(path)
-        allowed_prefixes = ("os", "typing", "alembic", "sqlalchemy")
+        allowed_prefixes = ("typing", "alembic", "sqlalchemy")
         offenders = {
             m for m in modules if not any(m == p or m.startswith(p + ".") for p in allowed_prefixes)
         }
         assert offenders == set(), f"unexpected import surface: {offenders}"
+
+    @pytest.mark.parametrize(
+        "setting",
+        ["MEDIA_PUBLIC_BASE_URL", "S3_BUCKET_NAME", "AWS_REGION", "os.environ", "getenv"],
+    )
+    def test_v1_11_0_reads_no_environment_configuration(self, setting):
+        """Céluma 1.3, Phase 4, Block D (D0). Historical determinism is not
+        only "does not import evolvable code" — it is also "does not read
+        mutable configuration". Until D0 this revision rebuilt the public-URL
+        prefix from `MEDIA_PUBLIC_BASE_URL`/`S3_BUCKET_NAME`/`AWS_REGION` to
+        interpret a persisted `Tenant.logo_url`, so the same rows and the
+        same source could produce a different baseline in an environment
+        whose CDN hostname had changed. The current-logo resolution is now
+        purely relational, and this guard keeps those settings from
+        returning to it.
+
+        Runs against executable source only — the module docstring
+        legitimately *discusses* these names.
+        """
+        source = _executable_source(VERSIONS_DIR / "v1_11_0_block_c_storage_attribution.py")
+        assert setting not in source
+
+    def test_no_migration_file_reads_the_cdn_base_url(self):
+        """The standing rule D0 establishes for every revision, not only
+        v1_11_0: a migration's result must not depend on which CDN happens
+        to be configured when it runs."""
+        offenders = [
+            path.name
+            for path in sorted(VERSIONS_DIR.glob("*.py"))
+            if "MEDIA_PUBLIC_BASE_URL" in _executable_source(path)
+        ]
+        assert offenders == []
 
 
 def _admin_engine():
@@ -353,15 +405,33 @@ def _admin_engine():
     )
 
 
-def _alembic(target: str, *, command: str = "upgrade") -> None:
-    url = make_url(settings.database_url).set(database=_MIGRATION_TEST_DB)
+def _alembic(
+    target: str,
+    *,
+    command: str = "upgrade",
+    database: str = _MIGRATION_TEST_DB,
+    env: dict | None = None,
+) -> None:
+    """Run one alembic command against an ephemeral database.
+
+    `database` and `env` exist for Céluma 1.3 Phase 4, Block D's
+    historical-determinism proof, which runs the same revision against two
+    separate databases under deliberately different `MEDIA_PUBLIC_BASE_URL`/
+    `S3_BUCKET_NAME`/`AWS_REGION` values and asserts the results are
+    identical.
+    """
+    url = make_url(settings.database_url).set(database=database)
     subprocess.run(
         ["alembic", command, target],
         cwd=str(BACKEND_ROOT),
         check=True,
         capture_output=True,
         text=True,
-        env={**os.environ, "DATABASE_URL": url.render_as_string(hide_password=False)},
+        env={
+            **os.environ,
+            **(env or {}),
+            "DATABASE_URL": url.render_as_string(hide_password=False),
+        },
     )
 
 
@@ -622,7 +692,7 @@ class TestNotificationDomain:
         _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
         _alembic("head")
 
-        assert _current_revision(migration_db) == STORAGE_ATTRIBUTION_REVISION
+        assert _current_revision(migration_db) == BLOCK_D_REVISION
         assert NOTIFICATION_TABLES <= set(inspect(migration_db).get_table_names())
 
     def test_unique_constraints_exist(self, migration_db):
@@ -936,7 +1006,7 @@ class TestUsageDomainMigration:
         _alembic(RELEASE_REVISION, command="downgrade")
         _alembic("head")
 
-        assert _current_revision(migration_db) == STORAGE_ATTRIBUTION_REVISION
+        assert _current_revision(migration_db) == BLOCK_D_REVISION
         assert USAGE_DOMAIN_TABLES <= set(inspect(migration_db).get_table_names())
 
     def test_downgrade_removes_the_app_user_index(self, migration_db):
@@ -1659,6 +1729,481 @@ class TestMigrationRuntimeParity:
         assert usage[tenant_a] == expected_a
         assert usage[tenant_b] == 0
         assert usage[tenant_c] == 42
+
+
+class TestV1_11_0EnvironmentIndependence:
+    """Céluma 1.3, Phase 4, Block D (D0) — the DB-backed half of the
+    historical-determinism guarantee.
+
+    The structural guard above proves the revision does not *read* the CDN
+    settings. This proves the consequence: the same rows, migrated under two
+    deliberately different environments, produce byte-identical
+    `TenantUsage` baselines — including for a tenant whose `logo_url` was
+    persisted under a CDN hostname neither environment is configured with.
+
+    Two real databases, seeded with the same ids and the same values, each
+    migrated in its own subprocess with its own environment.
+    """
+
+    ENV_A = {
+        "MEDIA_PUBLIC_BASE_URL": "https://cdn-alpha.example",
+        "S3_BUCKET_NAME": "bucket-alpha",
+        "AWS_REGION": "us-east-1",
+    }
+    ENV_B = {
+        "MEDIA_PUBLIC_BASE_URL": "https://cdn-beta.example",
+        "S3_BUCKET_NAME": "bucket-beta",
+        "AWS_REGION": "eu-west-1",
+    }
+
+    #: The hostname the tenant's logo_url was persisted under — a third
+    #: value, matching neither environment. Under the pre-D0 logic this
+    #: produced a logo contribution of zero in both.
+    PERSISTED_CDN = "https://cdn-at-upload-time.example"
+
+    def _run(self, database: str, env: dict, tenant_id: uuid.UUID) -> int:
+        admin = _admin_engine()
+        with admin.connect() as conn:
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)'))
+            conn.execute(text(f'CREATE DATABASE "{database}"'))
+        admin.dispose()
+
+        engine = create_engine(make_url(settings.database_url).set(database=database))
+        try:
+            _alembic(USAGE_DOMAIN_REVISION, database=database, env=env)
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO tenant (id, name, created_at) "
+                        "VALUES (:id, 'Determinism', now())"
+                    ),
+                    {"id": tenant_id},
+                )
+                logo_key = f"tenants/{tenant_id}/logo/current.png"
+                _seed_storage_object(
+                    conn,
+                    key=logo_key,
+                    size_bytes=2500,
+                    tenant_id=tenant_id,
+                    content_type="image/png",
+                )
+                conn.execute(
+                    text("UPDATE tenant SET logo_url = :url WHERE id = :id"),
+                    {"url": f"{self.PERSISTED_CDN}/{logo_key}", "id": tenant_id},
+                )
+
+            _alembic(STORAGE_ATTRIBUTION_REVISION, database=database, env=env)
+            with engine.connect() as conn:
+                return conn.execute(
+                    text(
+                        "SELECT billable_storage_bytes FROM tenant_usage "
+                        "WHERE tenant_id = :id"
+                    ),
+                    {"id": tenant_id},
+                ).scalar_one()
+        finally:
+            engine.dispose()
+            admin = _admin_engine()
+            with admin.connect() as conn:
+                conn.execute(text(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)'))
+            admin.dispose()
+
+    def test_the_same_rows_produce_the_same_baseline_under_different_cdns(self):
+        tenant_id = uuid.uuid4()
+        baseline_a = self._run("celuma_determinism_a", self.ENV_A, tenant_id)
+        baseline_b = self._run("celuma_determinism_b", self.ENV_B, tenant_id)
+
+        assert baseline_a == baseline_b
+        # And the shared value is the *correct* one: the logo resolves from
+        # DB state alone, so it is counted even though the URL's hostname
+        # matches neither environment's configuration.
+        assert baseline_a == 2500
+
+
+class TestTenantLogoBackfill:
+    """Céluma 1.3, Phase 4, Block D — `v1_12_0`'s `tenant.logo_storage_id`
+    column and its DB-scoped backfill."""
+
+    def _logo_storage_id(self, migration_db, tenant_id):
+        with migration_db.connect() as conn:
+            return conn.execute(
+                text("SELECT logo_storage_id FROM tenant WHERE id = :id"),
+                {"id": tenant_id},
+            ).scalar_one()
+
+    def test_the_column_and_foreign_key_exist(self, migration_db):
+        _alembic("head")
+        inspector = inspect(migration_db)
+        columns = {c["name"]: c for c in inspector.get_columns("tenant")}
+        assert "logo_storage_id" in columns
+        assert columns["logo_storage_id"]["nullable"] is True, (
+            "unresolved legacy rows must be representable"
+        )
+
+        fks = [
+            fk
+            for fk in inspector.get_foreign_keys("tenant")
+            if fk["constrained_columns"] == ["logo_storage_id"]
+        ]
+        assert len(fks) == 1
+        assert fks[0]["referred_table"] == "storage_object"
+
+    def test_the_foreign_key_has_no_destructive_cascade(self, migration_db):
+        _alembic("head")
+        with migration_db.connect() as conn:
+            rule = conn.execute(
+                text(
+                    "SELECT confdeltype FROM pg_constraint "
+                    "WHERE conname = 'fk_tenant_logo_storage_id_storage_object'"
+                )
+            ).scalar_one()
+        # 'a' = NO ACTION. Deleting a StorageObject must never silently
+        # delete a tenant or blank its identity.
+        assert rule == "a"
+
+    def test_a_tenant_with_no_logo_is_left_null(self, migration_db):
+        _alembic(STORAGE_ATTRIBUTION_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+
+        _alembic("head")
+
+        assert self._logo_storage_id(migration_db, tenant_id) is None
+
+    def test_a_resolvable_logo_is_backfilled(self, migration_db):
+        _alembic(STORAGE_ATTRIBUTION_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            key = f"tenants/{tenant_id}/logo/current.png"
+            storage_id = _seed_storage_object(
+                conn, key=key, size_bytes=1500, tenant_id=tenant_id,
+                content_type="image/png",
+            )
+            conn.execute(
+                text("UPDATE tenant SET logo_url = :url WHERE id = :id"),
+                {"url": f"https://cdn.example/{key}", "id": tenant_id},
+            )
+
+        _alembic("head")
+
+        assert self._logo_storage_id(migration_db, tenant_id) == storage_id
+
+    def test_a_logo_stored_under_a_different_cdn_is_still_backfilled(self, migration_db):
+        """The backfill reads persisted DB state, never the currently
+        configured CDN — so a URL written under a hostname nothing in this
+        environment knows about still resolves."""
+        _alembic(STORAGE_ATTRIBUTION_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            key = f"tenants/{tenant_id}/logo/legacy.png"
+            storage_id = _seed_storage_object(
+                conn, key=key, size_bytes=800, tenant_id=tenant_id,
+                content_type="image/png",
+            )
+            conn.execute(
+                text("UPDATE tenant SET logo_url = :url WHERE id = :id"),
+                {"url": f"https://an-old-cdn.example/{key}", "id": tenant_id},
+            )
+
+        _alembic(
+            "head",
+            env={"MEDIA_PUBLIC_BASE_URL": "https://a-completely-different-cdn.example"},
+        )
+
+        assert self._logo_storage_id(migration_db, tenant_id) == storage_id
+
+    def test_a_url_with_a_query_string_still_resolves(self, migration_db):
+        _alembic(STORAGE_ATTRIBUTION_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            key = f"tenants/{tenant_id}/logo/cached.png"
+            storage_id = _seed_storage_object(
+                conn, key=key, size_bytes=400, tenant_id=tenant_id,
+                content_type="image/png",
+            )
+            conn.execute(
+                text("UPDATE tenant SET logo_url = :url WHERE id = :id"),
+                {"url": f"https://cdn.example/{key}?v=3#frag", "id": tenant_id},
+            )
+
+        _alembic("head")
+
+        assert self._logo_storage_id(migration_db, tenant_id) == storage_id
+
+    def test_another_tenants_object_is_never_selected(self, migration_db):
+        """Ownership comes from `storage_object.tenant_id`, not from the
+        key string — so a key that happens to name another tenant cannot
+        pull that tenant's object into this one's logo FK."""
+        _alembic(STORAGE_ATTRIBUTION_REVISION)
+        with migration_db.begin() as conn:
+            tenant_a = _seed_tenant(conn)
+            tenant_b = _seed_tenant(conn)
+            key = f"tenants/{tenant_b}/logo/b.png"
+            _seed_storage_object(
+                conn, key=key, size_bytes=900, tenant_id=tenant_b,
+                content_type="image/png",
+            )
+            # Tenant A's stored URL points at tenant B's object.
+            conn.execute(
+                text("UPDATE tenant SET logo_url = :url WHERE id = :id"),
+                {"url": f"https://cdn.example/{key}", "id": tenant_a},
+            )
+
+        _alembic("head")
+
+        assert self._logo_storage_id(migration_db, tenant_a) is None
+        assert self._logo_storage_id(migration_db, tenant_b) is None
+
+    def test_an_ambiguous_match_is_left_null(self, migration_db):
+        """Two of the tenant's own rows carrying the same object_key both
+        satisfy the persisted URL. The migration does not pick one."""
+        _alembic(STORAGE_ATTRIBUTION_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            key = f"tenants/{tenant_id}/logo/dup.png"
+            _seed_storage_object(
+                conn, key=key, size_bytes=100, tenant_id=tenant_id,
+                content_type="image/png",
+            )
+            _seed_storage_object(
+                conn, key=key, size_bytes=200, tenant_id=tenant_id,
+                content_type="image/png",
+            )
+            conn.execute(
+                text("UPDATE tenant SET logo_url = :url WHERE id = :id"),
+                {"url": f"https://cdn.example/{key}", "id": tenant_id},
+            )
+
+        _alembic("head")
+
+        assert self._logo_storage_id(migration_db, tenant_id) is None
+
+    def test_a_superseded_logo_object_is_not_selected(self, migration_db):
+        _alembic(STORAGE_ATTRIBUTION_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            old_key = f"tenants/{tenant_id}/logo/old.png"
+            new_key = f"tenants/{tenant_id}/logo/new.png"
+            _seed_storage_object(
+                conn, key=old_key, size_bytes=100, tenant_id=tenant_id,
+                content_type="image/png",
+            )
+            new_id = _seed_storage_object(
+                conn, key=new_key, size_bytes=200, tenant_id=tenant_id,
+                content_type="image/png",
+            )
+            conn.execute(
+                text("UPDATE tenant SET logo_url = :url WHERE id = :id"),
+                {"url": f"https://cdn.example/{new_key}", "id": tenant_id},
+            )
+
+        _alembic("head")
+
+        assert self._logo_storage_id(migration_db, tenant_id) == new_id
+
+    def test_downgrade_then_re_upgrade_restores_the_backfill(self, migration_db):
+        _alembic(STORAGE_ATTRIBUTION_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            key = f"tenants/{tenant_id}/logo/x.png"
+            storage_id = _seed_storage_object(
+                conn, key=key, size_bytes=321, tenant_id=tenant_id,
+                content_type="image/png",
+            )
+            conn.execute(
+                text("UPDATE tenant SET logo_url = :url WHERE id = :id"),
+                {"url": f"https://cdn.example/{key}", "id": tenant_id},
+            )
+
+        _alembic("head")
+        assert self._logo_storage_id(migration_db, tenant_id) == storage_id
+
+        _alembic(STORAGE_ATTRIBUTION_REVISION, command="downgrade")
+        assert "logo_storage_id" not in {
+            c["name"] for c in inspect(migration_db).get_columns("tenant")
+        }
+
+        _alembic("head")
+        assert self._logo_storage_id(migration_db, tenant_id) == storage_id
+
+    def test_the_backfill_agrees_with_the_frozen_v1_11_0_baseline(self, migration_db):
+        """The two must resolve the same object: `v1_11_0` bills the logo it
+        resolves, `v1_12_0` records the logo it resolves, and the runtime
+        calculation then reads the FK. If they disagreed, a tenant's
+        initialized baseline would be permanently out of step with what
+        `StorageBillingService` computes on the very next reconciliation."""
+        from sqlmodel import Session as SQLModelSession
+
+        from app.services.storage_billing import StorageBillingService
+
+        # Seeded *before* v1_11_0 runs, so the frozen historical baseline is
+        # computed over this fixture — the whole point of the comparison.
+        _alembic(USAGE_DOMAIN_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            key = f"tenants/{tenant_id}/logo/agreed.png"
+            _seed_storage_object(
+                conn, key=f"tenants/{tenant_id}/logo/superseded.png",
+                size_bytes=9999, tenant_id=tenant_id, content_type="image/png",
+            )
+            _seed_storage_object(
+                conn, key=key, size_bytes=2500, tenant_id=tenant_id,
+                content_type="image/png",
+            )
+            conn.execute(
+                text("UPDATE tenant SET logo_url = :url WHERE id = :id"),
+                {"url": f"https://whatever-cdn.example/{key}", "id": tenant_id},
+            )
+
+        _alembic("head")
+
+        with migration_db.connect() as conn:
+            baseline = conn.execute(
+                text(
+                    "SELECT billable_storage_bytes FROM tenant_usage "
+                    "WHERE tenant_id = :id"
+                ),
+                {"id": tenant_id},
+            ).scalar_one()
+        with SQLModelSession(migration_db) as session:
+            runtime = StorageBillingService.compute_billable_storage_bytes(
+                session, tenant_id
+            )
+        assert baseline == runtime == 2500
+
+
+class TestReconciliationHardeningMigration:
+    """Céluma 1.3, Phase 4, Block D — `v1_12_0`'s changes to
+    `tenant_usage_reconciliation`."""
+
+    def _insert_run(self, conn, tenant_id, *, status, started_at="now()", **columns):
+        run_id = uuid.uuid4()
+        extra_names = "".join(f", {name}" for name in columns)
+        extra_values = "".join(f", :{name}" for name in columns)
+        completed = "NULL" if status == "RUNNING" else "now()"
+        conn.execute(
+            text(
+                f"INSERT INTO tenant_usage_reconciliation "
+                f"(id, tenant_id, status, started_at, completed_at{extra_names}) "
+                f"VALUES (:id, :tenant_id, :status, {started_at}, {completed}"
+                f"{extra_values})"
+            ),
+            {"id": run_id, "tenant_id": tenant_id, "status": status, **columns},
+        )
+        return run_id
+
+    def test_metadata_mismatches_column_exists_and_is_nullable(self, migration_db):
+        _alembic("head")
+        columns = {
+            c["name"]: c
+            for c in inspect(migration_db).get_columns("tenant_usage_reconciliation")
+        }
+        assert "metadata_mismatches_found" in columns
+        assert columns["metadata_mismatches_found"]["nullable"] is True
+
+    def test_metadata_mismatches_rejects_a_negative_value(self, migration_db):
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+        try:
+            with migration_db.begin() as conn:
+                self._insert_run(
+                    conn,
+                    tenant_id,
+                    status="SUCCEEDED",
+                    metadata_mismatches_found=-1,
+                )
+            raise AssertionError("a negative mismatch count must be rejected")
+        except AssertionError:
+            raise
+        except Exception as exc:
+            assert "metadata_mismatches" in str(exc)
+
+    def test_only_one_running_run_per_tenant_is_representable(self, migration_db):
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            self._insert_run(conn, tenant_id, status="RUNNING")
+
+        try:
+            with migration_db.begin() as conn:
+                self._insert_run(conn, tenant_id, status="RUNNING")
+            raise AssertionError("a second RUNNING run must be rejected")
+        except AssertionError:
+            raise
+        except Exception as exc:
+            assert "ix_tenant_usage_reconciliation_one_running" in str(exc)
+
+    def test_terminal_runs_are_unconstrained(self, migration_db):
+        """History is append-only and unbounded — the index constrains only
+        the *active* run, never how many completed ones a tenant has."""
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            self._insert_run(conn, tenant_id, status="SUCCEEDED")
+            self._insert_run(conn, tenant_id, status="SUCCEEDED")
+            self._insert_run(conn, tenant_id, status="FAILED")
+            self._insert_run(conn, tenant_id, status="RUNNING")
+
+        with migration_db.connect() as conn:
+            total = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM tenant_usage_reconciliation "
+                    "WHERE tenant_id = :id"
+                ),
+                {"id": tenant_id},
+            ).scalar_one()
+        assert total == 4
+
+    def test_two_tenants_may_each_have_a_running_run(self, migration_db):
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_a = _seed_tenant(conn)
+            tenant_b = _seed_tenant(conn)
+            self._insert_run(conn, tenant_a, status="RUNNING")
+            self._insert_run(conn, tenant_b, status="RUNNING")
+
+    def test_the_index_is_unique_and_partial(self, migration_db):
+        _alembic("head")
+        with migration_db.connect() as conn:
+            definition = conn.execute(
+                text(
+                    "SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' "
+                    "AND indexname = 'ix_tenant_usage_reconciliation_one_running'"
+                )
+            ).scalar_one()
+        assert "CREATE UNIQUE INDEX" in definition
+        assert "WHERE ((status)::text = 'RUNNING'::text)" in definition
+
+    def test_downgrade_removes_both_and_re_upgrade_restores_them(self, migration_db):
+        _alembic("head")
+        _alembic(STORAGE_ATTRIBUTION_REVISION, command="downgrade")
+
+        columns = {
+            c["name"]
+            for c in inspect(migration_db).get_columns("tenant_usage_reconciliation")
+        }
+        assert "metadata_mismatches_found" not in columns
+        with migration_db.connect() as conn:
+            indexes = {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' "
+                        "AND tablename = 'tenant_usage_reconciliation'"
+                    )
+                ).all()
+            }
+        assert "ix_tenant_usage_reconciliation_one_running" not in indexes
+        # The Block B indexes must survive a Block D downgrade untouched.
+        assert "ix_tenant_usage_reconciliation_tenant_started_at" in indexes
+        assert "ix_tenant_usage_reconciliation_status_started_at" in indexes
+
+        _alembic("head")
+        assert "metadata_mismatches_found" in {
+            c["name"]
+            for c in inspect(migration_db).get_columns("tenant_usage_reconciliation")
+        }
 
 
 def _seed_tenant(conn) -> uuid.UUID:

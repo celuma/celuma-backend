@@ -33,26 +33,31 @@ exists on `storage_object` — see storage-metadata-gap-analysis.md §2):
 - Legacy/manual report PDF: reached via `ReportVersion.pdf_storage_id`
   AND `sha256_hex IS NULL` (excludes the official-PDF case sharing the
   same FK column).
-- Tenant logo vs. letterhead/template logo: both have `tenant_id`
-  populated and no FK from any versioned entity, so category is
-  determined by `object_key` prefix — the one place this module reads a
-  key string rather than a relational owner. This is a deliberate,
-  documented exception to "do not infer tenant from S3 key strings": no
-  tenant is being inferred here (tenant_id is already on the row); only
-  the *category* is, because Block A/B found no other identifying signal
-  for JSON-only-referenced logo objects. See storage-tenant-attribution-
-  contract.md §4 for the full limitation writeup.
+- Tenant logo: `Tenant.logo_storage_id`, a real FK, since Céluma 1.3
+  Phase 4, Block D. Before Block D this category was resolved by parsing
+  `Tenant.logo_url` back into an object key with the *currently
+  configured* `MEDIA_PUBLIC_BASE_URL` — which meant changing that setting
+  silently zeroed a tenant's logo bytes even though a perfectly valid
+  logo object existed (block-d-dependencies.md §6). Nothing in this module
+  reads `logo_url` any more.
+
+- Letterhead/report-template logo: still identified by `object_key`
+  prefix — those objects have `tenant_id` populated and no FK from any
+  versioned entity (they are referenced only from configuration JSON), so
+  the key prefix remains the one available category signal. This is a
+  deliberate, documented exception to "do not infer tenant from S3 key
+  strings": no tenant is inferred (tenant_id is already on the row), only
+  the *category*. See storage-tenant-attribution-contract.md §4.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 
 from sqlalchemy import func, or_
 from sqlmodel import Session, select
 
-from app.core.config import settings
 from app.models.laboratory import SampleImage
 from app.models.report import Report, ReportVersion
 from app.models.storage import SampleImageRendition, StorageObject
@@ -67,54 +72,56 @@ from app.models.user import AppUser
 #: between the two billable categories.
 LETTERHEAD_ASSET_KEY_PREFIXES = ("report-letterheads/", "report-templates/")
 
+#: Category labels attached to each billable object descriptor. Operational
+#: metadata (logs, reconciliation findings) — never a billing input.
+CATEGORY_SAMPLE_IMAGE = "sample_image"
+CATEGORY_SAMPLE_IMAGE_RENDITION = "sample_image_rendition"
+CATEGORY_OFFICIAL_PDF = "official_pdf"
+CATEGORY_LEGACY_PDF = "legacy_pdf"
+CATEGORY_REPORT_JSON = "report_json"
+CATEGORY_TENANT_LOGO = "tenant_logo"
+CATEGORY_LETTERHEAD_ASSET = "letterhead_asset"
+CATEGORY_SIGNATURE = "signature"
 
-def resolve_object_key_from_public_url(url: Optional[str]) -> Optional[str]:
-    """Inverse of `S3Service.object_public_url()`. Returns the S3 object key
-    the given public URL was built from, or `None` if the URL does not
-    match either form `object_public_url()` produces (CDN-base form when
-    `MEDIA_PUBLIC_BASE_URL` is configured, raw-S3 form otherwise).
 
-    This is the one deterministic way to recover "which StorageObject is
-    the tenant's current logo" from `Tenant.logo_url` (a plain string, not
-    a FK — see storage-ownership-inventory.md §1.5). It is the exact
-    inverse of an existing, already-used helper, not a guess at S3 key
-    structure — see storage-tenant-attribution-contract.md for the
-    documented limitation (a `MEDIA_PUBLIC_BASE_URL` value change between
-    when a URL was stored and when it is resolved would break this; not
-    observed, not expected, and out of Block C's scope to guard against).
+def tenant_logo_key_prefix(tenant_id: UUID) -> str:
+    """The object-key prefix every tenant-logo upload writes under
+    (`app/api/v1/tenants.py::upload_tenant_logo`).
+
+    Used to *verify* that a `Tenant.logo_storage_id` really points at a
+    tenant-logo object (Block D's integrity check), never to discover which
+    object is current — that is the FK's job, and a key prefix could not
+    answer it anyway once a tenant has replaced its logo.
     """
-    if not url:
-        return None
-    candidates = []
-    if settings.media_public_base_url:
-        candidates.append(settings.media_public_base_url.rstrip("/") + "/")
-    region = settings.aws_region or "mx-central-1"
-    if settings.s3_bucket_name:
-        candidates.append(f"https://{settings.s3_bucket_name}.s3.{region}.amazonaws.com/")
-    for prefix in candidates:
-        if url.startswith(prefix):
-            return url[len(prefix):]
-    return None
+    return f"tenants/{tenant_id}/logo/"
 
 
 def resolve_current_tenant_logo_storage_object(
     session: Session, tenant: Tenant
 ) -> Optional[StorageObject]:
-    """The `StorageObject` currently referenced by `tenant.logo_url`, or
-    `None` if the tenant has no logo or it cannot be resolved. Used both by
-    the billable-storage calculation (only the *current* logo counts — see
-    §12 of the master spec) and by the tenant-logo upload flow (to find the
-    previous logo to decrement on replacement).
+    """The `StorageObject` that is this tenant's current logo, or `None`.
+
+    A direct FK lookup (`Tenant.logo_storage_id`) plus an ownership check,
+    since Céluma 1.3 Phase 4, Block D — no URL parsing, and therefore no
+    dependency on `MEDIA_PUBLIC_BASE_URL` having the same value it had when
+    the logo was uploaded.
+
+    Ownership is verified rather than assumed: a foreign key guarantees the
+    referenced row exists, not that it belongs to this tenant. A
+    cross-tenant reference is never valid application state, so it resolves
+    to `None` here (and is separately reported by reconciliation as
+    `tenant_logo_integrity_error` — this function's job is to be safe, not
+    to alert).
+
+    Used by the billable calculation (only the *current* logo counts) and by
+    the tenant-logo upload flow (to find the outgoing logo to decrement).
     """
-    key = resolve_object_key_from_public_url(tenant.logo_url)
-    if key is None:
+    if tenant is None or tenant.logo_storage_id is None:
         return None
-    return session.exec(
-        select(StorageObject).where(
-            StorageObject.tenant_id == tenant.id,
-            StorageObject.object_key == key,
-        )
-    ).first()
+    obj = session.get(StorageObject, tenant.logo_storage_id)
+    if obj is None or obj.tenant_id != tenant.id:
+        return None
+    return obj
 
 
 @dataclass(frozen=True)
@@ -144,106 +151,222 @@ class BillableStorageBreakdown:
         )
 
 
+@dataclass(frozen=True)
+class BillableStorageObjectRef:
+    """One billable object, as a plain frozen value.
+
+    Céluma 1.3 Phase 4, Block D. Reconciliation needs the *set* of billable
+    objects, not only their byte total, so it can verify each one against
+    S3 — and it needs them as detached values, because that verification
+    happens deliberately outside any database transaction (see
+    `usage_reconciliation.py`). No ORM instance survives that boundary.
+    """
+
+    storage_object_id: UUID
+    object_key: str
+    size_bytes: Optional[int]
+    etag: Optional[str]
+    category: str
+
+
 class StorageBillingService:
-    """Stateless — every method is a read-only aggregate query, scoped to
-    one tenant. Safe to call from application code and from the Block C
-    migration alike (a `Session` bound to the migration's own connection
-    works identically to a request-scoped one)."""
+    """Stateless — every method is a read-only query, scoped to one tenant.
+    Safe to call from application code and from a migration alike (a
+    `Session` bound to the migration's own connection works identically to
+    a request-scoped one).
+
+    Each category is defined exactly once, as a *row* selection
+    (`_*_rows()`). Byte totals are sums over those same rows, and the
+    billable-object list is those same rows materialized — so there is one
+    definition of "which objects are billable" and no possibility of the
+    total and the object list disagreeing about it.
+    """
+
+    #: The four columns every category selection returns, in order.
+    #: Everything downstream (sums, `BillableStorageObjectRef`) reads them
+    #: positionally, so the order is part of this module's internal
+    #: contract.
+    @staticmethod
+    def _row_columns():
+        return (
+            StorageObject.id,
+            StorageObject.object_key,
+            StorageObject.size_bytes,
+            StorageObject.etag,
+        )
+
+    # -- per-category row selections ---------------------------------------
 
     @staticmethod
-    def _sum(session: Session, stmt) -> int:
-        return int(session.exec(stmt).one() or 0)
-
-    @staticmethod
-    def _sample_images_bytes(session: Session, tenant_id: UUID) -> int:
-        processed = StorageBillingService._sum(
-            session,
-            select(func.coalesce(func.sum(StorageObject.size_bytes), 0))
+    def _sample_image_rows(tenant_id: UUID):
+        return (
+            select(*StorageBillingService._row_columns())
             .select_from(SampleImage)
             .join(StorageObject, StorageObject.id == SampleImage.storage_id)
-            .where(SampleImage.tenant_id == tenant_id),
+            .where(SampleImage.tenant_id == tenant_id)
         )
-        renditions = StorageBillingService._sum(
-            session,
-            select(func.coalesce(func.sum(StorageObject.size_bytes), 0))
+
+    @staticmethod
+    def _sample_image_rendition_rows(tenant_id: UUID):
+        return (
+            select(*StorageBillingService._row_columns())
             .select_from(SampleImageRendition)
             .join(SampleImage, SampleImage.id == SampleImageRendition.sample_image_id)
             .join(StorageObject, StorageObject.id == SampleImageRendition.storage_id)
-            .where(SampleImage.tenant_id == tenant_id),
+            .where(SampleImage.tenant_id == tenant_id)
         )
-        return processed + renditions
+
+    @staticmethod
+    def _official_pdf_rows(tenant_id: UUID):
+        return select(*StorageBillingService._row_columns()).where(
+            StorageObject.tenant_id == tenant_id,
+            StorageObject.sha256_hex.isnot(None),
+        )
+
+    @staticmethod
+    def _legacy_pdf_rows(tenant_id: UUID):
+        return (
+            select(*StorageBillingService._row_columns())
+            .select_from(ReportVersion)
+            .join(Report, Report.id == ReportVersion.report_id)
+            .join(StorageObject, StorageObject.id == ReportVersion.pdf_storage_id)
+            .where(Report.tenant_id == tenant_id, StorageObject.sha256_hex.is_(None))
+        )
+
+    @staticmethod
+    def _report_json_rows(tenant_id: UUID):
+        return (
+            select(*StorageBillingService._row_columns())
+            .select_from(ReportVersion)
+            .join(Report, Report.id == ReportVersion.report_id)
+            .join(StorageObject, StorageObject.id == ReportVersion.json_storage_id)
+            .where(Report.tenant_id == tenant_id)
+        )
+
+    @staticmethod
+    def _tenant_logo_rows(tenant_id: UUID):
+        """The current logo, via the `Tenant.logo_storage_id` FK.
+
+        The `StorageObject.tenant_id == tenant_id` predicate is the SQL form
+        of the ownership check `resolve_current_tenant_logo_storage_object`
+        performs: a FK pointing at another tenant's object is never valid
+        state and must not be billed to either tenant.
+        """
+        return (
+            select(*StorageBillingService._row_columns())
+            .select_from(Tenant)
+            .join(StorageObject, StorageObject.id == Tenant.logo_storage_id)
+            .where(Tenant.id == tenant_id, StorageObject.tenant_id == tenant_id)
+        )
+
+    @staticmethod
+    def _letterhead_asset_rows(tenant_id: UUID):
+        return select(*StorageBillingService._row_columns()).where(
+            StorageObject.tenant_id == tenant_id,
+            or_(
+                *[
+                    StorageObject.object_key.like(f"{prefix}%")
+                    for prefix in LETTERHEAD_ASSET_KEY_PREFIXES
+                ]
+            ),
+        )
+
+    @staticmethod
+    def _signature_rows(tenant_id: UUID):
+        return (
+            select(*StorageBillingService._row_columns())
+            .select_from(AppUser)
+            .join(StorageObject, StorageObject.id == AppUser.signature_storage_id)
+            .where(AppUser.tenant_id == tenant_id)
+        )
+
+    @staticmethod
+    def _categories(tenant_id: UUID) -> List[tuple]:
+        """(category label, row selection) for all seven billable
+        categories — the single enumeration both `compute_breakdown` and
+        `get_billable_storage_objects` walk."""
+        return [
+            (CATEGORY_SAMPLE_IMAGE, StorageBillingService._sample_image_rows(tenant_id)),
+            (
+                CATEGORY_SAMPLE_IMAGE_RENDITION,
+                StorageBillingService._sample_image_rendition_rows(tenant_id),
+            ),
+            (CATEGORY_OFFICIAL_PDF, StorageBillingService._official_pdf_rows(tenant_id)),
+            (CATEGORY_LEGACY_PDF, StorageBillingService._legacy_pdf_rows(tenant_id)),
+            (CATEGORY_REPORT_JSON, StorageBillingService._report_json_rows(tenant_id)),
+            (CATEGORY_TENANT_LOGO, StorageBillingService._tenant_logo_rows(tenant_id)),
+            (
+                CATEGORY_LETTERHEAD_ASSET,
+                StorageBillingService._letterhead_asset_rows(tenant_id),
+            ),
+            (CATEGORY_SIGNATURE, StorageBillingService._signature_rows(tenant_id)),
+        ]
+
+    # -- aggregation --------------------------------------------------------
+
+    @staticmethod
+    def _sum_rows(session: Session, rows_stmt) -> int:
+        """Total `size_bytes` over a category's rows.
+
+        Summed over the selection as a subquery rather than by rewriting the
+        query with an aggregate, so the total is by construction the sum of
+        exactly the rows `get_billable_storage_objects` would return.
+        """
+        sub = rows_stmt.subquery()
+        return int(
+            session.exec(select(func.coalesce(func.sum(sub.c.size_bytes), 0))).one() or 0
+        )
+
+    @staticmethod
+    def _sample_images_bytes(session: Session, tenant_id: UUID) -> int:
+        return StorageBillingService._sum_rows(
+            session, StorageBillingService._sample_image_rows(tenant_id)
+        ) + StorageBillingService._sum_rows(
+            session, StorageBillingService._sample_image_rendition_rows(tenant_id)
+        )
 
     @staticmethod
     def _official_pdf_bytes(session: Session, tenant_id: UUID) -> int:
-        return StorageBillingService._sum(
-            session,
-            select(func.coalesce(func.sum(StorageObject.size_bytes), 0)).where(
-                StorageObject.tenant_id == tenant_id,
-                StorageObject.sha256_hex.isnot(None),
-            ),
+        return StorageBillingService._sum_rows(
+            session, StorageBillingService._official_pdf_rows(tenant_id)
         )
 
     @staticmethod
     def _legacy_pdf_bytes(session: Session, tenant_id: UUID) -> int:
-        return StorageBillingService._sum(
-            session,
-            select(func.coalesce(func.sum(StorageObject.size_bytes), 0))
-            .select_from(ReportVersion)
-            .join(Report, Report.id == ReportVersion.report_id)
-            .join(StorageObject, StorageObject.id == ReportVersion.pdf_storage_id)
-            .where(Report.tenant_id == tenant_id, StorageObject.sha256_hex.is_(None)),
+        return StorageBillingService._sum_rows(
+            session, StorageBillingService._legacy_pdf_rows(tenant_id)
         )
 
     @staticmethod
     def _report_json_bytes(session: Session, tenant_id: UUID) -> int:
-        return StorageBillingService._sum(
-            session,
-            select(func.coalesce(func.sum(StorageObject.size_bytes), 0))
-            .select_from(ReportVersion)
-            .join(Report, Report.id == ReportVersion.report_id)
-            .join(StorageObject, StorageObject.id == ReportVersion.json_storage_id)
-            .where(Report.tenant_id == tenant_id),
+        return StorageBillingService._sum_rows(
+            session, StorageBillingService._report_json_rows(tenant_id)
         )
 
     @staticmethod
     def _tenant_logo_bytes(session: Session, tenant_id: UUID) -> int:
-        tenant = session.get(Tenant, tenant_id)
-        if tenant is None or not tenant.logo_url:
-            return 0
-        obj = resolve_current_tenant_logo_storage_object(session, tenant)
-        return obj.size_bytes if obj and obj.size_bytes else 0
+        return StorageBillingService._sum_rows(
+            session, StorageBillingService._tenant_logo_rows(tenant_id)
+        )
 
     @staticmethod
     def _letterhead_asset_bytes(session: Session, tenant_id: UUID) -> int:
-        return StorageBillingService._sum(
-            session,
-            select(func.coalesce(func.sum(StorageObject.size_bytes), 0)).where(
-                StorageObject.tenant_id == tenant_id,
-                or_(
-                    *[
-                        StorageObject.object_key.like(f"{prefix}%")
-                        for prefix in LETTERHEAD_ASSET_KEY_PREFIXES
-                    ]
-                ),
-            ),
+        return StorageBillingService._sum_rows(
+            session, StorageBillingService._letterhead_asset_rows(tenant_id)
         )
 
     @staticmethod
     def _signature_bytes(session: Session, tenant_id: UUID) -> int:
-        return StorageBillingService._sum(
-            session,
-            select(func.coalesce(func.sum(StorageObject.size_bytes), 0))
-            .select_from(AppUser)
-            .join(StorageObject, StorageObject.id == AppUser.signature_storage_id)
-            .where(AppUser.tenant_id == tenant_id),
+        return StorageBillingService._sum_rows(
+            session, StorageBillingService._signature_rows(tenant_id)
         )
 
     @staticmethod
     def compute_breakdown(session: Session, tenant_id: UUID) -> BillableStorageBreakdown:
         """The full per-category breakdown for one tenant. Independent of
         whether `storage_object.tenant_id` has been backfilled — every
-        category is resolved via its owning-parent join or (for the three
-        categories that already had it) the column itself."""
+        category is resolved via its owning-parent join, its FK, or (for the
+        categories that always had it) the column itself."""
         return BillableStorageBreakdown(
             sample_images_bytes=StorageBillingService._sample_images_bytes(session, tenant_id),
             official_pdf_bytes=StorageBillingService._official_pdf_bytes(session, tenant_id),
@@ -253,6 +376,36 @@ class StorageBillingService:
             letterhead_asset_bytes=StorageBillingService._letterhead_asset_bytes(session, tenant_id),
             signature_bytes=StorageBillingService._signature_bytes(session, tenant_id),
         )
+
+    @staticmethod
+    def get_billable_storage_objects(
+        session: Session, tenant_id: UUID
+    ) -> List[BillableStorageObjectRef]:
+        """Every billable object for one tenant, as detached descriptors.
+
+        Céluma 1.3 Phase 4, Block D — the read-only entry point
+        reconciliation uses to verify billable objects against S3, so the
+        billable-selection rules stay defined here and are never
+        re-derived by the reconciliation engine.
+
+        The same `StorageObject` can legitimately appear under more than one
+        category (nothing forbids it), so callers that act per physical
+        object should de-duplicate by key; this method reports selection,
+        not physical uniqueness.
+        """
+        refs: List[BillableStorageObjectRef] = []
+        for category, rows_stmt in StorageBillingService._categories(tenant_id):
+            for storage_id, object_key, size_bytes, etag in session.exec(rows_stmt).all():
+                refs.append(
+                    BillableStorageObjectRef(
+                        storage_object_id=storage_id,
+                        object_key=object_key,
+                        size_bytes=size_bytes,
+                        etag=etag,
+                        category=category,
+                    )
+                )
+        return refs
 
     @staticmethod
     def compute_billable_storage_bytes(session: Session, tenant_id: UUID) -> int:
