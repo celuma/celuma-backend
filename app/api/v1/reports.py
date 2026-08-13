@@ -53,6 +53,7 @@ from app.services.notification_integrations import (
 )
 from app.services.report_template_autoversion import snapshot_and_activate_template_version
 from app.services.usage import UsageService
+from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from app.services.report_publishing import (
     embed_signature_metadata_if_required,
     claim_publish,
@@ -575,12 +576,13 @@ def create_report(
             # permanent once created (see storage-flow-accounting-matrix.md
             # "report JSON create"). Same transaction as the insert/commit
             # below.
-            UsageService.record_storage_delta(
+            record_storage_delta_with_thresholds(
                 session,
                 report.tenant_id,
                 storage.size_bytes or 0,
                 source="report_json",
                 resource_type="report_json",
+                actor_id=user.id,
             )
 
             # Mark existing versions as not current (none expected on create)
@@ -946,12 +948,13 @@ def create_report_new_version(
         # Céluma 1.3 Phase 4, Block C: see the equivalent comment in
         # create_report above — same billable/permanent rule for every
         # report JSON body, one per version.
-        UsageService.record_storage_delta(
+        record_storage_delta_with_thresholds(
             session,
             report.tenant_id,
             storage.size_bytes or 0,
             source="report_json",
             resource_type="report_json",
+            actor_id=user.id,
         )
 
     # Mark previous current version as not current
@@ -1748,12 +1751,13 @@ def upload_template_logo(
 
     # Céluma 1.3 Phase 4, Block C: same rule as the letterhead-logo endpoint
     # — see the equivalent comment in report_letterheads.upload_letterhead_logo.
-    UsageService.record_storage_delta(
+    record_storage_delta_with_thresholds(
         session,
         template.tenant_id,
         result.size_bytes,
         source="letterhead_asset",
         resource_type="template_logo",
+        actor_id=user.id,
     )
     session.commit()
 
@@ -2189,8 +2193,13 @@ def upload_pdf_to_specific_version(
         delta = (storage.size_bytes or 0) - (previous_pdf_storage.size_bytes or 0)
     else:
         delta = storage.size_bytes or 0
-    UsageService.record_storage_delta(
-        session, report.tenant_id, delta, source="legacy_pdf", resource_type="report_pdf"
+    record_storage_delta_with_thresholds(
+        session,
+        report.tenant_id,
+        delta,
+        source="legacy_pdf",
+        resource_type="report_pdf",
+        actor_id=user.id,
     )
 
     version.pdf_storage_id = storage.id
@@ -2305,8 +2314,13 @@ def upload_pdf_to_latest_version(
         delta = (storage.size_bytes or 0) - (previous_pdf_storage.size_bytes or 0)
     else:
         delta = storage.size_bytes or 0
-    UsageService.record_storage_delta(
-        session, report.tenant_id, delta, source="legacy_pdf", resource_type="report_pdf"
+    record_storage_delta_with_thresholds(
+        session,
+        report.tenant_id,
+        delta,
+        source="legacy_pdf",
+        resource_type="report_pdf",
+        actor_id=user.id,
     )
 
     latest_version.pdf_storage_id = storage.id

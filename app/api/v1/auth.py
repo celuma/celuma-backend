@@ -16,6 +16,7 @@ from app.core.rbac import (
     user_has_full_branch_access,
 )
 from app.services.email import EmailService
+from app.services.usage_thresholds import UsageThresholdService
 from datetime import timedelta
 import secrets
 from app.schemas.auth import (
@@ -94,6 +95,12 @@ def register(user_data: UserRegister, session: Session = Depends(get_session)):
         assign_role_by_code(u.id, user_data.role, session)
     except ValueError:
         raise HTTPException(400, f"Unknown role: {user_data.role}")
+    # Céluma 1.3 Phase 4, Block G: self-registration creates an active user
+    # with a role, which is a seat like any other. No actor — the request is
+    # unauthenticated — so the notification is attributed to no one.
+    UsageThresholdService.evaluate_users(
+        session, u.tenant_id, source="user_self_registered"
+    )
     session.commit()
     session.refresh(u)
     logger.info("User registered successfully", extra={"event": "auth.register.success", "user_id": str(u.id), "email": u.email, "tenant_id": str(u.tenant_id)})
@@ -453,6 +460,18 @@ def unified_registration(payload: RegistrationRequest, session: Session = Depend
             assign_role_by_code(user.id, "admin", session)
             assign_role_by_code(user.id, "superuser", session)
             logger.info("Admin user created", extra={"event": "auth.register_unified.user_created", "user_id": str(user.id), "tenant_id": str(tenant.id)})
+
+            # Céluma 1.3 Phase 4, Block G: wired for completeness of the
+            # trigger matrix, not because it can fire. This endpoint creates
+            # the tenant in the same transaction and nothing anywhere creates
+            # a `TenantLimits` row, so the resource is unlimited and the
+            # evaluation is a guaranteed no-op. It is here so that the day
+            # tenant provisioning starts configuring limits, the first admin
+            # is counted like every other seat instead of being the one path
+            # nobody remembered.
+            UsageThresholdService.evaluate_users(
+                session, tenant.id, source="tenant_registration"
+            )
 
             # 4) Associate user with branch
             session.add(UserBranch(user_id=user.id, branch_id=branch.id))

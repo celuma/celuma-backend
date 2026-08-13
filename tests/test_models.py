@@ -244,7 +244,17 @@ class TestNotificationModels:
         assert preference.in_app_enabled is True
         assert preference.email_enabled is True
 
-    def test_the_six_approved_types_and_nothing_speculative(self):
+    def test_the_approved_types_and_nothing_speculative(self):
+        """The six Phase 3 clinical events plus Céluma 1.3, Phase 4, Block G's
+        four usage-threshold events — and nothing else.
+
+        The point of the assertion is unchanged: no type may be declared
+        before there is a real transition producing it, a template rendering
+        it, a delivery policy for it and a recipient rule. Block G's four
+        satisfy all four; there is deliberately no `STORAGE_USAGE_90` or any
+        other per-percentage type, because the threshold percentages are
+        policy constants in `app/services/usage_thresholds.py`, not identity.
+        """
         from app.models.notification import NotificationType
 
         assert {t.value for t in NotificationType} == {
@@ -254,6 +264,10 @@ class TestNotificationModels:
             "REPORT_RETRACTED",
             "ASSIGNMENT_ADDED",
             "SAMPLE_STATUS_CHANGED",
+            "STORAGE_USAGE_APPROACHING",
+            "STORAGE_LIMIT_REACHED",
+            "USER_LIMIT_APPROACHING",
+            "USER_LIMIT_REACHED",
         }
 
     def test_email_is_the_only_declared_channel(self):

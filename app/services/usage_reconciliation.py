@@ -94,6 +94,7 @@ from app.services.storage_billing import (
     tenant_logo_key_prefix,
 )
 from app.services.usage import UsageService
+from app.services.usage_thresholds import UsageThresholdService
 
 logger = logging.getLogger(__name__)
 
@@ -419,6 +420,27 @@ class UsageReconciliationService:
             )
             return self._finish_failed(session, run, ERROR_UNEXPECTED)
 
+        # Céluma 1.3, Phase 4, Block G. `_run_accounting` has committed, so
+        # whatever the counter now says is durable — this is the "final
+        # repaired counter" the threshold trigger matrix requires, evaluated
+        # from live usage and limits rather than from `expected_storage_bytes`
+        # or `difference_bytes` (a delta cannot tell you which side of 80% you
+        # landed on).
+        #
+        # Mandatory rather than nice-to-have, because reconciliation is the
+        # only trigger that moves the counter **downward** in bulk: an
+        # over-counted tenant repaired from 105% to 70% must come back to
+        # NORMAL, or its next genuine crossing would be swallowed by a stale
+        # REACHED. It is also the only trigger that runs with no user request
+        # behind it, which makes it the block's self-healing path — an
+        # evaluation contained earlier by a failure is retried here.
+        #
+        # Unconditional, not gated on `snapshot.repaired`: a run that finds
+        # the counter already correct still re-derives the state, which costs
+        # one indexed read and is what makes "reconciliation repairs threshold
+        # state too" true rather than approximately true.
+        self._evaluate_storage_threshold(session, tenant_id, run.id)
+
         findings: Optional[S3IntegrityFindings] = None
         s3_error: Optional[str] = None
         if verify_s3:
@@ -441,6 +463,47 @@ class UsageReconciliationService:
                 )
 
         return self._finish(session, run, snapshot, findings, s3_error)
+
+    # -- threshold evaluation (Céluma 1.3, Phase 4, Block G) ---------------
+
+    @staticmethod
+    def _evaluate_storage_threshold(
+        session: Session, tenant_id: UUID, reconciliation_id: UUID
+    ) -> None:
+        """Evaluate the storage threshold in its own bounded transaction.
+
+        Its own transaction, and committed here, because the accounting phase
+        has already committed: there is no caller transaction left to join, and
+        holding the evaluation open until `_finish` would put it behind an S3
+        round trip. `UsageThresholdService` does the rest of the containment —
+        it runs inside a savepoint and never raises — so the only failure this
+        has to catch is the commit itself.
+
+        A failure here cannot fail the reconciliation run. The counter repair
+        is already durable, which is the part that matters; a threshold state
+        that did not update is re-derived by the next evaluation from live
+        data, and the run's own status keeps describing the reconciliation, not
+        this.
+        """
+        try:
+            UsageThresholdService.evaluate_storage(
+                session, tenant_id, source="usage_reconciliation"
+            )
+            session.commit()
+        except Exception as exc:  # noqa: BLE001 — deliberate containment
+            session.rollback()
+            logger.error(
+                "Usage threshold evaluation after reconciliation failed",
+                extra={
+                    "event": "usage_threshold.evaluation_failed",
+                    "tenant_id": str(tenant_id),
+                    "reconciliation_id": str(reconciliation_id),
+                    "resource": "STORAGE",
+                    "source": "usage_reconciliation",
+                    "error_code": "threshold_evaluation_failed",
+                    "exception_type": type(exc).__name__,
+                },
+            )
 
     # -- lifecycle ---------------------------------------------------------
 

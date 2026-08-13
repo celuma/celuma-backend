@@ -245,9 +245,10 @@ class EmailTemplate:
     params: Tuple[str, ...] = ()
 
 
-#: Seven entries: one per email-supported `NotificationType`, plus two extra
+#: Eleven entries: one per email-supported `NotificationType` (five from
+#: Phase 3, four from Phase 4 Block G's usage thresholds), plus two extra
 #: `ASSIGNMENT_ADDED` keys for the sample/review contexts (pre-release
-#: remediation — see the comment on those two entries below). Never eight:
+#: remediation — see the comment on those two entries below). Never twelve:
 #: `SAMPLE_STATUS_CHANGED` has `email_supported = False` in
 #: `notification_policies.py`, so no `NotificationDelivery` row can ever exist
 #: for it (materialization contract §2 checks the policy first). Registering
@@ -321,6 +322,53 @@ _EMAIL_TEMPLATES_ES_MX: Dict[str, EmailTemplate] = {
         subject="{tenant_name} — Nueva revisión asignada (Orden {order_number})",
         body="Se te asignó la revisión del reporte de la orden {order_number}.",
         params=("order_number",),
+    ),
+    # -- Céluma 1.3, Phase 4, Block G: usage thresholds --------------------
+    #
+    # Four entries, keys matching the in-app registry one-for-one, because
+    # all four types are `email_supported` in `notification_policies.py` and
+    # a delivery row whose key this registry cannot resolve is a row the
+    # worker can only fail.
+    #
+    # The copy restates the in-app copy rather than elaborating on it. An
+    # email is read outside the application, by someone who may not open it
+    # for a day, so it must not carry a number that will have moved by then:
+    # the APPROACHING bodies keep the same "aproximadamente el N%" the in-app
+    # notification froze, and the REACHED bodies carry no number at all.
+    # Nothing here says a limit is enforced, names a plan or a price, or
+    # names a cloud provider — the same four constraints the in-app copy is
+    # written against, checked by `tests/test_email_templates.py`.
+    "storage_usage_approaching_v1": EmailTemplate(
+        key="storage_usage_approaching_v1",
+        notification_type=NotificationType.STORAGE_USAGE_APPROACHING,
+        subject="{tenant_name} — Almacenamiento cercano al límite",
+        body="El laboratorio utiliza aproximadamente el {usage_percent}% del "
+        "almacenamiento configurado.",
+        params=("usage_percent",),
+    ),
+    "storage_limit_reached_v1": EmailTemplate(
+        key="storage_limit_reached_v1",
+        notification_type=NotificationType.STORAGE_LIMIT_REACHED,
+        subject="{tenant_name} — Límite de almacenamiento alcanzado",
+        body="El uso de almacenamiento del laboratorio alcanzó o superó el "
+        "límite configurado.",
+        params=(),
+    ),
+    "user_limit_approaching_v1": EmailTemplate(
+        key="user_limit_approaching_v1",
+        notification_type=NotificationType.USER_LIMIT_APPROACHING,
+        subject="{tenant_name} — Usuarios cercanos al límite",
+        body="El laboratorio utiliza aproximadamente el {usage_percent}% de los "
+        "usuarios internos configurados.",
+        params=("usage_percent",),
+    ),
+    "user_limit_reached_v1": EmailTemplate(
+        key="user_limit_reached_v1",
+        notification_type=NotificationType.USER_LIMIT_REACHED,
+        subject="{tenant_name} — Límite de usuarios alcanzado",
+        body="La cantidad de usuarios internos activos del laboratorio alcanzó "
+        "o superó el límite configurado.",
+        params=(),
     ),
 }
 

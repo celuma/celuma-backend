@@ -18,6 +18,7 @@ from app.models.enums import EventType, SampleState, AssignmentItemType, ReviewS
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
 from app.services.usage import UsageService
+from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from datetime import datetime
 from app.schemas.laboratory import (
     OrderCreate,
@@ -1714,12 +1715,13 @@ def upload_sample_image(
     upload_total_bytes = (processed_info.size_bytes or 0) + (thumb_info.size_bytes or 0)
     if original_storage is not None:
         upload_total_bytes += original_storage.size_bytes or 0
-    UsageService.record_storage_delta(
+    record_storage_delta_with_thresholds(
         session,
         sample.tenant_id,
         upload_total_bytes,
         source="sample_image_upload",
         resource_type="sample_image",
+        actor_id=user.id,
     )
 
     session.commit()
@@ -1872,12 +1874,13 @@ def delete_sample_image(
     )
     session.add(event)
 
-    UsageService.record_storage_delta(
+    record_storage_delta_with_thresholds(
         session,
         sample.tenant_id,
         -deleted_bytes,
         source="sample_image_delete",
         resource_type="sample_image",
+        actor_id=user.id,
     )
 
     session.commit()

@@ -66,11 +66,31 @@ from .base import BaseModel, TenantMixin, TimestampMixin
 # ---------------------------------------------------------------------------
 
 class NotificationType(str, Enum):
-    """The six MUST_HAVE_1_3 events confirmed against real transitions in
-    docs/celuma-1.3/phase-3-block-a/notification-event-inventory.md.
+    """The six MUST_HAVE_1_3 clinical events confirmed against real
+    transitions in
+    docs/celuma-1.3/phase-3-block-a/notification-event-inventory.md, plus the
+    four administrative usage-threshold events added by Céluma 1.3, Phase 4,
+    Block G.
 
-    No speculative future type is declared here. Block B wires none of these
-    to a real clinical transition — that is Block F.
+    No speculative future type is declared here. Block B wires none of the
+    clinical types to a real transition — that is Block F.
+
+    Usage-threshold types (Phase 4, Block G)
+    -----------------------------------------
+    Exactly four, and deliberately **not** one per threshold percentage.
+    "80%" and "100%" are policy numbers owned by
+    `app/services/usage_thresholds.py`; a `STORAGE_USAGE_80` type would freeze
+    a policy value into the enum, into every stored row, into the preference
+    table and into the frontend's label maps, so changing the policy later
+    would be a migration rather than a constant. The semantic state
+    (APPROACHING / REACHED) is what a recipient is actually being told, and
+    that is what these four names carry.
+
+    They differ from the clinical six in three ways, all documented in
+    docs/celuma-1.3/phase-4-block-g/usage-threshold-notification-contract.md:
+    they are tenant-level rather than resource-level, their recipients are
+    resolved from a permission rather than from a workflow relationship, and
+    the actor whose action caused the crossing is **not** excluded.
     """
     REPORT_SUBMITTED = "REPORT_SUBMITTED"
     REPORT_PDF_READY = "REPORT_PDF_READY"
@@ -78,6 +98,10 @@ class NotificationType(str, Enum):
     REPORT_RETRACTED = "REPORT_RETRACTED"
     ASSIGNMENT_ADDED = "ASSIGNMENT_ADDED"
     SAMPLE_STATUS_CHANGED = "SAMPLE_STATUS_CHANGED"
+    STORAGE_USAGE_APPROACHING = "STORAGE_USAGE_APPROACHING"
+    STORAGE_LIMIT_REACHED = "STORAGE_LIMIT_REACHED"
+    USER_LIMIT_APPROACHING = "USER_LIMIT_APPROACHING"
+    USER_LIMIT_REACHED = "USER_LIMIT_REACHED"
 
 
 class NotificationSeverity(str, Enum):
@@ -131,10 +155,23 @@ class NotificationDeliveryStatus(str, Enum):
 
 class NotificationResourceType(str, Enum):
     """Validated at the service/API boundary only — the column itself is
-    free-form VARCHAR(50), matching `audit_log.entity_type`."""
+    free-form VARCHAR(50), matching `audit_log.entity_type`.
+
+    `TENANT` (Céluma 1.3, Phase 4, Block G) is the odd one out and worth a
+    sentence: the other three name a clinical record a notification is
+    *about*, while a usage-threshold event is about the tenant itself. Its
+    `resource_id` is therefore the tenant id — which the recipient already
+    belongs to, so it discloses nothing — and its deep link is the fixed
+    `/config/usage` route rather than one built from the id. Modelling it as
+    a resource type rather than inventing a nullable-resource notification
+    keeps `resource_type`/`resource_id` NOT NULL for every row, and keeps the
+    frontend's single `resource_type -> route` switch the only place a
+    notification becomes a destination.
+    """
     REPORT = "report"
     ORDER = "order"
     SAMPLE = "sample"
+    TENANT = "tenant"
 
 
 # ---------------------------------------------------------------------------

@@ -37,6 +37,36 @@ from app.services.notification_templates import (
 TENANT = "Patología y Nefropatología"
 ORDER = "ORD-2026-00152"
 
+#: Céluma 1.3, Phase 4, Block G — usage-threshold emails.
+#:
+#: Every Phase 3 email is about one clinical order and carries exactly one
+#: parameter, `order_number`. Block G's four are about the *tenant*: they name
+#: no order, because there is none, and two of them take no parameter at all.
+#:
+#: The suite is therefore split rather than loosened. Assertions about shape,
+#: safety and policy still run over every key; the ones that are specifically
+#: "an email names its order" run over `ORDER_SCOPED_KEYS`, which is where
+#: that claim is true. Blanket-relaxing them would have quietly stopped
+#: checking the seven templates the claim is about.
+TENANT_SCOPED_KEYS = frozenset(
+    {
+        "storage_usage_approaching_v1",
+        "storage_limit_reached_v1",
+        "user_limit_approaching_v1",
+        "user_limit_reached_v1",
+    }
+)
+
+ORDER_SCOPED_KEYS = frozenset(EMAIL_TEMPLATE_KEYS) - TENANT_SCOPED_KEYS
+
+#: Valid parameters per key, so a parametrized render works for both shapes.
+DEFAULT_PARAMS = {
+    "storage_usage_approaching_v1": {"usage_percent": 82},
+    "user_limit_approaching_v1": {"usage_percent": 80},
+    "storage_limit_reached_v1": {},
+    "user_limit_reached_v1": {},
+}
+
 
 def render(key: str, **overrides):
     template = EMAIL_TEMPLATES[key]
@@ -44,7 +74,7 @@ def render(key: str, **overrides):
         "tenant_name": TENANT,
         "notification_type": template.notification_type,
         "template_key": key,
-        "template_params": {"order_number": ORDER},
+        "template_params": DEFAULT_PARAMS.get(key, {"order_number": ORDER}),
     }
     values.update(overrides)
     return render_notification_email(**values)
@@ -78,13 +108,13 @@ class TestRegistryCoverage:
             template.notification_type != NotificationType.SAMPLE_STATUS_CHANGED
             for template in EMAIL_TEMPLATES.values()
         )
-        # Seven, not five: pre-release remediation adds
-        # `assignment_added_sample_v1` and `assignment_added_review_v1`
-        # alongside the original five, so the sample/reviewer assignment
-        # contexts (which now have their own in-app copy) can still be
-        # emailed — see notification_templates.py's
-        # `ASSIGNMENT_ADDED_*_TEMPLATE_KEY` constants.
-        assert len(EMAIL_TEMPLATES) == 7
+        # Eleven. Five originals, plus `assignment_added_sample_v1` and
+        # `assignment_added_review_v1` from the pre-release remediation (so
+        # the sample/reviewer assignment contexts, which have their own in-app
+        # copy, can still be emailed — see notification_templates.py's
+        # `ASSIGNMENT_ADDED_*_TEMPLATE_KEY` constants), plus Céluma 1.3,
+        # Phase 4, Block G's four usage-threshold types.
+        assert len(EMAIL_TEMPLATES) == 11
 
     def test_every_email_key_matches_an_in_app_key(self):
         """The two registries are separate by design, but they must stay
@@ -107,14 +137,32 @@ class TestRegistryCoverage:
             assert template.key == key
             assert by_key[key].notification_type == template.notification_type
 
-    def test_no_template_declares_a_parameter_beyond_the_order_number(self):
+    def test_no_template_declares_a_parameter_beyond_the_declared_vocabulary(self):
         """The email vocabulary is deliberately narrower than the policy
         allows — `actor_name` is SAFE and appears in-app, and is excluded here
         because it is the only parameter sourced from a user-editable field.
         Widening this set is a decision with a policy review attached, so it
-        should require editing this assertion."""
-        for template in EMAIL_TEMPLATES.values():
-            assert template.params == ("order_number",)
+        should require editing this assertion.
+
+        It was widened exactly once, by Céluma 1.3, Phase 4, Block G, to admit
+        `usage_percent`: a backend-computed integer with no user-editable
+        source anywhere in its provenance, used by the two APPROACHING
+        templates. The two REACHED templates declare nothing at all.
+        """
+        for key, template in EMAIL_TEMPLATES.items():
+            if key in TENANT_SCOPED_KEYS:
+                assert template.params in ((), ("usage_percent",)), key
+            else:
+                assert template.params == ("order_number",), key
+
+    def test_no_tenant_scoped_template_names_an_order(self):
+        """The complement of the split: a usage-threshold email must not
+        acquire an order number, because there is no order it could be
+        about."""
+        for key in TENANT_SCOPED_KEYS:
+            template = EMAIL_TEMPLATES[key]
+            assert "order_number" not in template.params
+            assert "{order_number}" not in f"{template.subject} {template.body}"
 
 
 class TestResolution:
@@ -157,10 +205,12 @@ class TestRendering:
         )
 
     @pytest.mark.parametrize("key", sorted(EMAIL_TEMPLATE_KEYS))
-    def test_every_subject_carries_the_tenant_and_the_order(self, key):
-        subject = render(key).subject
-        assert TENANT in subject
-        assert ORDER in subject
+    def test_every_subject_carries_the_tenant(self, key):
+        assert TENANT in render(key).subject
+
+    @pytest.mark.parametrize("key", sorted(ORDER_SCOPED_KEYS))
+    def test_every_order_scoped_subject_carries_the_order(self, key):
+        assert ORDER in render(key).subject
 
     @pytest.mark.parametrize("key", sorted(EMAIL_TEMPLATE_KEYS))
     def test_every_subject_fits_an_inbox_list(self, key):

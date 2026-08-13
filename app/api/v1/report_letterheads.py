@@ -62,6 +62,7 @@ from app.services.letterhead_portability import (
 from app.services.legacy_letterhead_adapter import build_legacy_letterhead_export
 from app.services.letterhead_resources import resolve_letterhead_resources
 from app.services.usage import UsageService
+from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from app.services.letterhead_resolution import (
     LetterheadConfigurationError,
     sole_active_version,
@@ -937,12 +938,13 @@ def upload_letterhead_logo(
     # commit for the counter (a pre-existing gap in this shared service's
     # transactional boundary — see managed-logo-upload-contract.md — not
     # something Block C widens or fixes).
-    UsageService.record_storage_delta(
+    record_storage_delta_with_thresholds(
         session,
         letterhead.tenant_id,
         result.size_bytes,
         source="letterhead_asset",
         resource_type="letterhead_logo",
+        actor_id=user.id,
     )
     session.commit()
 

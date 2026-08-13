@@ -192,6 +192,12 @@ class TestTemplateVersioning:
             "report_retracted_v1",
             "assignment_added_v1",
             "sample_status_changed_v2",
+            # Céluma 1.3, Phase 4, Block G — the four usage-threshold types,
+            # each with exactly one current key.
+            "storage_usage_approaching_v1",
+            "storage_limit_reached_v1",
+            "user_limit_approaching_v1",
+            "user_limit_reached_v1",
         }
         assert set(CURRENT_TEMPLATE_KEY.values()) == expected
         assert "sample_status_changed_v1" in NOTIFICATION_TEMPLATE_REGISTRY
@@ -372,12 +378,24 @@ class TestScreeningSurvivesLocalization:
                 f"{key} declares different parameters in different locales"
             )
 
-    def test_the_email_vocabulary_is_still_only_the_order_number(self):
+    def test_the_email_vocabulary_is_still_almost_only_the_order_number(self):
         """Block E's rule, restated after the registry was restructured:
-        widening it must require editing an assertion."""
-        for by_locale in EMAIL_TEMPLATE_REGISTRY.values():
-            for template in by_locale.values():
-                assert template.params == ("order_number",)
+        widening it must require editing an assertion.
+
+        Widened once, by Céluma 1.3, Phase 4, Block G, which added four
+        tenant-scoped usage-threshold templates. Those name no order — there
+        is none — and take either `usage_percent` (a backend-computed integer
+        with no user-editable source) or nothing at all. Every order-scoped
+        template still takes exactly `order_number`, and the *locale* rule the
+        surrounding class is about is unchanged: no translation may introduce
+        a parameter, because `params` is declared per key and shared by every
+        locale of it.
+        """
+        allowed = {("order_number",), ("usage_percent",), ()}
+        for key, by_locale in EMAIL_TEMPLATE_REGISTRY.items():
+            declared = {template.params for template in by_locale.values()}
+            assert len(declared) == 1, f"{key} declares different params per locale"
+            assert declared.pop() in allowed, key
 
     def test_extra_in_app_parameters_are_ignored_not_rejected(self):
         """The selection mechanism, unchanged by localization: an in-app

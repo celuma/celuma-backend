@@ -68,9 +68,9 @@ class NotificationDeliveryPolicy:
 # The registry
 # ---------------------------------------------------------------------------
 #
-# Six entries, one per NotificationType. No speculative type is declared: a
-# future event gets its policy written beside its template, in the block that
-# introduces it.
+# One entry per NotificationType — six from Phase 3, four added by Phase 4,
+# Block G. No speculative type is declared: a future event gets its policy
+# written beside its template, in the block that introduces it.
 #
 # Why SAMPLE_STATUS_CHANGED is the one type with email_supported = False,
 # confirmed against Block A rather than assumed:
@@ -138,6 +138,46 @@ NOTIFICATION_DELIVERY_POLICIES: Dict[NotificationType, NotificationDeliveryPolic
         in_app_required=True,
         email_supported=False,
         email_default_enabled=False,
+    ),
+    # -- Céluma 1.3, Phase 4, Block G: usage thresholds --------------------
+    #
+    # All four are email-supported and default-enabled, which is the opposite
+    # call from SAMPLE_STATUS_CHANGED and rests on the same two axes:
+    #
+    #   Frequency. A threshold event fires on a *transition*, at most once per
+    #   crossing, and the durable state in `tenant_usage_threshold_state` is
+    #   what guarantees that — a tenant sitting at 85% for a month produces
+    #   one APPROACHING notification, not one per upload. The storm risk that
+    #   made sample transitions in-app only is structurally absent here.
+    #
+    #   Audience and actionability. The recipients are the tenant's
+    #   `admin:manage_tenant` holders — a handful of people, not a fan-out —
+    #   and "the laboratory is near its configured limit" is precisely the
+    #   kind of administrative fact worth reaching someone who is not looking
+    #   at Céluma today. An admin who never opens the app is exactly the admin
+    #   who needs to be told.
+    #
+    # Email remains subject to the ordinary per-user preference, and to
+    # `EMAIL_ENABLED` globally; in-app delivery is unaffected either way.
+    NotificationType.STORAGE_USAGE_APPROACHING: NotificationDeliveryPolicy(
+        in_app_required=True,
+        email_supported=True,
+        email_default_enabled=True,
+    ),
+    NotificationType.STORAGE_LIMIT_REACHED: NotificationDeliveryPolicy(
+        in_app_required=True,
+        email_supported=True,
+        email_default_enabled=True,
+    ),
+    NotificationType.USER_LIMIT_APPROACHING: NotificationDeliveryPolicy(
+        in_app_required=True,
+        email_supported=True,
+        email_default_enabled=True,
+    ),
+    NotificationType.USER_LIMIT_REACHED: NotificationDeliveryPolicy(
+        in_app_required=True,
+        email_supported=True,
+        email_default_enabled=True,
     ),
 }
 

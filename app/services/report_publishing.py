@@ -40,6 +40,7 @@ from app.models.user import AppUser
 from app.schemas.report import SignatureMetadata
 from app.services.s3 import S3Service
 from app.services.usage import UsageService
+from app.services.usage_thresholds import record_storage_delta_with_thresholds
 
 logger = logging.getLogger(__name__)
 
@@ -154,8 +155,13 @@ def embed_signature_metadata_if_required(
         tenant_id = report.tenant_id if report else None
     if tenant_id is not None:
         delta = (info.size_bytes or 0) - old_size_bytes
-        UsageService.record_storage_delta(
-            session, tenant_id, delta, source="report_json", resource_type="report_json"
+        record_storage_delta_with_thresholds(
+            session,
+            tenant_id,
+            delta,
+            source="report_json",
+            resource_type="report_json",
+            actor_id=user.id,
         )
 
     session.commit()

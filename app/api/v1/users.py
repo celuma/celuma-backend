@@ -24,6 +24,10 @@ from app.core.config import settings
 from app.services.email import EmailService
 from app.services.s3 import S3Service
 from app.services.usage import UsageService
+from app.services.usage_thresholds import (
+    UsageThresholdService,
+    record_storage_delta_with_thresholds,
+)
 from app.schemas.user import (
     UserCreateByAdmin,
     UserUpdateByAdmin,
@@ -224,6 +228,17 @@ def create_user(
                 raise HTTPException(400, f"Branch {branch_id} does not belong to this tenant")
             session.add(UserBranch(user_id=new_user.id, branch_id=branch.id))
 
+    # Céluma 1.3 Phase 4, Block G: a new active user holding a non-physician
+    # role consumes a licensed seat, so creation can cross the user threshold.
+    # Evaluated here — after the role assignment, before the commit — so the
+    # notification lands in the same atomic commit as the user itself. A
+    # physician-only or inactive user changes nothing and the evaluation is a
+    # no-op; it is called unconditionally rather than guessing which role
+    # counts, because `active_internal_users` is the metric's own definition.
+    UsageThresholdService.evaluate_users(
+        session, new_user.tenant_id, source="user_created", actor_id=user.id
+    )
+
     session.commit()
     session.refresh(new_user)
 
@@ -314,6 +329,18 @@ def update_user(
             session.add(UserBranch(user_id=target_user.id, branch_id=branch.id))
 
     session.add(target_user)
+
+    # Céluma 1.3 Phase 4, Block G: this endpoint can move the seat count in
+    # either direction and by either mechanism — `is_active` flips activation,
+    # and `role` *replaces* the user's roles, so a physician promoted to
+    # reviewer starts consuming a seat and a reviewer demoted to physician
+    # stops. Evaluated unconditionally rather than trying to predict which
+    # edit mattered: the state machine is idempotent, so an evaluation that
+    # finds nothing costs one indexed read.
+    UsageThresholdService.evaluate_users(
+        session, target_user.tenant_id, source="user_updated", actor_id=user.id
+    )
+
     session.commit()
     session.refresh(target_user)
 
@@ -350,6 +377,15 @@ def deactivate_user(
 
     target_user.is_active = False
     session.add(target_user)
+
+    # Céluma 1.3 Phase 4, Block G: freeing a seat is a downward move. It never
+    # notifies — but it does re-arm, so the next user who fills the seat back
+    # up produces a fresh notification instead of being silently swallowed by
+    # a stale APPROACHING/REACHED state.
+    UsageThresholdService.evaluate_users(
+        session, target_user.tenant_id, source="user_deactivated", actor_id=user.id
+    )
+
     session.commit()
 
     logger.info(
@@ -385,6 +421,13 @@ def toggle_user_active(
 
     target_user.is_active = not target_user.is_active
     session.add(target_user)
+
+    # Céluma 1.3 Phase 4, Block G: a toggle goes both ways. Re-activating an
+    # internal user can cross a threshold upward; deactivating re-arms it.
+    UsageThresholdService.evaluate_users(
+        session, target_user.tenant_id, source="user_activation_toggled", actor_id=user.id
+    )
+
     session.commit()
 
     logger.info(
@@ -539,6 +582,21 @@ def accept_invitation(
     invitation.is_used = True
     invitation.accepted_at = datetime.utcnow()
     session.add(invitation)
+
+    # Céluma 1.3 Phase 4, Block G: acceptance is where an invitation becomes a
+    # seat. Creating the invitation changes nothing — a pending
+    # `UserInvitation` is not an `AppUser` and is structurally absent from
+    # every user metric (Block E, usage-response-semantics.md §3) — so this,
+    # not `create_invitation`, is the trigger point.
+    #
+    # `actor_id` is None: acceptance is an unauthenticated, token-bearing
+    # request, so there is no acting Céluma user to attribute the
+    # notification to. The invited user is not the actor in the Phase 3
+    # sense, and in any case is not excluded from the recipient set.
+    UsageThresholdService.evaluate_users(
+        session, new_user.tenant_id, source="invitation_accepted"
+    )
+
     session.commit()
     session.refresh(new_user)
 
@@ -713,12 +771,13 @@ def upload_my_signature(
     session.add(storage)
     session.flush()
 
-    UsageService.record_storage_delta(
+    record_storage_delta_with_thresholds(
         session,
         user.tenant_id,
         (storage.size_bytes or 0) - previous_size_bytes,
         source="signature",
         resource_type="signature",
+        actor_id=user.id,
     )
 
     user.signature_storage_id = storage.id
@@ -782,12 +841,13 @@ def delete_my_signature(
 
     s3 = S3Service()
     _delete_existing_signature(user, session, s3)
-    UsageService.record_storage_delta(
+    record_storage_delta_with_thresholds(
         session,
         user.tenant_id,
         -previous_size_bytes,
         source="signature",
         resource_type="signature",
+        actor_id=user.id,
     )
     session.add(user)
     session.commit()

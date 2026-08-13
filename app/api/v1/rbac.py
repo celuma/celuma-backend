@@ -29,6 +29,7 @@ from app.models.role import Role
 from app.models.role_permission import RolePermission
 from app.models.user import AppUser
 from app.models.user_role import UserRoleLink
+from app.services.usage_thresholds import UsageThresholdService
 
 router = APIRouter(prefix="/rbac")
 
@@ -213,6 +214,16 @@ def set_user_roles(
 
     try:
         replace_user_roles(target.id, body.roles, session)
+        # Céluma 1.3 Phase 4, Block G: this is the general role-replacement
+        # endpoint and the one that can move the seat count without touching
+        # the user at all. `active_internal_users` counts active users holding
+        # at least one non-`physician` role, so `["physician"] -> ["reviewer"]`
+        # consumes a seat and the reverse frees one, with no create, activate
+        # or deactivate anywhere in the request. Evaluated before the commit so
+        # the notification is atomic with the role change that caused it.
+        UsageThresholdService.evaluate_users(
+            session, target.tenant_id, source="user_roles_replaced", actor_id=actor.id
+        )
         session.commit()
     except ValueError as exc:
         raise HTTPException(400, str(exc))

@@ -54,6 +54,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 
@@ -95,8 +96,16 @@ STORAGE_ATTRIBUTION_REVISION = "v1_11_0"
 #: Céluma 1.3, Phase 4, Block D — DB-scoped tenant logo (`tenant.
 #: logo_storage_id` + backfill) and reconciliation hardening
 #: (`tenant_usage_reconciliation.metadata_mismatches_found`, one-RUNNING-
-#: per-tenant partial unique index). The current alembic head.
+#: per-tenant partial unique index). No longer the head — Block G adds one
+#: more revision on top — but still the fixed boundary
+#: `TestReconciliationHardeningMigration` targets explicitly.
 BLOCK_D_REVISION = "v1_12_0"
+
+#: Céluma 1.3, Phase 4, Block G — durable usage-threshold state
+#: (`tenant_usage_threshold_state`). Schema only: the revision creates the
+#: table and nothing else, and in particular seeds no baseline state and
+#: creates no notification. The current alembic head.
+BLOCK_G_REVISION = "v1_13_0"
 
 #: Revision ids that existed only on the unreleased `celuma-1.3` branch and
 #: were folded into RELEASE_REVISION. Nothing executable may reference them.
@@ -146,6 +155,10 @@ USAGE_DOMAIN_TABLES = {
     "tenant_usage_reconciliation",
 }
 
+#: The one table Céluma 1.3, Phase 4, Block G introduces on top of Block D's
+#: revision.
+THRESHOLD_STATE_TABLES = {"tenant_usage_threshold_state"}
+
 #: The delivery uniqueness constraint Phase 3 Block B created and Block D
 #: dropped. The consolidated migration must never create it: it assumed one
 #: address belongs to one person, which silently denied email to the second
@@ -193,14 +206,13 @@ class TestChainShape:
     def test_exactly_one_head(self):
         assert len(_script_directory().get_heads()) == 1
 
-    def test_head_is_the_block_d_revision(self):
-        """Céluma 1.3, Phase 4, Block D: the head moves forward again, from
-        the storage-attribution revision to Block D's. Same reasoning as
-        every previous move of this assertion — it names the newest
-        revision, and is expected to be updated (not deleted) by the next
-        block that adds one.
+    def test_head_is_the_block_g_revision(self):
+        """Céluma 1.3, Phase 4, Block G: the head moves forward again, from
+        Block D's revision to Block G's. Same reasoning as every previous
+        move of this assertion — it names the newest revision, and is
+        expected to be updated (not deleted) by the next block that adds one.
         """
-        assert _script_directory().get_current_head() == BLOCK_D_REVISION
+        assert _script_directory().get_current_head() == BLOCK_G_REVISION
 
     def test_release_revision_sits_directly_on_the_last_pre_1_3_revision(self):
         revision = _script_directory().get_revision(RELEASE_REVISION)
@@ -227,10 +239,17 @@ class TestChainShape:
         revision = _script_directory().get_revision(BLOCK_D_REVISION)
         assert revision.down_revision == STORAGE_ATTRIBUTION_REVISION
 
+    def test_block_g_revision_sits_directly_on_the_block_d_revision(self):
+        """Block G is additive on top of the closed Block D revision:
+        `v1_12_0` is untouched and `v1_13_0` is its only child."""
+        revision = _script_directory().get_revision(BLOCK_G_REVISION)
+        assert revision.down_revision == BLOCK_D_REVISION
+
     def test_chain_is_linear_from_base_to_head(self):
         script = _script_directory()
         revisions = list(script.walk_revisions())
         assert [r.revision for r in revisions] == [
+            BLOCK_G_REVISION,
             BLOCK_D_REVISION,
             STORAGE_ATTRIBUTION_REVISION,
             USAGE_DOMAIN_REVISION,
@@ -692,7 +711,7 @@ class TestNotificationDomain:
         _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
         _alembic("head")
 
-        assert _current_revision(migration_db) == BLOCK_D_REVISION
+        assert _current_revision(migration_db) == BLOCK_G_REVISION
         assert NOTIFICATION_TABLES <= set(inspect(migration_db).get_table_names())
 
     def test_unique_constraints_exist(self, migration_db):
@@ -984,10 +1003,19 @@ class TestUsageDomainMigration:
         assert USAGE_DOMAIN_TABLES <= set(inspect(migration_db).get_table_names())
 
     def test_introduces_exactly_the_expected_tables(self, migration_db):
+        """Pinned to `USAGE_DOMAIN_REVISION`, not "head".
+
+        This test is about `v1_10_0`'s own footprint — "these three tables and
+        nothing else" — which is a statement about one closed revision.
+        Running it to "head" made it silently also assert that no later
+        revision ever adds a table, so Céluma 1.3, Phase 4, Block G's
+        `tenant_usage_threshold_state` failed a test that was never meant to
+        be about it. Block G's footprint has its own class below.
+        """
         _alembic(RELEASE_REVISION)
         before = set(inspect(migration_db).get_table_names())
 
-        _alembic("head")
+        _alembic(USAGE_DOMAIN_REVISION)
         after = set(inspect(migration_db).get_table_names())
 
         assert after - before == USAGE_DOMAIN_TABLES
@@ -1006,7 +1034,7 @@ class TestUsageDomainMigration:
         _alembic(RELEASE_REVISION, command="downgrade")
         _alembic("head")
 
-        assert _current_revision(migration_db) == BLOCK_D_REVISION
+        assert _current_revision(migration_db) == BLOCK_G_REVISION
         assert USAGE_DOMAIN_TABLES <= set(inspect(migration_db).get_table_names())
 
     def test_downgrade_removes_the_app_user_index(self, migration_db):
@@ -1532,8 +1560,16 @@ class TestStorageAttributionMigration:
 
     def test_downgrade_is_a_no_op(self, migration_db):
         """No schema to revert (data-only revision) — downgrading must not
-        drop any Block B table or fail."""
-        _alembic("head")
+        drop any Block B table or fail.
+
+        Pinned to `STORAGE_ATTRIBUTION_REVISION` rather than "head" for the
+        same reason as `test_introduces_exactly_the_expected_tables` above:
+        the claim is that *`v1_11_0`* changes no schema, and running from head
+        turned it into a claim that no revision between head and `v1_10_0`
+        does either — which stopped being true when Céluma 1.3, Phase 4,
+        Block G added `tenant_usage_threshold_state` in `v1_13_0`.
+        """
+        _alembic(STORAGE_ATTRIBUTION_REVISION)
         before = set(inspect(migration_db).get_table_names())
 
         _alembic(USAGE_DOMAIN_REVISION, command="downgrade")
@@ -2204,6 +2240,411 @@ class TestReconciliationHardeningMigration:
             c["name"]
             for c in inspect(migration_db).get_columns("tenant_usage_reconciliation")
         }
+
+
+class TestUsageThresholdStateMigration:
+    """Céluma 1.3, Phase 4, Block G — `v1_13_0`, the durable
+    usage-threshold-state table.
+
+    Schema only. The single most important assertion in this class is
+    `test_creates_no_rows_and_no_notifications`: the revision must arrive on a
+    production database with 133 tenants and change nothing but the catalog.
+    """
+
+    def _insert_state(self, conn, tenant_id, *, resource="STORAGE", state="NORMAL", **columns):
+        state_id = uuid.uuid4()
+        extra_names = "".join(f", {name}" for name in columns)
+        extra_values = "".join(f", :{name}" for name in columns)
+        conn.execute(
+            text(
+                f"INSERT INTO tenant_usage_threshold_state "
+                f"(id, tenant_id, resource, state, created_at, updated_at"
+                f"{extra_names}) "
+                f"VALUES (:id, :tenant_id, :resource, :state, now(), now()"
+                f"{extra_values})"
+            ),
+            {
+                "id": state_id,
+                "tenant_id": tenant_id,
+                "resource": resource,
+                "state": state,
+                **columns,
+            },
+        )
+        return state_id
+
+    def test_introduces_exactly_one_table(self, migration_db):
+        _alembic(BLOCK_D_REVISION)
+        before = set(inspect(migration_db).get_table_names())
+
+        _alembic(BLOCK_G_REVISION)
+        after = set(inspect(migration_db).get_table_names())
+
+        assert after - before == THRESHOLD_STATE_TABLES
+
+    def test_creates_no_rows_and_no_notifications(self, migration_db):
+        """The revision's load-bearing property.
+
+        A baseline pass inside the migration would either record state without
+        notifying — permanently swallowing the first real crossing for every
+        tenant already above a threshold — or fan a mail-out across every
+        tenant from inside a DDL transaction. It does neither, because it
+        reads nothing and writes nothing.
+        """
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            conn.execute(
+                text(
+                    "INSERT INTO tenant_usage (tenant_id, billable_storage_bytes, "
+                    "last_updated) VALUES (:id, 950, now())"
+                ),
+                {"id": tenant_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO tenant_limits (tenant_id, storage_limit_bytes, "
+                    "user_limit, updated_at) VALUES (:id, 1000, 5, now())"
+                ),
+                {"id": tenant_id},
+            )
+
+        # Re-running the revision must still not evaluate anything: it is DDL.
+        _alembic(BLOCK_D_REVISION, command="downgrade")
+        _alembic("head")
+
+        with migration_db.connect() as conn:
+            assert (
+                conn.execute(
+                    text("SELECT COUNT(*) FROM tenant_usage_threshold_state")
+                ).scalar_one()
+                == 0
+            )
+            assert (
+                conn.execute(text("SELECT COUNT(*) FROM notification")).scalar_one() == 0
+            )
+
+    def test_upgrade_writes_no_rows_and_creates_no_notification(self):
+        """Structural, not behavioural: `upgrade()` may not so much as import
+        `NotificationService`, and may not write a row of any kind. A future
+        edit that adds a "helpful" baseline notification fails here before it
+        can reach a database.
+
+        Scoped to `upgrade()` by AST rather than to the whole file, because
+        `downgrade()` legitimately deletes the Block G notification rows a
+        narrowed CHECK constraint would reject — a different operation with a
+        different justification (see the revision's own docstring).
+        """
+        path = VERSIONS_DIR / "v1_13_0_block_g_usage_threshold_state.py"
+        module = ast.parse(path.read_text(encoding="utf-8"))
+        upgrade = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef) and node.name == "upgrade"
+        )
+        body = ast.unparse(upgrade)
+
+        for forbidden in (
+            "NotificationService",
+            "notify(",
+            "INSERT INTO",
+            "UPDATE ",
+            "DELETE FROM",
+            "tenant_usage",  # never reads the counter either
+        ):
+            assert forbidden not in body.replace(
+                "tenant_usage_threshold_state", "_state_table"
+            ), forbidden
+        # The docstring is allowed to *discuss* notifications; upgrade() is not.
+        assert "notification" in path.read_text(encoding="utf-8").lower()
+
+    def test_the_notification_type_constraints_admit_the_four_new_types(
+        self, migration_db
+    ):
+        """The `VARCHAR` + `CHECK` enum convention's one cost: adding a
+        notification type is a constraint change. Missing either table would
+        make the feature fail at the first real crossing — `notification` on
+        insert, `notification_preference` the first time an admin switched
+        email off for one of these types."""
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            _seed_branch(conn, tenant_id)
+            user_id = _seed_app_user(conn, tenant_id, email=f"u-{uuid.uuid4().hex[:8]}@lab.test")
+
+        for notification_type in (
+            "STORAGE_USAGE_APPROACHING",
+            "STORAGE_LIMIT_REACHED",
+            "USER_LIMIT_APPROACHING",
+            "USER_LIMIT_REACHED",
+        ):
+            with migration_db.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO notification (id, tenant_id, type, severity, "
+                        "title, resource_type, resource_id, idempotency_key, "
+                        "locale, created_at) VALUES (:id, :tenant_id, :type, "
+                        "'WARNING', 'x', 'tenant', :tenant_id, :key, 'es-MX', now())"
+                    ),
+                    {
+                        "id": uuid.uuid4(),
+                        "tenant_id": tenant_id,
+                        "type": notification_type,
+                        "key": f"{notification_type}:key",
+                    },
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO notification_preference (id, tenant_id, "
+                        "user_id, notification_type, in_app_enabled, "
+                        "email_enabled, updated_at) VALUES (:id, :tenant_id, "
+                        ":user_id, :type, true, false, now())"
+                    ),
+                    {
+                        "id": uuid.uuid4(),
+                        "tenant_id": tenant_id,
+                        "user_id": user_id,
+                        "type": notification_type,
+                    },
+                )
+
+        # An invented type is still rejected — the constraint was widened, not
+        # dropped.
+        with pytest.raises(IntegrityError):
+            with migration_db.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO notification (id, tenant_id, type, severity, "
+                        "title, resource_type, resource_id, idempotency_key, "
+                        "locale, created_at) VALUES (:id, :tenant_id, "
+                        "'STORAGE_USAGE_90', 'WARNING', 'x', 'tenant', "
+                        ":tenant_id, 'k2', 'es-MX', now())"
+                    ),
+                    {"id": uuid.uuid4(), "tenant_id": tenant_id},
+                )
+
+    def test_downgrade_narrows_the_constraints_and_removes_only_block_g_rows(
+        self, migration_db
+    ):
+        """A downgrade must reproduce `v1_12_0`'s schema exactly, which means
+        narrowing the type constraints — which cannot be done while rows carry
+        the wider values. The Phase 3 notification history must survive
+        untouched; only the four Block G types go."""
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            _seed_branch(conn, tenant_id)
+            user_id = _seed_app_user(conn, tenant_id, email=f"u-{uuid.uuid4().hex[:8]}@lab.test")
+            kept = uuid.uuid4()
+            conn.execute(
+                text(
+                    "INSERT INTO notification (id, tenant_id, type, severity, "
+                    "title, resource_type, resource_id, idempotency_key, locale, "
+                    "created_at) VALUES (:id, :tenant_id, 'REPORT_PUBLISHED', "
+                    "'INFO', 'kept', 'report', :tenant_id, 'kept-key', 'es-MX', now())"
+                ),
+                {"id": kept, "tenant_id": tenant_id},
+            )
+            dropped = uuid.uuid4()
+            conn.execute(
+                text(
+                    "INSERT INTO notification (id, tenant_id, type, severity, "
+                    "title, resource_type, resource_id, idempotency_key, locale, "
+                    "created_at) VALUES (:id, :tenant_id, 'STORAGE_LIMIT_REACHED', "
+                    "'WARNING', 'gone', 'tenant', :tenant_id, 'gone-key', 'es-MX', now())"
+                ),
+                {"id": dropped, "tenant_id": tenant_id},
+            )
+            for notification_id in (kept, dropped):
+                conn.execute(
+                    text(
+                        "INSERT INTO notification_recipient (id, notification_id, "
+                        "tenant_id, user_id, status, created_at) VALUES (:id, "
+                        ":notification_id, :tenant_id, :user_id, 'UNREAD', now())"
+                    ),
+                    {
+                        "id": uuid.uuid4(),
+                        "notification_id": notification_id,
+                        "tenant_id": tenant_id,
+                        "user_id": user_id,
+                    },
+                )
+
+        _alembic(BLOCK_D_REVISION, command="downgrade")
+
+        with migration_db.connect() as conn:
+            remaining = [
+                row[0]
+                for row in conn.execute(text("SELECT type FROM notification")).all()
+            ]
+            assert remaining == ["REPORT_PUBLISHED"]
+            assert (
+                conn.execute(
+                    text("SELECT COUNT(*) FROM notification_recipient")
+                ).scalar_one()
+                == 1
+            )
+            constraint = conn.execute(
+                text(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conname = 'ck_notification_type'"
+                )
+            ).scalar_one()
+            assert "STORAGE_LIMIT_REACHED" not in constraint
+            assert "REPORT_PUBLISHED" in constraint
+
+    def test_columns_nullability_and_defaults(self, migration_db):
+        _alembic("head")
+        columns = {
+            c["name"]: c
+            for c in inspect(migration_db).get_columns("tenant_usage_threshold_state")
+        }
+        assert set(columns) == {
+            "id",
+            "tenant_id",
+            "resource",
+            "state",
+            "last_value",
+            "last_limit",
+            "transition_count",
+            "last_transition_at",
+            "created_at",
+            "updated_at",
+        }
+        for name in ("id", "tenant_id", "resource", "state", "created_at", "updated_at"):
+            assert columns[name]["nullable"] is False, name
+        # Nullable on purpose: a state that is not evaluable has no numbers,
+        # and a zero there would be indistinguishable from a real zero.
+        for name in ("last_value", "last_limit", "last_transition_at"):
+            assert columns[name]["nullable"] is True, name
+        assert columns["transition_count"]["nullable"] is False
+        assert "UNMONITORED" in str(columns["state"]["default"])
+        assert "0" in str(columns["transition_count"]["default"])
+
+    def test_one_row_per_tenant_and_resource(self, migration_db):
+        """The constraint the whole idempotency design rests on: the service's
+        `INSERT ... ON CONFLICT DO NOTHING` infers this index, which is what
+        serializes two concurrent first evaluations."""
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            self._insert_state(conn, tenant_id, resource="STORAGE")
+            # A different resource for the same tenant is fine.
+            self._insert_state(conn, tenant_id, resource="USERS")
+
+        with pytest.raises(IntegrityError):
+            with migration_db.begin() as conn:
+                self._insert_state(conn, tenant_id, resource="STORAGE")
+
+        constraints = {
+            c["name"]: c["column_names"]
+            for c in inspect(migration_db).get_unique_constraints(
+                "tenant_usage_threshold_state"
+            )
+        }
+        assert constraints["uq_tenant_usage_threshold_state_tenant_resource"] == [
+            "tenant_id",
+            "resource",
+        ]
+
+    @pytest.mark.parametrize("resource", ["storage", "REPORTS", "", "Storage"])
+    def test_rejects_an_unknown_resource(self, migration_db, resource):
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+        with pytest.raises(IntegrityError):
+            with migration_db.begin() as conn:
+                self._insert_state(conn, tenant_id, resource=resource)
+
+    @pytest.mark.parametrize("state", ["OVER", "normal", "", "UNKNOWN"])
+    def test_rejects_an_unknown_state(self, migration_db, state):
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+        with pytest.raises(IntegrityError):
+            with migration_db.begin() as conn:
+                self._insert_state(conn, tenant_id, state=state)
+
+    def test_unmonitored_may_not_carry_evaluated_values(self, migration_db):
+        """`UNMONITORED` means "not evaluable". A row in that state holding
+        the numbers of a real evaluation would be a lie the service could
+        later read back as truth."""
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+        with pytest.raises(IntegrityError):
+            with migration_db.begin() as conn:
+                self._insert_state(
+                    conn, tenant_id, state="UNMONITORED", last_value=10, last_limit=100
+                )
+        # The same row with no values is accepted.
+        with migration_db.begin() as conn:
+            self._insert_state(conn, tenant_id, state="UNMONITORED")
+
+    @pytest.mark.parametrize(
+        "columns",
+        [
+            {"last_value": -1, "last_limit": 100},
+            {"last_value": 10, "last_limit": 0},
+            {"last_value": 10, "last_limit": -5},
+            {"last_value": 10, "last_limit": 100, "transition_count": -1},
+        ],
+    )
+    def test_rejects_impossible_numbers(self, migration_db, columns):
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+        with pytest.raises(IntegrityError):
+            with migration_db.begin() as conn:
+                self._insert_state(conn, tenant_id, **columns)
+
+    def test_tenant_fk_has_no_cascade(self, migration_db):
+        """Same no-cascade convention as every other table in this domain:
+        deleting a tenant that still has threshold state is refused, not
+        silently erased."""
+        _alembic("head")
+        fks = inspect(migration_db).get_foreign_keys("tenant_usage_threshold_state")
+        tenant_fk = [fk for fk in fks if fk["referred_table"] == "tenant"]
+        assert tenant_fk, "missing tenant_id -> tenant.id foreign key"
+        for fk in fks:
+            assert not fk.get("options", {}).get("ondelete")
+
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            self._insert_state(conn, tenant_id, last_value=10, last_limit=100)
+        with pytest.raises(IntegrityError):
+            with migration_db.begin() as conn:
+                conn.execute(
+                    text("DELETE FROM tenant WHERE id = :id"), {"id": tenant_id}
+                )
+
+    def test_downgrade_drops_the_table_and_re_upgrade_restores_it(self, migration_db):
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            self._insert_state(conn, tenant_id, last_value=900, last_limit=1000)
+
+        _alembic(BLOCK_D_REVISION, command="downgrade")
+        assert _current_revision(migration_db) == BLOCK_D_REVISION
+        assert THRESHOLD_STATE_TABLES.isdisjoint(
+            set(inspect(migration_db).get_table_names())
+        )
+
+        _alembic("head")
+        assert _current_revision(migration_db) == BLOCK_G_REVISION
+        assert THRESHOLD_STATE_TABLES <= set(inspect(migration_db).get_table_names())
+        with migration_db.connect() as conn:
+            # Remembered state is lost, which is correct and safe: the next
+            # evaluation re-derives it from live usage and limits under
+            # first-evaluation semantics. The worst case is one repeated
+            # notification for a tenant genuinely above a threshold — never a
+            # missed one.
+            assert (
+                conn.execute(
+                    text("SELECT COUNT(*) FROM tenant_usage_threshold_state")
+                ).scalar_one()
+                == 0
+            )
 
 
 def _seed_tenant(conn) -> uuid.UUID:

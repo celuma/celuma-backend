@@ -75,7 +75,25 @@ VALID_PARAMS = {
         # see app/services/sample_status_labels.py.
         "new_status_label": "Lista",
     },
+    # Céluma 1.3, Phase 4, Block G. The two REACHED templates deliberately
+    # declare no parameters at all — their copy states a fact that is as true
+    # at 100% as at 250%, and a number there would read like an overage bill.
+    NotificationType.STORAGE_USAGE_APPROACHING: {"usage_percent": 82},
+    NotificationType.STORAGE_LIMIT_REACHED: {},
+    NotificationType.USER_LIMIT_APPROACHING: {"usage_percent": 80},
+    NotificationType.USER_LIMIT_REACHED: {},
 }
+
+#: The types whose template declares at least one required parameter. Two of
+#: Block G's four declare none, which is a legitimate template shape — the
+#: parametrized "missing params are rejected" case below is about templates
+#: that *have* a requirement to violate, so it runs over this set rather than
+#: over every type.
+TYPES_WITH_REQUIRED_PARAMS = [
+    notification_type
+    for notification_type in NotificationType
+    if VALID_PARAMS[notification_type]
+]
 
 
 @pytest.fixture(name="world")
@@ -635,7 +653,7 @@ class TestTemplateSafety:
             validate_params(template, params)
         assert exc.value.code == "unknown_param"
 
-    @pytest.mark.parametrize("notification_type", list(NotificationType))
+    @pytest.mark.parametrize("notification_type", TYPES_WITH_REQUIRED_PARAMS)
     def test_missing_required_params_are_rejected(self, notification_type):
         template = NOTIFICATION_TEMPLATES[notification_type]
 
@@ -644,6 +662,21 @@ class TestTemplateSafety:
         assert exc.value.code == "missing_param"
 
     @pytest.mark.parametrize("notification_type", list(NotificationType))
+    def test_a_template_with_no_params_renders_from_nothing(self, notification_type):
+        """The complement of the case above, asserted for every type so the
+        two together cover the whole enum.
+
+        A parameterless template must render cleanly from `{}` rather than
+        raising — that is what makes "this event needs no data" expressible.
+        `STORAGE_LIMIT_REACHED` and `USER_LIMIT_REACHED` are the two."""
+        template = NOTIFICATION_TEMPLATES[notification_type]
+        if template.required_param_names:
+            pytest.skip("covered by test_missing_required_params_are_rejected")
+        title, body, safe = render(template, {})
+        assert title and safe == {}
+        assert body is None or body
+
+    @pytest.mark.parametrize("notification_type", TYPES_WITH_REQUIRED_PARAMS)
     def test_oversized_params_are_rejected(self, notification_type):
         template = NOTIFICATION_TEMPLATES[notification_type]
         params = dict(VALID_PARAMS[notification_type])
@@ -750,7 +783,17 @@ class TestTemplateSafety:
             for template in NOTIFICATION_TEMPLATES.values()
             for param in template.params
         }
-        assert declared == {"order_number", "actor_name", "sample_code", "new_status_label"}
+        assert declared == {
+            "order_number",
+            "actor_name",
+            "sample_code",
+            "new_status_label",
+            # Céluma 1.3, Phase 4, Block G. A backend-computed integer
+            # percentage — the only parameter in the registry with no
+            # user-editable field anywhere in its provenance, and therefore
+            # not a leak vector for anything §4 names.
+            "usage_percent",
+        }
 
         retracted = NOTIFICATION_TEMPLATES[NotificationType.REPORT_RETRACTED]
         assert "reason" not in retracted.allowed_param_names

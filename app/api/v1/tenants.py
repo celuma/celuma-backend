@@ -8,6 +8,7 @@ from app.models.user import AppUser
 from app.schemas.tenant import TenantCreate, TenantResponse, TenantDetailResponse
 from app.services.storage_billing import resolve_current_tenant_logo_storage_object
 from app.services.usage import UsageService
+from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from app.services.managed_tenant_image_service import (
     ManagedTenantImageService,
     InvalidImageError,
@@ -250,12 +251,13 @@ def upload_tenant_logo(
     tenant.logo_storage_id = result.storage_object.id
     tenant.logo_url = result.url
     session.add(tenant)
-    UsageService.record_storage_delta(
+    record_storage_delta_with_thresholds(
         session,
         tenant.id,
         result.size_bytes - previous_logo_size_bytes,
         source="tenant_logo",
         resource_type="tenant_logo",
+        actor_id=user.id,
     )
     session.commit()
     

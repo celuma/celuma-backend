@@ -23,6 +23,7 @@ from app.models.report import Report, ReportVersion
 from app.models.storage import StorageObject
 from app.services.s3 import S3Service
 from app.services.usage import UsageService
+from app.services.usage_thresholds import record_storage_delta_with_thresholds
 
 logger = logging.getLogger(__name__)
 
@@ -321,12 +322,13 @@ class ReportPdfGenerationService:
             # permanently billable — no decrement on a later regeneration
             # (see storage-flow-accounting-matrix.md "official PDF
             # generation"). Same transaction as the StorageObject insert.
-            UsageService.record_storage_delta(
+            record_storage_delta_with_thresholds(
                 self.session,
                 report.tenant_id,
                 storage.size_bytes or 0,
                 source="official_pdf",
                 resource_type="report_pdf",
+                actor_id=triggered_by_user_id,
             )
             self.session.commit()
             self.session.refresh(storage)

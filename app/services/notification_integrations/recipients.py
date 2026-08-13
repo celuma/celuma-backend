@@ -109,6 +109,56 @@ def users_with_permission(
     return [user_id for user_id in ordered if user_id in holders]
 
 
+def tenant_users_with_permission(
+    session: Session, *, tenant_id: UUID, permission_code: str
+) -> List[UUID]:
+    """Every **active** user of `tenant_id` holding `permission_code`.
+
+    Céluma 1.3, Phase 4, Block G. The plural sibling of
+    `users_with_permission` for the case where there is no candidate set to
+    narrow — a usage-threshold event is about the tenant, not about a report
+    somebody is assigned to, so its audience starts as "the whole tenant" and
+    is narrowed by a permission rather than by a workflow relationship.
+
+    That is a real exception to this module's cross-cutting rule 4 ("no
+    blanket all-admins fan-out anywhere"), and it is narrow on purpose. Rule 4
+    exists because a *clinical* event addressed to every admin tells people
+    about work that is not theirs. A threshold event is the opposite: it is
+    administrative by nature, its destination (`/config/usage`) is gated on
+    this exact permission, and a recipient who cannot open the page the
+    notification points at has been sent a dead end. Resolving the audience
+    from the destination's own permission is what keeps the two in step —
+    see usage-threshold-recipient-contract.md.
+
+    **A permission, not a role name.** `admin` and `superuser` are the two
+    roles that hold `admin:manage_tenant` in today's catalog, but matching on
+    the codes would silently exclude a future custom role that is granted the
+    permission, and silently include an `admin` role from which it had been
+    revoked. `has_permission()` resolves role -> permission for the request
+    path; this resolves it in bulk, through the same three tables, so the two
+    cannot disagree.
+
+    Deduplicated: a user holding the permission through two roles (an
+    `admin` who is also a `pathologist`) appears once. `DISTINCT` in SQL plus
+    `_dedupe` on the way out — the second is what makes the order stable.
+    """
+    rows = session.exec(
+        select(AppUser.id)
+        .join(UserRoleLink, UserRoleLink.user_id == AppUser.id)
+        .join(Role, Role.id == UserRoleLink.role_id)
+        .join(RolePermission, RolePermission.role_id == Role.id)
+        .join(Permission, Permission.id == RolePermission.permission_id)
+        .where(
+            AppUser.tenant_id == tenant_id,
+            AppUser.is_active == True,  # noqa: E712 — SQL boolean, not Python
+            Permission.code == permission_code,
+        )
+        .order_by(AppUser.id)
+        .distinct()
+    ).all()
+    return _dedupe(row[0] if isinstance(row, (tuple, list)) else row for row in rows)
+
+
 def _dedupe(user_ids: Iterable[UUID]) -> List[UUID]:
     seen: Set[UUID] = set()
     ordered: List[UUID] = []
@@ -323,3 +373,41 @@ def resolve_sample_status_changed_recipients(
     if report is not None:
         candidates.extend(report_author_ids(session, report=report))
     return active_users_in_tenant(session, candidates, tenant_id)
+
+
+#: The permission a usage-threshold notification's recipients must hold. It is
+#: the same permission `GET /api/v1/tenant/usage` and the `/config/usage` route
+#: are gated on — deliberately the same constant rather than a parallel one, so
+#: "who may be told" and "who may look" cannot drift apart.
+USAGE_THRESHOLD_PERMISSION = "admin:manage_tenant"
+
+
+def resolve_usage_threshold_recipients(
+    session: Session, *, tenant_id: UUID
+) -> List[UUID]:
+    """The four usage-threshold types — active `admin:manage_tenant` holders.
+
+    Céluma 1.3, Phase 4, Block G. Not "the admin role", not every active user,
+    not the tenant owner: whoever currently holds the permission that opens
+    `/config/usage`, read fresh at notification time like every other resolver
+    here.
+
+    Everyone else is excluded, including a `pathologist`, a `lab_tech`, an
+    `assistant`, a `viewer`, a `billing` user and a `physician` — unless they
+    independently hold the permission, in which case they are a recipient for
+    that reason and not for their role. Inactive users are excluded by the
+    query.
+
+    **The actor is not excluded**, and that is the one place this event
+    departs from Phase 3's cross-cutting rule 1. Actor exclusion exists
+    because the actor already saw the outcome of their own action in the
+    response — true of publishing a report, false here: the admin who uploaded
+    the image that took the laboratory from 79% to 81% saw an upload succeed,
+    not a threshold crossing. Suppressing their copy would, in the common case
+    of a single-admin laboratory, mean the event has no recipients at all. The
+    exclusion is switched off at the command (`exclude_actor=False`) rather
+    than here — resolvers do not do actor exclusion, per rule 6.
+    """
+    return tenant_users_with_permission(
+        session, tenant_id=tenant_id, permission_code=USAGE_THRESHOLD_PERMISSION
+    )

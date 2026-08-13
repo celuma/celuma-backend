@@ -246,6 +246,17 @@ def render(
 _ORDER_NUMBER = TemplateParam("order_number", max_length=50)
 _ACTOR_NAME = TemplateParam("actor_name", max_length=120)
 
+#: Céluma 1.3, Phase 4, Block G. An integer percentage, already floored by
+#: `usage_thresholds.py`, used only in the two APPROACHING bodies where the
+#: copy says "aproximadamente el N%".
+#:
+#: It is a *display* value and nothing decides anything from it: the state
+#: machine compares raw integers (`used * 100 >= limit * 80`), never this.
+#: Declared with `max_length=6` so even a wildly over-limit tenant's
+#: percentage fits, and as an `int` so the parameter screening's
+#: string/integer rule accepts it without the caller formatting anything.
+_USAGE_PERCENT = TemplateParam("usage_percent", max_length=6)
+
 #: The `es-MX` copy, one template per approved NotificationType.
 #:
 #: Keyed by type for readability and because Céluma 1.3 has exactly one live
@@ -301,6 +312,67 @@ _TEMPLATES_ES_MX: Dict[NotificationType, NotificationTemplate] = {
             TemplateParam("sample_code", max_length=50),
             TemplateParam("new_status_label", max_length=30),
         ),
+    ),
+    # -- Céluma 1.3, Phase 4, Block G: usage thresholds --------------------
+    #
+    # Four constraints these four templates are written against, all
+    # checkable and all tested (tests/http/test_usage_thresholds.py::
+    # TestNotificationShape::test_copy_is_neutral_factual_and_non_enforcing):
+    #
+    #   1. **Nothing is enforced, so nothing may claim it is.** No
+    #      "bloqueado", "suspendido", "deshabilitado". Phase 4 measures;
+    #      uploads, report generation, PDF generation, user creation and
+    #      login all keep working at 100% and above.
+    #   2. **No commercial language.** No plan, price, upgrade or purchase
+    #      wording — there is no plan catalog in Céluma 1.3, so any such copy
+    #      would point at a product surface that does not exist.
+    #   3. **No cloud provider.** No S3, no AWS, no bucket. The tenant's
+    #      mental model is "el almacenamiento del laboratorio".
+    #   4. **No PHI, structurally.** The only parameter any of these declare
+    #      is an integer percentage; there is no parameter through which a
+    #      patient, a sample, a report or a filename could arrive.
+    #
+    # The two REACHED templates take no parameters at all. Their copy states
+    # a fact ("alcanzó o superó el límite configurado") that is exactly as
+    # true at 100% as at 250%, and a number in that sentence would add
+    # precision no recipient can act on while making the sentence read like
+    # an overage bill.
+    NotificationType.STORAGE_USAGE_APPROACHING: NotificationTemplate(
+        key="storage_usage_approaching_v1",
+        notification_type=NotificationType.STORAGE_USAGE_APPROACHING,
+        title="Almacenamiento cercano al límite",
+        body=(
+            "El laboratorio utiliza aproximadamente el {usage_percent}% del "
+            "almacenamiento configurado."
+        ),
+        params=(_USAGE_PERCENT,),
+    ),
+    NotificationType.STORAGE_LIMIT_REACHED: NotificationTemplate(
+        key="storage_limit_reached_v1",
+        notification_type=NotificationType.STORAGE_LIMIT_REACHED,
+        title="Límite de almacenamiento alcanzado",
+        body="El uso de almacenamiento alcanzó o superó el límite configurado.",
+        params=(),
+    ),
+    NotificationType.USER_LIMIT_APPROACHING: NotificationTemplate(
+        key="user_limit_approaching_v1",
+        notification_type=NotificationType.USER_LIMIT_APPROACHING,
+        title="Usuarios cercanos al límite",
+        body=(
+            "El laboratorio utiliza aproximadamente el {usage_percent}% de los "
+            "usuarios internos configurados."
+        ),
+        params=(_USAGE_PERCENT,),
+    ),
+    NotificationType.USER_LIMIT_REACHED: NotificationTemplate(
+        key="user_limit_reached_v1",
+        notification_type=NotificationType.USER_LIMIT_REACHED,
+        title="Límite de usuarios alcanzado",
+        body=(
+            "La cantidad de usuarios internos activos alcanzó o superó el "
+            "límite configurado."
+        ),
+        params=(),
     ),
 }
 
