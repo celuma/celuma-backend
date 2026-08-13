@@ -1,8 +1,8 @@
-"""Alembic chain integrity tests (Céluma 1.3, Phase 2 and Phase 3 closures).
+"""Alembic chain integrity tests (Céluma 1.3 — the frozen release contract).
 
-Céluma 1.3 was developed as ten revisions on the `celuma-1.3` branch and
-ships as one. Two squashes got it there, and both folded their work into the
-same contractual revision, `v1_3_0`:
+Céluma 1.3 was developed as fourteen revisions on the `celuma-1.3` branch and
+ships as one. Three squashes got it there, and all three folded their work
+into the same contractual revision, `v1_3_0`:
 
   - **Phase 2 closure** folded in `v1_3_0 … v1_9_0` (Blocks A–E plus five
     post-Phase-2 remediation rounds) — see
@@ -11,21 +11,51 @@ same contractual revision, `v1_3_0`:
     the identifiers Phase 2 had freed, `v1_4_0 → v1_5_0 → v1_6_0` (Blocks B,
     D and F) — see
     docs/celuma-1.3/phase-3-closure/phase-3-alembic-squash-inventory.md.
+  - **Pre-Phase-5 closure** folded in the Phase 4 usage chain,
+    `v1_10_0 → v1_11_0 → v1_12_0 → v1_13_0` (Blocks B, C, D and G) — see
+    docs/celuma-1.3/pre-phase-5-migration-squash/.
 
 Development history and release history are therefore different, and the
 per-block documents under docs/celuma-1.3/ record the former on purpose:
 
-    development history:  v1_3_0 → v1_4_0 → v1_5_0 → v1_6_0
+    development history:  v1_3_0 → … → v1_9_0, then v1_10_0 → … → v1_13_0
     release history:      v1_3_0 only
 
-These tests are the regression net for both decisions:
+The release contract these tests defend is one revision per product release:
+
+    Céluma 1.0 → v1_0_0    Céluma 1.2 → v1_2_0
+    Céluma 1.1 → v1_1_0    Céluma 1.3 → v1_3_0   (frozen)
+
+These tests are the regression net for that decision:
 
   - the static ones guarantee the chain stays single-headed and linear, that
     the head is the release revision, and that no superseded 1.3 revision id
     can creep back into executable code;
   - the DB-backed ones guarantee the release migration still upgrades a clean
     pre-1.3 database, downgrades without residue — including from a
-    *populated* database — and re-upgrades.
+    *populated* database — and re-upgrades;
+  - `TestSchemaEquivalence` pins the whole thing to a captured snapshot of
+    what the pre-squash chain produced, so a future edit to `v1_3_0` that
+    silently changes the released schema fails loudly.
+
+Why almost nothing here names an intermediate revision any more
+---------------------------------------------------------------
+Before the pre-Phase-5 squash, the Phase 4 tests were organized by revision:
+one class per revision, each upgrading to that revision and asserting its
+footprint. Those boundaries no longer exist, so the classes were retargeted
+rather than deleted — they now assert that the *final* `v1_3_0` contains the
+usage domain, the storage-attribution contract, the DB-scoped logo contract
+and the threshold-state contract. The behaviours still matter; which revision
+introduced them does not.
+
+One consequence is structural: there is no longer a revision boundary between
+"the 1.3 schema exists" and "the 1.3 data migration has run" — the squash
+merged them by design. Tests that used to seed rows at an intermediate
+revision and then run the data migration now seed at `v1_2_0`, the only
+boundary left before the release migration, and upgrade across it. That is a
+strictly more realistic exercise: it is the actual 1.2 → 1.3 release
+transition, against data shaped the way a real pre-1.3 database shapes it
+(`storage_object.tenant_id` absent rather than conveniently pre-populated).
 
 `TestNotificationDomain` replaces the three per-revision classes Phase 3
 Blocks B, D and F each added (`TestNotificationsRevision`,
@@ -42,11 +72,11 @@ tests/http/conftest.py: a database that is always dropped and recreated by
 name, never the tenant's real `celumadb`.
 """
 import ast
-import io
+import importlib.util
+import json
 import os
 import pathlib
 import subprocess
-import tokenize
 import uuid
 
 import pytest
@@ -62,50 +92,29 @@ from app.core.config import settings
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 VERSIONS_DIR = BACKEND_ROOT / "alembic" / "versions"
 
+#: The one file carrying the Céluma 1.3 release contract. Several guards below
+#: are about this file's contents rather than about any revision id.
+RELEASE_MIGRATION_PATH = VERSIONS_DIR / "v1_3_0_reports_v2_schema.py"
+
+#: Schema of the pre-squash head (`v1_13_0`), captured from PostgreSQL by
+#: scripts/capture_schema_snapshot.py immediately before the four Phase 4
+#: revisions were deleted. `TestSchemaEquivalence` compares the squashed
+#: migration's output against it. Regenerating this file is not a routine
+#: action: it is the frozen evidence that the squash changed the revision
+#: identity and nothing else.
+PRE_SQUASH_SCHEMA_SNAPSHOT = (
+    BACKEND_ROOT / "tests" / "fixtures" / "schema" / "v1_13_0_pre_squash_schema.json"
+)
+
 #: The last revision belonging to the release *before* Céluma 1.3 — the
 #: revision `main` and tag v1.2.0 carry.
 LAST_PRE_1_3_REVISION = "v1_2_0"
 
-#: The single consolidated Céluma 1.3 release revision. No longer the head
-#: — Céluma 1.3, Phase 4, Block B adds the first post-release revision on
-#: top of it — but it remains the fixed, closed boundary every pre-1.3
-#: revision test still targets explicitly (never "head") so those tests
-#: keep describing the release migration's own footprint, unaffected by
-#: whatever lands on top of it in later phases.
+#: The single consolidated Céluma 1.3 release revision — and, after the
+#: pre-Phase-5 migration squash, the head. It carries the complete 1.3
+#: database contract and is **frozen**: Phase 5 validates it and does not
+#: rewrite it.
 RELEASE_REVISION = "v1_3_0"
-
-#: Céluma 1.3, Phase 4, Block B — the usage domain model. The first revision
-#: built on top of the closed v1_3_0 release. No longer the head — Block C
-#: adds one more revision on top — but still the fixed boundary
-#: `TestUsageDomainMigration` targets explicitly.
-#: Not v1_4_0: that id (and v1_5_0 through v1_9_0) is permanently retired by
-#: SUPERSEDED_REVISIONS below — the Phase 3 closure squash folded them into
-#: v1_3_0 and forbids their ever being resolvable again. v1_10_0 is the
-#: first id after v1_3_0 that chain never used.
-USAGE_DOMAIN_REVISION = "v1_10_0"
-
-#: Céluma 1.3, Phase 4, Block C — storage attribution & usage
-#: initialization. Built directly on top of v1_10_0. No longer the head —
-#: Block D adds one more revision on top. Data-only (no new table/column) —
-#: see the revision's own module docstring for why it still deserves a
-#: dedicated id rather than being folded into v1_10_0 (that revision is
-#: closed, per the master spec's "do not rewrite v1_10_0/v1_3_0"
-#: instruction).
-STORAGE_ATTRIBUTION_REVISION = "v1_11_0"
-
-#: Céluma 1.3, Phase 4, Block D — DB-scoped tenant logo (`tenant.
-#: logo_storage_id` + backfill) and reconciliation hardening
-#: (`tenant_usage_reconciliation.metadata_mismatches_found`, one-RUNNING-
-#: per-tenant partial unique index). No longer the head — Block G adds one
-#: more revision on top — but still the fixed boundary
-#: `TestReconciliationHardeningMigration` targets explicitly.
-BLOCK_D_REVISION = "v1_12_0"
-
-#: Céluma 1.3, Phase 4, Block G — durable usage-threshold state
-#: (`tenant_usage_threshold_state`). Schema only: the revision creates the
-#: table and nothing else, and in particular seeds no baseline state and
-#: creates no notification. The current alembic head.
-BLOCK_G_REVISION = "v1_13_0"
 
 #: Revision ids that existed only on the unreleased `celuma-1.3` branch and
 #: were folded into RELEASE_REVISION. Nothing executable may reference them.
@@ -114,10 +123,17 @@ BLOCK_G_REVISION = "v1_13_0"
 #: closed. Phase 2 closure retired `v1_4_0 … v1_9_0`; Phase 3 Blocks B, D and
 #: F each removed one entry when they reused a freed id for a live revision
 #: (`v1_4_0`, `v1_5_0`, `v1_6_0`); the Phase 3 closure squash put all three
-#: back, permanently, because those revisions are now folded into
-#: RELEASE_REVISION as well. Every id here belonged to a revision that never
-#: reached production, staging or a customer database, so no `alembic_version`
-#: row anywhere carries one.
+#: back, permanently. The pre-Phase-5 squash added the Phase 4 chain,
+#: `v1_10_0 … v1_13_0` — development-time revisions of product version *1.3*,
+#: never products 1.10–1.13.
+#:
+#: Every id here belonged to a revision that never reached production,
+#: staging or a customer database, so no `alembic_version` row anywhere
+#: carries one. For the Phase 4 four this was verified rather than assumed:
+#: `main` (the only branch CI deploys to staging) carried nothing past
+#: `v1_2_0`, and the four revision files existed solely in unpushed local
+#: commits. See docs/celuma-1.3/pre-phase-5-migration-squash/
+#: migration-squash-inventory.md.
 SUPERSEDED_REVISIONS = (
     "v1_4_0",
     "v1_5_0",
@@ -125,18 +141,17 @@ SUPERSEDED_REVISIONS = (
     "v1_7_0",
     "v1_8_0",
     "v1_9_0",
+    "v1_10_0",
+    "v1_11_0",
+    "v1_12_0",
+    "v1_13_0",
 )
 
-#: Every table the release migration introduces on top of `v1_2_0` — the
-#: Phase 2 objects and the Phase 3 notification domain together.
-RELEASE_TABLES = {
+#: The Phase 2 report/letterhead objects.
+REPORTS_V2_TABLES = {
     "report_template_version",
     "report_letterhead",
     "report_letterhead_version",
-    "notification",
-    "notification_recipient",
-    "notification_delivery",
-    "notification_preference",
 }
 
 #: The four notification-domain tables, absorbed from the Phase 3 chain.
@@ -147,17 +162,27 @@ NOTIFICATION_TABLES = {
     "notification_preference",
 }
 
-#: The three tables Céluma 1.3, Phase 4, Block B introduces on top of the
-#: release revision.
+#: The three usage tables, absorbed from Céluma 1.3, Phase 4, Block B.
 USAGE_DOMAIN_TABLES = {
     "tenant_usage",
     "tenant_limits",
     "tenant_usage_reconciliation",
 }
 
-#: The one table Céluma 1.3, Phase 4, Block G introduces on top of Block D's
-#: revision.
+#: The threshold-state table, absorbed from Céluma 1.3, Phase 4, Block G.
 THRESHOLD_STATE_TABLES = {"tenant_usage_threshold_state"}
+
+#: Every table the release migration introduces on top of `v1_2_0`. The four
+#: groupings above are kept separate because individual tests still reason
+#: about one domain at a time; this union is the release footprint itself,
+#: and it grew with each squash — Phase 3 added the notification tables,
+#: the pre-Phase-5 squash added the usage and threshold-state ones.
+RELEASE_TABLES = (
+    REPORTS_V2_TABLES
+    | NOTIFICATION_TABLES
+    | USAGE_DOMAIN_TABLES
+    | THRESHOLD_STATE_TABLES
+)
 
 #: The delivery uniqueness constraint Phase 3 Block B created and Block D
 #: dropped. The consolidated migration must never create it: it assumed one
@@ -169,14 +194,24 @@ _MIGRATION_TEST_DB = "celuma_migration_test"
 
 
 def _executable_source(path: pathlib.Path) -> str:
-    """Return a module's source stripped of its module docstring and comments.
+    """Return a module's source stripped of every docstring and comment.
 
     The release migration documents its own provenance in prose — the module
-    docstring names the revisions it consolidates, and each section of
-    `upgrade()` carries an `ex-v1_x_0` comment so a reader can trace any DDL
-    statement back to the block that introduced it. Both are inert. What must
-    never come back is a revision id that some code path actually resolves,
-    stamps, or branches on, so the search runs against code only.
+    docstring names the revisions it consolidates, each section of `upgrade()`
+    carries an `ex-v1_x_0` comment so a reader can trace any DDL statement
+    back to the block that introduced it, and `downgrade()`'s own docstring
+    explains which per-revision inverses the squash collapsed and why. All of
+    it is inert. What must never come back is a revision id that some code
+    path actually resolves, stamps, or branches on, so the search runs against
+    code only.
+
+    Docstrings of *any* kind are stripped, not only the module's. The
+    pre-Phase-5 squash is what forced the generalization: collapsing four
+    downgrades into one made `downgrade()`'s docstring the natural place to
+    record what was collapsed, and a function docstring is exactly as inert as
+    a module one. Stripping only the module docstring would have made the
+    guard reward moving prose into a comment rather than reward not having a
+    live reference — which is not what it is for.
     """
     source = path.read_text(encoding="utf-8")
     try:
@@ -184,14 +219,42 @@ def _executable_source(path: pathlib.Path) -> str:
     except SyntaxError:  # pragma: no cover - not our concern here
         return source
 
-    if ast.get_docstring(tree, clean=False) is not None:
-        lines = source.splitlines(keepends=True)
-        source = "".join(lines[tree.body[0].end_lineno :])
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            continue
+        if ast.get_docstring(node, clean=False) is None:
+            continue
+        # Drop the docstring, keeping the body syntactically valid — a
+        # docstring-only function would otherwise unparse to nothing.
+        node.body = node.body[1:] or [ast.Pass()]
 
-    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
-    return "\n".join(
-        token.string for token in tokens if token.type != tokenize.COMMENT
+    # `ast.unparse` emits code and nothing else: comments never survive the
+    # parse, and the docstrings were removed above.
+    return ast.unparse(ast.fix_missing_locations(tree))
+
+
+def _load_release_migration():
+    """Import the release migration as a module, for tests that need its
+    frozen SQL rather than its effects.
+
+    The squash removed the seam these tests used to rely on: with the data
+    migration folded into the same revision that creates the schema, there is
+    no revision to stop at between "the tables exist" and "the data has been
+    transformed". Where a property is genuinely about one SQL statement —
+    idempotency guards, the resolution rule for an ambiguous logo — the
+    honest replacement is to run that exact statement, taken from the
+    migration itself so the test cannot drift away from what ships.
+
+    Loaded by path because `alembic/versions/` is not an importable package.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_celuma_release_migration", RELEASE_MIGRATION_PATH
     )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _script_directory() -> ScriptDirectory:
@@ -206,58 +269,48 @@ class TestChainShape:
     def test_exactly_one_head(self):
         assert len(_script_directory().get_heads()) == 1
 
-    def test_head_is_the_block_g_revision(self):
-        """Céluma 1.3, Phase 4, Block G: the head moves forward again, from
-        Block D's revision to Block G's. Same reasoning as every previous
-        move of this assertion — it names the newest revision, and is
-        expected to be updated (not deleted) by the next block that adds one.
+    def test_head_is_the_release_revision(self):
+        """The permanent release contract: one revision per product release,
+        and Céluma 1.3's is `v1_3_0`.
+
+        This assertion moved forward four times while Phase 4 was built
+        (`v1_10_0` → `v1_11_0` → `v1_12_0` → `v1_13_0`) because each block
+        added a development-time revision on top of the release. The
+        pre-Phase-5 squash folded all four back in, and this assertion is now
+        expected to *stay* here: `v1_3_0` is frozen, so the next legitimate
+        move is Céluma 1.4's own release revision, expected `v1_4_0`.
         """
-        assert _script_directory().get_current_head() == BLOCK_G_REVISION
+        assert _script_directory().get_current_head() == RELEASE_REVISION
 
     def test_release_revision_sits_directly_on_the_last_pre_1_3_revision(self):
         revision = _script_directory().get_revision(RELEASE_REVISION)
         assert revision.down_revision == LAST_PRE_1_3_REVISION
 
-    def test_usage_domain_revision_sits_directly_on_the_release_revision(self):
-        """The new revision is additive on top of the closed release, not a
-        rewrite of it: `v1_3_0` is untouched, and `v1_4_0` is its only
-        child."""
-        revision = _script_directory().get_revision(USAGE_DOMAIN_REVISION)
-        assert revision.down_revision == RELEASE_REVISION
-
-    def test_storage_attribution_revision_sits_directly_on_the_usage_domain_revision(self):
-        """Block C is additive on top of the closed Block B revision, not a
-        rewrite of it: `v1_10_0` is untouched, and `v1_11_0` is its only
-        child."""
-        revision = _script_directory().get_revision(STORAGE_ATTRIBUTION_REVISION)
-        assert revision.down_revision == USAGE_DOMAIN_REVISION
-
-    def test_block_d_revision_sits_directly_on_the_storage_attribution_revision(self):
-        """Block D is additive on top of the closed Block C revision: after
-        its own D0 determinism correction, `v1_11_0` is frozen and
-        `v1_12_0` is its only child."""
-        revision = _script_directory().get_revision(BLOCK_D_REVISION)
-        assert revision.down_revision == STORAGE_ATTRIBUTION_REVISION
-
-    def test_block_g_revision_sits_directly_on_the_block_d_revision(self):
-        """Block G is additive on top of the closed Block D revision:
-        `v1_12_0` is untouched and `v1_13_0` is its only child."""
-        revision = _script_directory().get_revision(BLOCK_G_REVISION)
-        assert revision.down_revision == BLOCK_D_REVISION
-
-    def test_chain_is_linear_from_base_to_head(self):
+    def test_chain_is_exactly_one_revision_per_product_release(self):
+        """The whole point of the squash, as a single assertion: four
+        revisions, one per shipped release, base to head, in order."""
         script = _script_directory()
         revisions = list(script.walk_revisions())
         assert [r.revision for r in revisions] == [
-            BLOCK_G_REVISION,
-            BLOCK_D_REVISION,
-            STORAGE_ATTRIBUTION_REVISION,
-            USAGE_DOMAIN_REVISION,
             RELEASE_REVISION,
             "v1_2_0",
             "v1_1_0",
             "v1_0_0",
         ]
+
+    def test_release_revision_has_no_children(self):
+        """Nothing may be appended to the frozen release revision. A Céluma
+        1.4 revision built on `v1_3_0` is exactly what this test is meant to
+        catch and force a deliberate decision about — the freeze means the
+        next schema change is a release decision, not a quiet `down_revision`.
+        """
+        script = _script_directory()
+        children = [
+            revision.revision
+            for revision in script.walk_revisions()
+            if revision.down_revision == RELEASE_REVISION
+        ]
+        assert children == []
 
     def test_no_merge_revision_exists(self):
         """A squash, not a merge: no revision may have more than one parent."""
@@ -310,9 +363,15 @@ class TestMigrationHistoricalDeterminism:
     if a historical migration imported one, upgrading a fresh environment
     through the full chain later would silently apply *today's* rules to a
     *historical* revision's data, instead of the rules that revision
-    actually shipped with. See v1_11_0's own module docstring
-    ("Historical determinism") and docs/celuma-1.3/phase-4-block-c/
-    block-c-remediation-report.md.
+    actually shipped with. See the release migration's module docstring
+    ("What the squash collapsed, and what it could not") and
+    docs/celuma-1.3/phase-4-block-c/block-c-remediation-report.md.
+
+    These guards were written against the revision that carried the frozen
+    baseline SQL at the time (Block C's, then Block D's correction of it).
+    The squash moved that SQL into `v1_3_0` without changing a character of
+    it, so the guards move with it — the property being defended is a
+    property of the SQL and its surroundings, not of a revision id.
 
     A structural AST guard, not a DB-backed test — this is about what a
     migration file imports, not what it does once run.
@@ -329,32 +388,47 @@ class TestMigrationHistoricalDeterminism:
                     modules.add(alias.name)
         return modules
 
-    def test_v1_11_0_does_not_import_application_services(self):
-        path = VERSIONS_DIR / "v1_11_0_block_c_storage_attribution.py"
-        modules = self._imported_modules(path)
+    def test_the_release_migration_does_not_import_application_services(self):
+        modules = self._imported_modules(RELEASE_MIGRATION_PATH)
         offenders = {
             m for m in modules if m == "app.services" or m.startswith("app.services.")
         }
         assert offenders == set(), (
-            f"v1_11_0 must not import runtime business services; found {offenders}"
+            f"{RELEASE_REVISION} must not import runtime business services; "
+            f"found {offenders}"
         )
 
-    def test_v1_11_0_does_not_import_the_usage_service(self):
-        path = VERSIONS_DIR / "v1_11_0_block_c_storage_attribution.py"
-        modules = self._imported_modules(path)
+    def test_the_release_migration_does_not_import_the_usage_service(self):
+        modules = self._imported_modules(RELEASE_MIGRATION_PATH)
         assert "app.services.usage" not in modules
         assert not any(m.startswith("app.services.usage") for m in modules)
 
-    def test_v1_11_0_does_not_import_the_storage_billing_service(self):
-        path = VERSIONS_DIR / "v1_11_0_block_c_storage_attribution.py"
-        modules = self._imported_modules(path)
+    def test_the_release_migration_does_not_import_the_storage_billing_service(self):
+        modules = self._imported_modules(RELEASE_MIGRATION_PATH)
         assert "app.services.storage_billing" not in modules
         assert not any(m.startswith("app.services.storage_billing") for m in modules)
 
+    def test_the_release_migration_does_not_import_notification_services(self):
+        """Added by the pre-Phase-5 squash. The threshold-state schema now
+        lives in the same file as the usage baseline, so the "a migration
+        must not notify" rule and the "a migration must not compute billing"
+        rule are now guarding the same file — worth asserting explicitly
+        rather than relying on the blanket `app.services` check to imply it.
+        """
+        modules = self._imported_modules(RELEASE_MIGRATION_PATH)
+        for forbidden in (
+            "app.services.notification",
+            "app.services.usage_threshold",
+            "app.services.email",
+            "app.services.s3",
+        ):
+            assert forbidden not in modules
+            assert not any(m.startswith(forbidden) for m in modules)
+
     def test_no_migration_file_imports_an_application_service(self):
         """The general rule this remediation establishes for every
-        migration, not only v1_11_0 — a regression guard against the same
-        mistake recurring in a later revision."""
+        migration, not only the release revision — a regression guard against
+        the same mistake recurring in a later revision."""
         offenders = []
         for path in sorted(VERSIONS_DIR.glob("*.py")):
             modules = self._imported_modules(path)
@@ -363,22 +437,24 @@ class TestMigrationHistoricalDeterminism:
                 offenders.append((path.name, sorted(bad)))
         assert offenders == []
 
-    def test_v1_11_0_only_imports_stable_primitives(self):
+    def test_the_release_migration_only_imports_stable_primitives(self):
         """Whitelist, not blacklist — proves the migration's import surface
-        is exactly the small, stable set intended (`typing`, `alembic.op`,
-        `sqlalchemy.text`), not merely "no app.services", which a
-        differently-shaped business-logic import (e.g. a direct app.models
-        import performing hidden computation) could technically satisfy
-        while still reintroducing drift risk.
+        is exactly the small, stable set intended, not merely "no
+        app.services", which a differently-shaped business-logic import (e.g.
+        a direct app.models import performing hidden computation) could
+        technically satisfy while still reintroducing drift risk.
 
         `os` was on this list until Block D's D0 correction, because the
         tenant-logo baseline read `os.environ` for the CDN prefix. It is
         deliberately no longer allowed: that read is exactly what made the
         revision environment-dependent.
+
+        `logging` is allowed, and arrived with the squash: the tenant-logo
+        backfill logs four aggregate counts. It reads nothing, decides
+        nothing, and cannot change what the migration produces.
         """
-        path = VERSIONS_DIR / "v1_11_0_block_c_storage_attribution.py"
-        modules = self._imported_modules(path)
-        allowed_prefixes = ("typing", "alembic", "sqlalchemy")
+        modules = self._imported_modules(RELEASE_MIGRATION_PATH)
+        allowed_prefixes = ("typing", "alembic", "sqlalchemy", "logging")
         offenders = {
             m for m in modules if not any(m == p or m.startswith(p + ".") for p in allowed_prefixes)
         }
@@ -388,10 +464,10 @@ class TestMigrationHistoricalDeterminism:
         "setting",
         ["MEDIA_PUBLIC_BASE_URL", "S3_BUCKET_NAME", "AWS_REGION", "os.environ", "getenv"],
     )
-    def test_v1_11_0_reads_no_environment_configuration(self, setting):
+    def test_the_release_migration_reads_no_environment_configuration(self, setting):
         """Céluma 1.3, Phase 4, Block D (D0). Historical determinism is not
         only "does not import evolvable code" — it is also "does not read
-        mutable configuration". Until D0 this revision rebuilt the public-URL
+        mutable configuration". Until D0 the baseline rebuilt the public-URL
         prefix from `MEDIA_PUBLIC_BASE_URL`/`S3_BUCKET_NAME`/`AWS_REGION` to
         interpret a persisted `Tenant.logo_url`, so the same rows and the
         same source could produce a different baseline in an environment
@@ -402,19 +478,39 @@ class TestMigrationHistoricalDeterminism:
         Runs against executable source only — the module docstring
         legitimately *discusses* these names.
         """
-        source = _executable_source(VERSIONS_DIR / "v1_11_0_block_c_storage_attribution.py")
+        source = _executable_source(RELEASE_MIGRATION_PATH)
         assert setting not in source
 
     def test_no_migration_file_reads_the_cdn_base_url(self):
-        """The standing rule D0 establishes for every revision, not only
-        v1_11_0: a migration's result must not depend on which CDN happens
-        to be configured when it runs."""
+        """The standing rule D0 establishes for every revision: a migration's
+        result must not depend on which CDN happens to be configured when it
+        runs."""
         offenders = [
             path.name
             for path in sorted(VERSIONS_DIR.glob("*.py"))
             if "MEDIA_PUBLIC_BASE_URL" in _executable_source(path)
         ]
         assert offenders == []
+
+    def test_the_release_migration_creates_no_notification(self):
+        """Céluma 1.3, Phase 4, Block G's central migration-safety property,
+        preserved verbatim through the squash: the migration adds the
+        threshold-state *schema* and evaluates nothing.
+
+        A source-level guard because it is a statement about what the
+        migration is incapable of, not only about what it happened not to do
+        on the fixtures a DB-backed test provides.
+        `TestUsageThresholdStateContract` asserts the runtime half — that a
+        migrated database really does contain zero notifications and zero
+        threshold-state rows.
+        """
+        source = _executable_source(RELEASE_MIGRATION_PATH)
+        for table in ("tenant_usage_threshold_state", "notification_recipient"):
+            assert f"INSERT INTO {table}" not in source
+        # `tenant_usage` is the one table the migration legitimately inserts
+        # into (the Block C baseline), so the check above is deliberately
+        # per-table rather than a blanket "no INSERT".
+        assert "INSERT INTO notification" not in source
 
 
 def _admin_engine():
@@ -511,9 +607,9 @@ class TestReleaseMigration:
         revision: there is no longer an intermediate state to diff against, so
         the guard moves to the `v1_2_0 → v1_3_0` boundary instead.
 
-        Pinned to RELEASE_REVISION rather than "head": Céluma 1.3, Phase 4,
-        Block B adds three more tables on top, and this test's whole point is
-        an *exact* set match on what v1_3_0 alone introduced."""
+        The expected set grew with the pre-Phase-5 squash, which is the whole
+        point of it: the usage domain and threshold state are no longer three
+        revisions further along, they are part of the release."""
         _alembic(LAST_PRE_1_3_REVISION)
         before = set(inspect(migration_db).get_table_names())
 
@@ -711,7 +807,7 @@ class TestNotificationDomain:
         _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
         _alembic("head")
 
-        assert _current_revision(migration_db) == BLOCK_G_REVISION
+        assert _current_revision(migration_db) == RELEASE_REVISION
         assert NOTIFICATION_TABLES <= set(inspect(migration_db).get_table_names())
 
     def test_unique_constraints_exist(self, migration_db):
@@ -986,15 +1082,20 @@ class TestNotificationDomain:
 
 
 class TestUsageDomainMigration:
-    """Céluma 1.3, Phase 4, Block B — the usage domain revision (`v1_4_0`),
-    additive on top of the closed release revision (`v1_3_0`). Mirrors the
-    discipline `TestNotificationDomain` established: the chain tests above
-    prove the revision is reachable and reversible; these prove it created
-    the right tables, columns, constraints and indexes.
+    """Céluma 1.3, Phase 4, Block B — the usage domain, now part of the
+    consolidated release revision. Mirrors the discipline
+    `TestNotificationDomain` established: the chain tests above prove the
+    revision is reachable and reversible; these prove it created the right
+    tables, columns, constraints and indexes.
+
+    Retargeted by the pre-Phase-5 squash from "the usage-domain revision
+    introduces these" to "the final `v1_3_0` contains these". The assertions
+    below are unchanged in substance — what disappeared is the revision
+    boundary they used to be measured against.
     """
 
     def test_upgrade_creates_the_three_usage_tables(self, migration_db):
-        _alembic(RELEASE_REVISION)
+        _alembic(LAST_PRE_1_3_REVISION)
         assert USAGE_DOMAIN_TABLES.isdisjoint(
             set(inspect(migration_db).get_table_names())
         )
@@ -1002,39 +1103,28 @@ class TestUsageDomainMigration:
         _alembic("head")
         assert USAGE_DOMAIN_TABLES <= set(inspect(migration_db).get_table_names())
 
-    def test_introduces_exactly_the_expected_tables(self, migration_db):
-        """Pinned to `USAGE_DOMAIN_REVISION`, not "head".
-
-        This test is about `v1_10_0`'s own footprint — "these three tables and
-        nothing else" — which is a statement about one closed revision.
-        Running it to "head" made it silently also assert that no later
-        revision ever adds a table, so Céluma 1.3, Phase 4, Block G's
-        `tenant_usage_threshold_state` failed a test that was never meant to
-        be about it. Block G's footprint has its own class below.
-        """
-        _alembic(RELEASE_REVISION)
-        before = set(inspect(migration_db).get_table_names())
-
-        _alembic(USAGE_DOMAIN_REVISION)
-        after = set(inspect(migration_db).get_table_names())
-
-        assert after - before == USAGE_DOMAIN_TABLES
+    # "These tables and nothing else" is asserted once, for the whole release
+    # footprint, by TestReleaseMigration::
+    # test_release_introduces_exactly_the_expected_tables. It used to live
+    # here as well, scoped to the usage revision — a per-revision exact-set
+    # match that had to be edited every time a later block added a table.
+    # There is one release footprint now, so there is one such test.
 
     def test_downgrade_drops_every_usage_table(self, migration_db):
         _alembic("head")
-        _alembic(RELEASE_REVISION, command="downgrade")
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
 
-        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert _current_revision(migration_db) == LAST_PRE_1_3_REVISION
         assert USAGE_DOMAIN_TABLES.isdisjoint(
             set(inspect(migration_db).get_table_names())
         )
 
     def test_downgrade_then_re_upgrade_restores_the_tables(self, migration_db):
         _alembic("head")
-        _alembic(RELEASE_REVISION, command="downgrade")
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
         _alembic("head")
 
-        assert _current_revision(migration_db) == BLOCK_G_REVISION
+        assert _current_revision(migration_db) == RELEASE_REVISION
         assert USAGE_DOMAIN_TABLES <= set(inspect(migration_db).get_table_names())
 
     def test_downgrade_removes_the_app_user_index(self, migration_db):
@@ -1046,7 +1136,7 @@ class TestUsageDomainMigration:
         }
         assert "ix_app_user_tenant_id_is_active" in indexes_before
 
-        _alembic(RELEASE_REVISION, command="downgrade")
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
         indexes_after = {
             i["name"] for i in inspect(migration_db).get_indexes("app_user")
         }
@@ -1081,9 +1171,9 @@ class TestUsageDomainMigration:
                 {"id": uuid.uuid4(), "tenant_id": tenant_id},
             )
 
-        _alembic(RELEASE_REVISION, command="downgrade")
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
 
-        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert _current_revision(migration_db) == LAST_PRE_1_3_REVISION
         assert USAGE_DOMAIN_TABLES.isdisjoint(
             set(inspect(migration_db).get_table_names())
         )
@@ -1354,15 +1444,15 @@ class TestUsageDomainMigration:
 
 
 class TestStorageAttributionMigration:
-    """Céluma 1.3, Phase 4, Block C — `v1_11_0`, the storage-attribution and
-    usage-initialization revision. Data-only: these tests exercise the
-    backfill and initialization logic directly against a populated
-    database, the same way `TestUsageDomainMigration` proves v1_10_0's
-    schema rather than merely that it is reachable.
+    """Céluma 1.3, Phase 4, Block C — the storage-attribution and
+    usage-initialization contract, now section 15 of the release migration.
+    These tests exercise the backfill and initialization logic against a
+    populated database, the same way `TestUsageDomainMigration` proves the
+    usage schema rather than merely that it is reachable.
     """
 
     def test_backfills_tenant_id_for_the_four_gapped_categories(self, migration_db):
-        _alembic(USAGE_DOMAIN_REVISION)
+        _alembic(LAST_PRE_1_3_REVISION)
         with migration_db.begin() as conn:
             tenant_id = _seed_tenant(conn)
             branch_id = _seed_branch(conn, tenant_id)
@@ -1437,35 +1527,15 @@ class TestStorageAttributionMigration:
         ):
             assert rows[storage_id] == tenant_id, f"{storage_id} not backfilled"
 
-    def test_never_overwrites_an_existing_non_null_tenant_id(self, migration_db):
-        _alembic(USAGE_DOMAIN_REVISION)
-        with migration_db.begin() as conn:
-            tenant_a = _seed_tenant(conn)
-            tenant_b = _seed_tenant(conn)
-            branch_id = _seed_branch(conn, tenant_a)
-            patient_id = _seed_patient(conn, tenant_a, branch_id)
-            order_id = _seed_order(conn, tenant_a, branch_id, patient_id)
-            sample_id = _seed_sample(conn, tenant_a, branch_id, order_id)
-
-            # Deliberately wrong tenant already set — a pre-Block-C row
-            # that, for whatever reason, already carries a tenant_id. The
-            # backfill must leave it exactly as-is.
-            storage_id = _seed_storage_object(
-                conn, key="samples/processed/b.jpg", size_bytes=999, tenant_id=tenant_b
-            )
-            _seed_sample_image(conn, tenant_a, branch_id, sample_id, storage_id)
-
-        _alembic("head")
-
-        with migration_db.connect() as conn:
-            actual = conn.execute(
-                text("SELECT tenant_id FROM storage_object WHERE id = :id"),
-                {"id": storage_id},
-            ).scalar_one()
-        assert actual == tenant_b
+    # The "backfill never overwrites an existing tenant_id" guard moved to
+    # test_the_backfill_never_overwrites_an_existing_attribution below. It
+    # used to seed a pre-attributed row at an intermediate revision; after
+    # the squash there is no such revision, because `storage_object.tenant_id`
+    # and the backfill that populates it now arrive together. The guard is
+    # exercised against the migration's own frozen statement instead.
 
     def test_initializes_usage_with_the_computed_baseline_per_tenant(self, migration_db):
-        _alembic(USAGE_DOMAIN_REVISION)
+        _alembic(LAST_PRE_1_3_REVISION)
         with migration_db.begin() as conn:
             tenant_a = _seed_tenant(conn)
             tenant_b = _seed_tenant(conn)
@@ -1477,8 +1547,11 @@ class TestStorageAttributionMigration:
             report_a = _seed_report(conn, tenant_a, branch_a, order_a)
 
             # Tenant A: one official PDF (sha256_hex set) — 10 bytes.
+            # Seeded unattributed, as a pre-1.3 row necessarily is; the
+            # backfill attributes it via report_version.pdf_storage_id, and
+            # only then does the official-PDF category count it.
             official_storage = _seed_storage_object(
-                conn, key="reports/a/official/1.pdf", size_bytes=10, tenant_id=tenant_a,
+                conn, key="reports/a/official/1.pdf", size_bytes=10, tenant_id=None,
                 content_type="application/pdf", sha256_hex="deadbeef",
             )
             _seed_report_version(conn, report_a, version_no=1, pdf_storage_id=official_storage)
@@ -1511,22 +1584,39 @@ class TestStorageAttributionMigration:
         assert usage[tenant_b] == 77
         assert usage[tenant_c] == 0
 
-    def test_initialization_is_idempotent_across_a_downgrade_and_re_upgrade(self, migration_db):
-        """`downgrade()` is a deliberate no-op (see the revision's module
-        docstring), which means re-running `alembic upgrade head` after a
-        downgrade genuinely re-executes upgrade() — this is the natural way
-        to prove replay safety with this test harness's subprocess-based
-        `_alembic()` helper, without reaching into the migration's Python
-        function directly."""
-        _alembic(USAGE_DOMAIN_REVISION)
+    def test_initialization_is_deterministic_across_a_downgrade_and_re_upgrade(
+        self, migration_db
+    ):
+        """Replay safety: the baseline must be reproducible, not merely
+        correct once.
+
+        Downgrading to `v1_2_0` and upgrading again genuinely re-executes the
+        whole release migration — including the `tenant_id` backfill, whose
+        results the downgrade discarded along with the column. The second run
+        therefore starts from the same raw fixture as the first and has to
+        arrive at the same number. That is a stronger claim than the
+        pre-squash version of this test could make: it used to downgrade to
+        the revision *below* the data migration, leaving the tenant_id
+        backfill's output in place, so only the baseline INSERT was replayed.
+
+        It is also what makes the `INSERT ... WHERE NOT EXISTS` guard
+        observable — `tenant_usage` is dropped and rebuilt, so the row count
+        assertion proves the insert is singular, not that the table was
+        merely left alone.
+        """
+        _alembic(LAST_PRE_1_3_REVISION)
         with migration_db.begin() as conn:
             tenant_id = _seed_tenant(conn)
             branch_id = _seed_branch(conn, tenant_id)
             patient_id = _seed_patient(conn, tenant_id, branch_id)
             order_id = _seed_order(conn, tenant_id, branch_id, patient_id)
             report_id = _seed_report(conn, tenant_id, branch_id, order_id)
+            # Official PDF: sha256_hex set, tenant_id absent (the column does
+            # not exist yet). The backfill attributes it via
+            # report_version.pdf_storage_id -> report.tenant_id, after which
+            # the official-PDF category counts it.
             official_storage = _seed_storage_object(
-                conn, key="reports/idem/official/1.pdf", size_bytes=4096, tenant_id=tenant_id,
+                conn, key="reports/idem/official/1.pdf", size_bytes=4096, tenant_id=None,
                 content_type="application/pdf", sha256_hex="abc123",
             )
             _seed_report_version(conn, report_id, version_no=1, pdf_storage_id=official_storage)
@@ -1541,7 +1631,7 @@ class TestStorageAttributionMigration:
             ).scalar_one()
         assert first_run == 4096
 
-        _alembic(USAGE_DOMAIN_REVISION, command="downgrade")
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
         _alembic("head")
 
         with migration_db.connect() as conn:
@@ -1558,33 +1648,50 @@ class TestStorageAttributionMigration:
         assert second_run == 4096, "second run must not change usage"
         assert row_count == 1, "second run must not create a duplicate row"
 
-    def test_downgrade_is_a_no_op(self, migration_db):
-        """No schema to revert (data-only revision) — downgrading must not
-        drop any Block B table or fail.
+    def test_the_backfill_never_overwrites_an_existing_attribution(self, migration_db):
+        """The `IS NULL` guard on every backfill statement, asserted directly.
 
-        Pinned to `STORAGE_ATTRIBUTION_REVISION` rather than "head" for the
-        same reason as `test_introduces_exactly_the_expected_tables` above:
-        the claim is that *`v1_11_0`* changes no schema, and running from head
-        turned it into a claim that no revision between head and `v1_10_0`
-        does either — which stopped being true when Céluma 1.3, Phase 4,
-        Block G added `tenant_usage_threshold_state` in `v1_13_0`.
+        Pre-squash this was implicit in the ordering of two revisions. Post-
+        squash there is no seam to seed a pre-attributed row at, so the guard
+        is exercised where it actually lives: by running the migration's own
+        frozen SQL a second time, against rows that already carry a
+        tenant_id, and proving nothing moves. Same statements the migration
+        executes — imported, not retyped, so they cannot drift apart.
         """
-        _alembic(STORAGE_ATTRIBUTION_REVISION)
-        before = set(inspect(migration_db).get_table_names())
+        _alembic("head")
+        with migration_db.begin() as conn:
+            owner = _seed_tenant(conn)
+            squatter = _seed_tenant(conn)
+            branch_id = _seed_branch(conn, owner)
+            patient_id = _seed_patient(conn, owner, branch_id)
+            order_id = _seed_order(conn, owner, branch_id, patient_id)
+            sample_id = _seed_sample(conn, owner, branch_id, order_id)
+            # Deliberately attributed to the *wrong* tenant. The backfill
+            # would derive `owner` from sample_image; the guard must stop it.
+            storage_id = _seed_storage_object(
+                conn, key="samples/guard/a.jpg", size_bytes=10, tenant_id=squatter
+            )
+            _seed_sample_image(conn, owner, branch_id, sample_id, storage_id)
 
-        _alembic(USAGE_DOMAIN_REVISION, command="downgrade")
+        migration = _load_release_migration()
+        with migration_db.begin() as conn:
+            conn.execute(text(migration._BACKFILL_SAMPLE_IMAGES))
 
-        assert _current_revision(migration_db) == USAGE_DOMAIN_REVISION
-        after = set(inspect(migration_db).get_table_names())
-        assert before == after
-        assert USAGE_DOMAIN_TABLES <= after
+        with migration_db.connect() as conn:
+            attributed = conn.execute(
+                text("SELECT tenant_id FROM storage_object WHERE id = :id"),
+                {"id": storage_id},
+            ).scalar_one()
+        assert attributed == squatter, (
+            "backfill overwrote an existing attribution; the IS NULL guard is gone"
+        )
 
 
 class TestMigrationRuntimeParity:
     """Céluma 1.3, Phase 4, Block C remediation — a release-time guard,
     not a promise that these two will always agree.
 
-    `v1_11_0` now freezes its own copy of the Céluma 1.3 billable-storage
+    The release migration freezes its own copy of the Céluma 1.3 billable-storage
     calculation (see that revision's module docstring). This class proves
     the frozen SQL and the current
     `app.services.storage_billing.StorageBillingService` agree, for the
@@ -1592,7 +1699,7 @@ class TestMigrationRuntimeParity:
     billable semantics, `StorageBillingService` will change and this test
     will start failing — that is the intended signal that the new
     semantics need their own migration/reconciliation step to transition
-    existing `TenantUsage` rows explicitly, not a signal that `v1_11_0`
+    existing `TenantUsage` rows explicitly, not a signal that the migration
     itself needs to change (it must not, once externally released — see
     the revision's own docstring).
     """
@@ -1605,7 +1712,17 @@ class TestMigrationRuntimeParity:
         from app.core.config import settings
         from app.services.storage_billing import StorageBillingService
 
-        _alembic(USAGE_DOMAIN_REVISION)
+        # Seeded at head, with attribution, because several of the categories
+        # below are only expressible that way: official PDFs count by
+        # tenant_id + sha256_hex and are reachable from no FK, and
+        # letterhead/template assets and the tenant logo count by tenant_id +
+        # key prefix. A pre-1.3 fixture cannot carry any of that — the column
+        # does not exist at `v1_2_0` — so this test seeds the way Céluma 1.3
+        # writes storage objects and then runs the migration's own frozen
+        # baseline statement over it. `TestRealisticUpgradeFromCeluma12`
+        # covers the complementary case: what the same statement does to a
+        # genuinely unattributed 1.2 database.
+        _alembic("head")
         with migration_db.begin() as conn:
             # ---- Tenant A: one of every category, including the tricky
             # superseded/stale special cases. ----
@@ -1723,7 +1840,16 @@ class TestMigrationRuntimeParity:
             )
             _seed_report_version(conn, report_c, version_no=1, json_storage_id=json_storage_c)
 
-        _alembic("head")
+        # Both frozen statements, in the order section 15 runs them. The
+        # logo backfill is not optional here: the runtime calculation reads
+        # `tenant.logo_storage_id`, so skipping it would leave the runtime
+        # side blind to a logo the frozen baseline had already billed, and
+        # the two would disagree by exactly the logo's size — a difference
+        # in the fixture, not in the contract under test.
+        migration = _load_release_migration()
+        with migration_db.begin() as conn:
+            conn.execute(text(migration._TENANT_USAGE_BASELINE_INSERT))
+            conn.execute(text(migration._BACKFILL_LOGO_STORAGE_ID))
 
         with SQLModelSession(migration_db) as session:
             for tenant_id in (tenant_a, tenant_b, tenant_c):
@@ -1767,7 +1893,7 @@ class TestMigrationRuntimeParity:
         assert usage[tenant_c] == 42
 
 
-class TestV1_11_0EnvironmentIndependence:
+class TestMigrationEnvironmentIndependence:
     """Céluma 1.3, Phase 4, Block D (D0) — the DB-backed half of the
     historical-determinism guarantee.
 
@@ -1806,7 +1932,14 @@ class TestV1_11_0EnvironmentIndependence:
 
         engine = create_engine(make_url(settings.database_url).set(database=database))
         try:
-            _alembic(USAGE_DOMAIN_REVISION, database=database, env=env)
+            # Migrated under `env`, then seeded with an attributed logo (the
+            # only shape in which a logo is billable at all) and the frozen
+            # baseline run under that same environment. What is being proved
+            # is that `env` cannot influence the number: the resolution rule
+            # compares a persisted URL against a persisted object_key and
+            # reads no setting, so a URL stored under a third hostname that
+            # neither environment knows about still resolves in both.
+            _alembic("head", database=database, env=env)
             with engine.begin() as conn:
                 conn.execute(
                     text(
@@ -1828,7 +1961,10 @@ class TestV1_11_0EnvironmentIndependence:
                     {"url": f"{self.PERSISTED_CDN}/{logo_key}", "id": tenant_id},
                 )
 
-            _alembic(STORAGE_ATTRIBUTION_REVISION, database=database, env=env)
+            migration = _load_release_migration()
+            with engine.begin() as conn:
+                conn.execute(text(migration._TENANT_USAGE_BASELINE_INSERT))
+
             with engine.connect() as conn:
                 return conn.execute(
                     text(
@@ -1857,8 +1993,8 @@ class TestV1_11_0EnvironmentIndependence:
 
 
 class TestTenantLogoBackfill:
-    """Céluma 1.3, Phase 4, Block D — `v1_12_0`'s `tenant.logo_storage_id`
-    column and its DB-scoped backfill."""
+    """Céluma 1.3, Phase 4, Block D — the `tenant.logo_storage_id` column
+    and its DB-scoped backfill, now part of the release migration."""
 
     def _logo_storage_id(self, migration_db, tenant_id):
         with migration_db.connect() as conn:
@@ -1897,17 +2033,84 @@ class TestTenantLogoBackfill:
         # delete a tenant or blank its identity.
         assert rule == "a"
 
-    def test_a_tenant_with_no_logo_is_left_null(self, migration_db):
-        _alembic(STORAGE_ATTRIBUTION_REVISION)
+    def _resolve(self, migration_db, tenant_id):
+        """Run the migration's own logo-resolution SQL and report the result.
+
+        The resolution rule needs a `storage_object` that already carries a
+        `tenant_id`, because ownership is relational and never inferred from
+        the key. Only Céluma 1.3 writes such a row — the column does not
+        exist at `v1_2_0` — so after the squash there is no revision to seed
+        one at *before* the backfill runs. These tests therefore seed at head
+        and execute the frozen statement directly, taken from the migration
+        module so it cannot drift from what ships.
+
+        `test_a_pre_1_3_logo_is_left_unresolved` below covers the other half:
+        what the backfill does on a real upgrading database.
+        """
+        migration = _load_release_migration()
+        with migration_db.begin() as conn:
+            conn.execute(text(migration._BACKFILL_LOGO_STORAGE_ID))
+        return self._logo_storage_id(migration_db, tenant_id)
+
+    def test_a_pre_1_3_logo_is_left_unresolved(self, migration_db):
+        """A real Céluma 1.2 database upgrading to 1.3 gets `NULL`, and that
+        is the accepted contract rather than a defect in this test.
+
+        At `v1_2_0` there is no `storage_object.tenant_id` at all, so after
+        the column is added every pre-existing object is unattributed. The
+        backfill only attributes the four categories reachable from a parent
+        row (sample images, report JSON/legacy PDFs, signatures); tenant
+        logos are not among them, because they were specified as "already
+        attributed at write time" — which is true of 1.3-era writes and false
+        of everything older. So the logo stays unowned, the resolution rule
+        finds no candidate, and `logo_storage_id` stays NULL.
+
+        This behaviour is identical before and after the pre-Phase-5 squash —
+        verified by running both chains over this same fixture, see
+        docs/celuma-1.3/pre-phase-5-migration-squash/
+        migration-schema-equivalence-report.md §"Upgrade-path parity". It is
+        carried into Phase 5 as known, non-blocking debt: reconciliation
+        reports these tenants as `legacy_logo_reference_unresolved`, and
+        re-uploading a logo repairs the row through the normal 1.3 write
+        path. Asserted explicitly so that if a later change starts resolving
+        them, that is a deliberate decision and not a silent one.
+        """
+        _alembic(LAST_PRE_1_3_REVISION)
         with migration_db.begin() as conn:
             tenant_id = _seed_tenant(conn)
+            key = f"tenants/{tenant_id}/logo/current.png"
+            _seed_storage_object(
+                conn, key=key, size_bytes=1500, tenant_id=None,
+                content_type="image/png",
+            )
+            conn.execute(
+                text("UPDATE tenant SET logo_url = :url WHERE id = :id"),
+                {"url": f"https://cdn.example/{key}", "id": tenant_id},
+            )
 
         _alembic("head")
 
         assert self._logo_storage_id(migration_db, tenant_id) is None
+        with migration_db.connect() as conn:
+            attributed = conn.execute(
+                text(
+                    "SELECT tenant_id FROM storage_object WHERE object_key = :k"
+                ),
+                {"k": key},
+            ).scalar_one()
+        assert attributed is None, (
+            "tenant logos are outside the backfill's four categories"
+        )
+
+    def test_a_tenant_with_no_logo_is_left_null(self, migration_db):
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+
+        assert self._resolve(migration_db, tenant_id) is None
 
     def test_a_resolvable_logo_is_backfilled(self, migration_db):
-        _alembic(STORAGE_ATTRIBUTION_REVISION)
+        _alembic("head")
         with migration_db.begin() as conn:
             tenant_id = _seed_tenant(conn)
             key = f"tenants/{tenant_id}/logo/current.png"
@@ -1920,15 +2123,13 @@ class TestTenantLogoBackfill:
                 {"url": f"https://cdn.example/{key}", "id": tenant_id},
             )
 
-        _alembic("head")
-
-        assert self._logo_storage_id(migration_db, tenant_id) == storage_id
+        assert self._resolve(migration_db, tenant_id) == storage_id
 
     def test_a_logo_stored_under_a_different_cdn_is_still_backfilled(self, migration_db):
         """The backfill reads persisted DB state, never the currently
         configured CDN — so a URL written under a hostname nothing in this
         environment knows about still resolves."""
-        _alembic(STORAGE_ATTRIBUTION_REVISION)
+        _alembic("head")
         with migration_db.begin() as conn:
             tenant_id = _seed_tenant(conn)
             key = f"tenants/{tenant_id}/logo/legacy.png"
@@ -1941,15 +2142,10 @@ class TestTenantLogoBackfill:
                 {"url": f"https://an-old-cdn.example/{key}", "id": tenant_id},
             )
 
-        _alembic(
-            "head",
-            env={"MEDIA_PUBLIC_BASE_URL": "https://a-completely-different-cdn.example"},
-        )
-
-        assert self._logo_storage_id(migration_db, tenant_id) == storage_id
+        assert self._resolve(migration_db, tenant_id) == storage_id
 
     def test_a_url_with_a_query_string_still_resolves(self, migration_db):
-        _alembic(STORAGE_ATTRIBUTION_REVISION)
+        _alembic("head")
         with migration_db.begin() as conn:
             tenant_id = _seed_tenant(conn)
             key = f"tenants/{tenant_id}/logo/cached.png"
@@ -1962,15 +2158,13 @@ class TestTenantLogoBackfill:
                 {"url": f"https://cdn.example/{key}?v=3#frag", "id": tenant_id},
             )
 
-        _alembic("head")
-
-        assert self._logo_storage_id(migration_db, tenant_id) == storage_id
+        assert self._resolve(migration_db, tenant_id) == storage_id
 
     def test_another_tenants_object_is_never_selected(self, migration_db):
         """Ownership comes from `storage_object.tenant_id`, not from the
         key string — so a key that happens to name another tenant cannot
         pull that tenant's object into this one's logo FK."""
-        _alembic(STORAGE_ATTRIBUTION_REVISION)
+        _alembic("head")
         with migration_db.begin() as conn:
             tenant_a = _seed_tenant(conn)
             tenant_b = _seed_tenant(conn)
@@ -1985,15 +2179,13 @@ class TestTenantLogoBackfill:
                 {"url": f"https://cdn.example/{key}", "id": tenant_a},
             )
 
-        _alembic("head")
-
-        assert self._logo_storage_id(migration_db, tenant_a) is None
+        assert self._resolve(migration_db, tenant_a) is None
         assert self._logo_storage_id(migration_db, tenant_b) is None
 
     def test_an_ambiguous_match_is_left_null(self, migration_db):
         """Two of the tenant's own rows carrying the same object_key both
         satisfy the persisted URL. The migration does not pick one."""
-        _alembic(STORAGE_ATTRIBUTION_REVISION)
+        _alembic("head")
         with migration_db.begin() as conn:
             tenant_id = _seed_tenant(conn)
             key = f"tenants/{tenant_id}/logo/dup.png"
@@ -2010,12 +2202,10 @@ class TestTenantLogoBackfill:
                 {"url": f"https://cdn.example/{key}", "id": tenant_id},
             )
 
-        _alembic("head")
-
-        assert self._logo_storage_id(migration_db, tenant_id) is None
+        assert self._resolve(migration_db, tenant_id) is None
 
     def test_a_superseded_logo_object_is_not_selected(self, migration_db):
-        _alembic(STORAGE_ATTRIBUTION_REVISION)
+        _alembic("head")
         with migration_db.begin() as conn:
             tenant_id = _seed_tenant(conn)
             old_key = f"tenants/{tenant_id}/logo/old.png"
@@ -2033,12 +2223,12 @@ class TestTenantLogoBackfill:
                 {"url": f"https://cdn.example/{new_key}", "id": tenant_id},
             )
 
+        assert self._resolve(migration_db, tenant_id) == new_id
+
+    def test_the_backfill_is_idempotent(self, migration_db):
+        """Guarded by `t.logo_storage_id IS NULL`: a second run must neither
+        change a resolved row nor fail."""
         _alembic("head")
-
-        assert self._logo_storage_id(migration_db, tenant_id) == new_id
-
-    def test_downgrade_then_re_upgrade_restores_the_backfill(self, migration_db):
-        _alembic(STORAGE_ATTRIBUTION_REVISION)
         with migration_db.begin() as conn:
             tenant_id = _seed_tenant(conn)
             key = f"tenants/{tenant_id}/logo/x.png"
@@ -2051,30 +2241,40 @@ class TestTenantLogoBackfill:
                 {"url": f"https://cdn.example/{key}", "id": tenant_id},
             )
 
-        _alembic("head")
-        assert self._logo_storage_id(migration_db, tenant_id) == storage_id
+        assert self._resolve(migration_db, tenant_id) == storage_id
+        assert self._resolve(migration_db, tenant_id) == storage_id
 
-        _alembic(STORAGE_ATTRIBUTION_REVISION, command="downgrade")
+    def test_downgrade_then_re_upgrade_restores_the_column(self, migration_db):
+        """`logo_url` is untouched by the release migration, so the FK it is
+        derived from recomputes identically after a full downgrade."""
+        _alembic("head")
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
         assert "logo_storage_id" not in {
             c["name"] for c in inspect(migration_db).get_columns("tenant")
         }
 
         _alembic("head")
-        assert self._logo_storage_id(migration_db, tenant_id) == storage_id
+        assert "logo_storage_id" in {
+            c["name"] for c in inspect(migration_db).get_columns("tenant")
+        }
 
-    def test_the_backfill_agrees_with_the_frozen_v1_11_0_baseline(self, migration_db):
-        """The two must resolve the same object: `v1_11_0` bills the logo it
-        resolves, `v1_12_0` records the logo it resolves, and the runtime
-        calculation then reads the FK. If they disagreed, a tenant's
+    def test_the_backfill_agrees_with_the_frozen_usage_baseline(self, migration_db):
+        """The two must resolve the same object: the baseline bills the logo
+        it resolves, the backfill records the logo it resolves, and the
+        runtime calculation then reads the FK. If they disagreed, a tenant's
         initialized baseline would be permanently out of step with what
-        `StorageBillingService` computes on the very next reconciliation."""
+        `StorageBillingService` computes on the very next reconciliation.
+
+        Both frozen statements are executed here, in the order the migration
+        runs them, over a fixture seeded the way 1.3 writes storage objects
+        (attributed). That is what makes the comparison meaningful: on an
+        unattributed pre-1.3 fixture both sides agree trivially at zero.
+        """
         from sqlmodel import Session as SQLModelSession
 
         from app.services.storage_billing import StorageBillingService
 
-        # Seeded *before* v1_11_0 runs, so the frozen historical baseline is
-        # computed over this fixture — the whole point of the comparison.
-        _alembic(USAGE_DOMAIN_REVISION)
+        _alembic("head")
         with migration_db.begin() as conn:
             tenant_id = _seed_tenant(conn)
             key = f"tenants/{tenant_id}/logo/agreed.png"
@@ -2091,7 +2291,13 @@ class TestTenantLogoBackfill:
                 {"url": f"https://whatever-cdn.example/{key}", "id": tenant_id},
             )
 
-        _alembic("head")
+        migration = _load_release_migration()
+        with migration_db.begin() as conn:
+            # The upgrade already inserted a zero row for no tenant at all
+            # (the DB was empty then), so the baseline INSERT is re-run here
+            # over the seeded fixture. `WHERE NOT EXISTS` makes that safe.
+            conn.execute(text(migration._TENANT_USAGE_BASELINE_INSERT))
+            conn.execute(text(migration._BACKFILL_LOGO_STORAGE_ID))
 
         with migration_db.connect() as conn:
             baseline = conn.execute(
@@ -2109,8 +2315,8 @@ class TestTenantLogoBackfill:
 
 
 class TestReconciliationHardeningMigration:
-    """Céluma 1.3, Phase 4, Block D — `v1_12_0`'s changes to
-    `tenant_usage_reconciliation`."""
+    """Céluma 1.3, Phase 4, Block D — the reconciliation hardening applied to
+    `tenant_usage_reconciliation`, now part of the release migration."""
 
     def _insert_run(self, conn, tenant_id, *, status, started_at="now()", **columns):
         run_id = uuid.uuid4()
@@ -2213,13 +2419,15 @@ class TestReconciliationHardeningMigration:
 
     def test_downgrade_removes_both_and_re_upgrade_restores_them(self, migration_db):
         _alembic("head")
-        _alembic(STORAGE_ATTRIBUTION_REVISION, command="downgrade")
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
 
-        columns = {
-            c["name"]
-            for c in inspect(migration_db).get_columns("tenant_usage_reconciliation")
-        }
-        assert "metadata_mismatches_found" not in columns
+        # The whole table goes with the 1.3 delta now, so "the column is
+        # gone" is asserted as "the table is gone" — the release migration
+        # owns both, and there is no intermediate state where one outlives
+        # the other.
+        assert "tenant_usage_reconciliation" not in set(
+            inspect(migration_db).get_table_names()
+        )
         with migration_db.connect() as conn:
             indexes = {
                 row[0]
@@ -2230,10 +2438,7 @@ class TestReconciliationHardeningMigration:
                     )
                 ).all()
             }
-        assert "ix_tenant_usage_reconciliation_one_running" not in indexes
-        # The Block B indexes must survive a Block D downgrade untouched.
-        assert "ix_tenant_usage_reconciliation_tenant_started_at" in indexes
-        assert "ix_tenant_usage_reconciliation_status_started_at" in indexes
+        assert indexes == set()
 
         _alembic("head")
         assert "metadata_mismatches_found" in {
@@ -2243,12 +2448,13 @@ class TestReconciliationHardeningMigration:
 
 
 class TestUsageThresholdStateMigration:
-    """Céluma 1.3, Phase 4, Block G — `v1_13_0`, the durable
-    usage-threshold-state table.
+    """Céluma 1.3, Phase 4, Block G — the durable usage-threshold-state
+    table, now part of the release migration.
 
     Schema only. The single most important assertion in this class is
-    `test_creates_no_rows_and_no_notifications`: the revision must arrive on a
-    production database with 133 tenants and change nothing but the catalog.
+    `test_creates_no_rows_and_no_notifications`: the migration must arrive on
+    a production database with 133 tenants and add this table without
+    evaluating a single threshold.
     """
 
     def _insert_state(self, conn, tenant_id, *, resource="STORAGE", state="NORMAL", **columns):
@@ -2274,13 +2480,13 @@ class TestUsageThresholdStateMigration:
         return state_id
 
     def test_introduces_exactly_one_table(self, migration_db):
-        _alembic(BLOCK_D_REVISION)
+        _alembic(LAST_PRE_1_3_REVISION)
         before = set(inspect(migration_db).get_table_names())
 
-        _alembic(BLOCK_G_REVISION)
+        _alembic("head")
         after = set(inspect(migration_db).get_table_names())
 
-        assert after - before == THRESHOLD_STATE_TABLES
+        assert THRESHOLD_STATE_TABLES <= after - before
 
     def test_creates_no_rows_and_no_notifications(self, migration_db):
         """The revision's load-bearing property.
@@ -2309,8 +2515,10 @@ class TestUsageThresholdStateMigration:
                 {"id": tenant_id},
             )
 
-        # Re-running the revision must still not evaluate anything: it is DDL.
-        _alembic(BLOCK_D_REVISION, command="downgrade")
+        # Replaying the release migration must still not evaluate anything.
+        # The seeded usage/limits rows go with the downgrade, so this also
+        # proves the re-upgrade does not resurrect state from anywhere.
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
         _alembic("head")
 
         with migration_db.connect() as conn:
@@ -2324,39 +2532,45 @@ class TestUsageThresholdStateMigration:
                 conn.execute(text("SELECT COUNT(*) FROM notification")).scalar_one() == 0
             )
 
-    def test_upgrade_writes_no_rows_and_creates_no_notification(self):
+    def test_upgrade_creates_no_notification_and_no_threshold_state_row(self):
         """Structural, not behavioural: `upgrade()` may not so much as import
-        `NotificationService`, and may not write a row of any kind. A future
-        edit that adds a "helpful" baseline notification fails here before it
-        can reach a database.
+        `NotificationService`, and may not write a notification or a
+        threshold-state row. A future edit that adds a "helpful" baseline
+        notification fails here before it can reach a database.
 
-        Scoped to `upgrade()` by AST rather than to the whole file, because
-        `downgrade()` legitimately deletes the Block G notification rows a
-        narrowed CHECK constraint would reject — a different operation with a
-        different justification (see the revision's own docstring).
+        The guard narrowed with the squash, and had to. Before it, this
+        revision was pure DDL and the check could simply forbid every write
+        verb. The migration now also carries the Block C data migration,
+        which legitimately runs `UPDATE storage_object` and `INSERT INTO
+        tenant_usage` — so a blanket "no writes" assertion would forbid the
+        thing the release migration exists to do. What must stay impossible
+        is narrower and is what this now states: no write to the notification
+        domain, and no write to the threshold-state table.
+
+        Scoped to the whole executable module rather than to `upgrade()`'s
+        AST subtree, because the SQL lives in module-level constants — an
+        unparsed `upgrade()` shows `op.execute(_BACKFILL_SAMPLE_IMAGES)` and
+        no SQL at all, which would make every assertion here vacuous. The
+        wider scope is also now exact rather than a compromise: after the
+        squash `downgrade()` contains no DML either, since it drops the
+        notification tables outright instead of deleting rows from them.
         """
-        path = VERSIONS_DIR / "v1_13_0_block_g_usage_threshold_state.py"
-        module = ast.parse(path.read_text(encoding="utf-8"))
-        upgrade = next(
-            node
-            for node in module.body
-            if isinstance(node, ast.FunctionDef) and node.name == "upgrade"
-        )
-        body = ast.unparse(upgrade)
+        source = _executable_source(RELEASE_MIGRATION_PATH)
 
         for forbidden in (
             "NotificationService",
             "notify(",
-            "INSERT INTO",
-            "UPDATE ",
-            "DELETE FROM",
-            "tenant_usage",  # never reads the counter either
+            "INSERT INTO notification",
+            "INSERT INTO tenant_usage_threshold_state",
+            "UPDATE notification",
+            "DELETE FROM notification",
         ):
-            assert forbidden not in body.replace(
-                "tenant_usage_threshold_state", "_state_table"
-            ), forbidden
-        # The docstring is allowed to *discuss* notifications; upgrade() is not.
-        assert "notification" in path.read_text(encoding="utf-8").lower()
+            assert forbidden not in source, forbidden
+
+        # The writes it *is* allowed to make, asserted positively so the
+        # narrowing above cannot quietly become "asserts nothing".
+        assert "INSERT INTO tenant_usage" in source
+        assert "UPDATE storage_object" in source
 
     def test_the_notification_type_constraints_admit_the_four_new_types(
         self, migration_db
@@ -2423,19 +2637,29 @@ class TestUsageThresholdStateMigration:
                     {"id": uuid.uuid4(), "tenant_id": tenant_id},
                 )
 
-    def test_downgrade_narrows_the_constraints_and_removes_only_block_g_rows(
-        self, migration_db
-    ):
-        """A downgrade must reproduce `v1_12_0`'s schema exactly, which means
-        narrowing the type constraints — which cannot be done while rows carry
-        the wider values. The Phase 3 notification history must survive
-        untouched; only the four Block G types go."""
+    def test_downgrade_removes_the_whole_notification_domain(self, migration_db):
+        """What the constraint-narrowing downgrade became after the squash.
+
+        The pre-squash chain had to narrow `ck_notification_type` back to six
+        values when stepping down one revision, and — because a CHECK is
+        validated against existing rows — had to delete every usage-threshold
+        notification, recipient and delivery first, while carefully sparing
+        the Phase 3 clinical history one revision below.
+
+        None of that survives, and it should not: the only downgrade now is
+        `v1_3_0 -> v1_2_0`, which drops the notification tables outright.
+        Transcribing the narrowing step would have been a delete of rows
+        immediately followed by a drop of the tables holding them. This test
+        replaces it with the assertion that actually matters — populated
+        notification history, of both kinds, does not block the downgrade and
+        does not survive it.
+        """
         _alembic("head")
         with migration_db.begin() as conn:
             tenant_id = _seed_tenant(conn)
             _seed_branch(conn, tenant_id)
             user_id = _seed_app_user(conn, tenant_id, email=f"u-{uuid.uuid4().hex[:8]}@lab.test")
-            kept = uuid.uuid4()
+            clinical = uuid.uuid4()
             conn.execute(
                 text(
                     "INSERT INTO notification (id, tenant_id, type, severity, "
@@ -2443,9 +2667,9 @@ class TestUsageThresholdStateMigration:
                     "created_at) VALUES (:id, :tenant_id, 'REPORT_PUBLISHED', "
                     "'INFO', 'kept', 'report', :tenant_id, 'kept-key', 'es-MX', now())"
                 ),
-                {"id": kept, "tenant_id": tenant_id},
+                {"id": clinical, "tenant_id": tenant_id},
             )
-            dropped = uuid.uuid4()
+            threshold = uuid.uuid4()
             conn.execute(
                 text(
                     "INSERT INTO notification (id, tenant_id, type, severity, "
@@ -2453,9 +2677,9 @@ class TestUsageThresholdStateMigration:
                     "created_at) VALUES (:id, :tenant_id, 'STORAGE_LIMIT_REACHED', "
                     "'WARNING', 'gone', 'tenant', :tenant_id, 'gone-key', 'es-MX', now())"
                 ),
-                {"id": dropped, "tenant_id": tenant_id},
+                {"id": threshold, "tenant_id": tenant_id},
             )
-            for notification_id in (kept, dropped):
+            for notification_id in (clinical, threshold):
                 conn.execute(
                     text(
                         "INSERT INTO notification_recipient (id, notification_id, "
@@ -2470,28 +2694,66 @@ class TestUsageThresholdStateMigration:
                     },
                 )
 
-        _alembic(BLOCK_D_REVISION, command="downgrade")
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
 
+        tables = set(inspect(migration_db).get_table_names())
+        assert NOTIFICATION_TABLES.isdisjoint(tables)
+        assert THRESHOLD_STATE_TABLES.isdisjoint(tables)
+        # The tenant and user the history hung off are pre-1.3 and must
+        # outlive it — the downgrade drops 1.3's tables, not the lab's data.
         with migration_db.connect() as conn:
-            remaining = [
-                row[0]
-                for row in conn.execute(text("SELECT type FROM notification")).all()
-            ]
-            assert remaining == ["REPORT_PUBLISHED"]
             assert (
                 conn.execute(
-                    text("SELECT COUNT(*) FROM notification_recipient")
+                    text("SELECT COUNT(*) FROM app_user WHERE id = :id"),
+                    {"id": user_id},
                 ).scalar_one()
                 == 1
             )
-            constraint = conn.execute(
-                text(
-                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-                    "WHERE conname = 'ck_notification_type'"
-                )
-            ).scalar_one()
-            assert "STORAGE_LIMIT_REACHED" not in constraint
-            assert "REPORT_PUBLISHED" in constraint
+
+    def test_the_release_migration_never_creates_a_six_value_type_constraint(self):
+        """§13 of the squash contract, as an anti-assertion.
+
+        The final constraint is created once, in its ten-value form. Creating
+        the six-value form and altering it would reproduce a development-time
+        intermediate state that no released database should ever pass
+        through — the same discipline that keeps the superseded
+        address-keyed delivery constraint out of this migration.
+        """
+        source = _executable_source(RELEASE_MIGRATION_PATH)
+        # Named exactly once each: at creation. A create-then-widen would
+        # name them at least twice.
+        assert source.count("ck_notification_type") == 1
+        assert source.count("ck_notification_preference_type") == 1
+
+    def test_the_release_migration_admits_all_ten_notification_types(
+        self, migration_db
+    ):
+        """The final set: the six Phase 3 clinical types plus the four
+        usage-threshold types, on both notification-domain constraints."""
+        _alembic("head")
+        expected = {
+            "REPORT_SUBMITTED",
+            "REPORT_PDF_READY",
+            "REPORT_PUBLISHED",
+            "REPORT_RETRACTED",
+            "ASSIGNMENT_ADDED",
+            "SAMPLE_STATUS_CHANGED",
+            "STORAGE_USAGE_APPROACHING",
+            "STORAGE_LIMIT_REACHED",
+            "USER_LIMIT_APPROACHING",
+            "USER_LIMIT_REACHED",
+        }
+        with migration_db.connect() as conn:
+            for name in ("ck_notification_type", "ck_notification_preference_type"):
+                definition = conn.execute(
+                    text(
+                        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                        "WHERE conname = :name"
+                    ),
+                    {"name": name},
+                ).scalar_one()
+                for value in expected:
+                    assert value in definition, f"{value} missing from {name}"
 
     def test_columns_nullability_and_defaults(self, migration_db):
         _alembic("head")
@@ -2624,14 +2886,14 @@ class TestUsageThresholdStateMigration:
             tenant_id = _seed_tenant(conn)
             self._insert_state(conn, tenant_id, last_value=900, last_limit=1000)
 
-        _alembic(BLOCK_D_REVISION, command="downgrade")
-        assert _current_revision(migration_db) == BLOCK_D_REVISION
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
+        assert _current_revision(migration_db) == LAST_PRE_1_3_REVISION
         assert THRESHOLD_STATE_TABLES.isdisjoint(
             set(inspect(migration_db).get_table_names())
         )
 
         _alembic("head")
-        assert _current_revision(migration_db) == BLOCK_G_REVISION
+        assert _current_revision(migration_db) == RELEASE_REVISION
         assert THRESHOLD_STATE_TABLES <= set(inspect(migration_db).get_table_names())
         with migration_db.connect() as conn:
             # Remembered state is lost, which is correct and safe: the next
@@ -2645,6 +2907,376 @@ class TestUsageThresholdStateMigration:
                 ).scalar_one()
                 == 0
             )
+
+
+def _capture_schema(database: str) -> dict:
+    """Normalized schema of `database`, as scripts/capture_schema_snapshot.py
+    would write it. Imported from the script rather than reimplemented, so
+    the fixture and the comparison can never diverge in how they normalize.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_celuma_schema_snapshot", BACKEND_ROOT / "scripts" / "capture_schema_snapshot.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.capture(database)
+
+
+def _diff_schemas(pre: dict, post: dict) -> list[str]:
+    """Every difference between two captured schemas, as readable strings."""
+    differences: list[str] = []
+    pre_tables, post_tables = pre["tables"], post["tables"]
+
+    for name in sorted(set(pre_tables) | set(post_tables)):
+        if name not in pre_tables:
+            differences.append(f"table only after squash: {name}")
+            continue
+        if name not in post_tables:
+            differences.append(f"table only before squash: {name}")
+            continue
+        for kind in ("columns", "constraints", "indexes"):
+            before, after = pre_tables[name][kind], post_tables[name][kind]
+            for key in sorted(set(before) | set(after)):
+                if key not in before:
+                    differences.append(f"{name}.{kind}: only after squash: {key}")
+                elif key not in after:
+                    differences.append(f"{name}.{kind}: only before squash: {key}")
+                elif before[key] != after[key]:
+                    differences.append(
+                        f"{name}.{kind}.{key}: {before[key]!r} -> {after[key]!r}"
+                    )
+    return differences
+
+
+class TestSchemaEquivalence:
+    """The load-bearing proof of the pre-Phase-5 migration squash.
+
+    The claim the squash rests on is narrow and total: upgrading a fresh
+    database to the squashed `v1_3_0` produces *exactly* the schema the
+    `v1_3_0 -> v1_10_0 -> v1_11_0 -> v1_12_0 -> v1_13_0` chain produced —
+    every table, column, type, nullability, default, primary key, foreign
+    key, unique constraint, CHECK constraint and index. Not "equivalent in
+    the parts we remembered to check": identical, compared field by field
+    against a snapshot captured from PostgreSQL before the four revisions
+    were deleted.
+
+    The snapshot deliberately excludes `alembic_version`. That table is the
+    one thing the squash is *supposed* to change — from `v1_13_0` to
+    `v1_3_0` — and including it would turn the intended difference into a
+    failure. It also excludes OIDs, sizes and physical ordering, which vary
+    between two runs of the same DDL and mean nothing.
+
+    If this test fails, the release migration no longer produces the schema
+    Phase 4 signed off on, and that is a release-blocking event rather than a
+    test to update.
+    """
+
+    def test_the_snapshot_fixture_exists(self):
+        assert PRE_SQUASH_SCHEMA_SNAPSHOT.exists(), (
+            "the pre-squash schema snapshot is the evidence for the whole "
+            "squash; regenerate it only with a deliberate decision"
+        )
+
+    def test_squashed_schema_matches_the_pre_squash_head(self, migration_db):
+        _alembic("head")
+
+        pre = json.loads(PRE_SQUASH_SCHEMA_SNAPSHOT.read_text(encoding="utf-8"))
+        post = _capture_schema(_MIGRATION_TEST_DB)
+
+        differences = _diff_schemas(pre, post)
+        assert differences == [], (
+            "the squashed v1_3_0 no longer reproduces the pre-squash schema:\n  "
+            + "\n  ".join(differences)
+        )
+
+    def test_the_comparison_is_actually_comparing_something(self, migration_db):
+        """A guard on the guard.
+
+        A snapshot that silently captured nothing — wrong database name, an
+        empty result — would make the test above pass vacuously and prove
+        exactly nothing. These floors are far below the real numbers (47
+        tables, 438 columns, 214 constraints, 145 indexes at the time of the
+        squash) and exist only to catch a comparison that has stopped
+        happening.
+        """
+        _alembic("head")
+        post = _capture_schema(_MIGRATION_TEST_DB)
+        tables = post["tables"]
+
+        assert len(tables) > 40
+        assert sum(len(t["columns"]) for t in tables.values()) > 400
+        assert sum(len(t["constraints"]) for t in tables.values()) > 200
+        assert sum(len(t["indexes"]) for t in tables.values()) > 130
+        # And the Phase 4 additions specifically, since they are what the
+        # squash moved.
+        assert (USAGE_DOMAIN_TABLES | THRESHOLD_STATE_TABLES) <= set(tables)
+        assert "logo_storage_id" in tables["tenant"]["columns"]
+        assert (
+            "metadata_mismatches_found"
+            in tables["tenant_usage_reconciliation"]["columns"]
+        )
+
+    def test_alembic_version_is_the_only_intended_difference(self, migration_db):
+        """Stated as its own assertion rather than left implicit in the
+        snapshot's exclusion list: the squash changes the revision identity
+        and nothing else."""
+        _alembic("head")
+        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert "alembic_version" not in _capture_schema(_MIGRATION_TEST_DB)["tables"]
+
+
+class TestRealisticUpgradeFromCeluma12:
+    """The release transition this migration actually has to survive:
+    `v1_2_0 -> v1_3_0` against a populated Céluma 1.2 database.
+
+    Every other DB-backed test in this file starts from an empty database or
+    seeds one table. This one builds a small but complete lab — tenant,
+    branch, users, patient, order, sample with images, report with versions,
+    storage objects — at `v1_2_0`, using only columns that exist there, and
+    then upgrades across the release boundary.
+
+    Fresh-install correctness does not imply this. On an empty database every
+    statement in the migration's data section matches zero rows, so a broken
+    backfill passes unnoticed; here the same statements have to attribute
+    real objects, compute a real baseline, and leave the clinical record
+    untouched while doing it.
+    """
+
+    def _seed_pre_1_3_lab(self, migration_db) -> dict:
+        with migration_db.begin() as conn:
+            tenant_a = _seed_tenant(conn)
+            tenant_b = _seed_tenant(conn)
+
+            branch_a = _seed_branch(conn, tenant_a)
+            patient_a = _seed_patient(conn, tenant_a, branch_a)
+            order_a = _seed_order(conn, tenant_a, branch_a, patient_a)
+            report_a = _seed_report(conn, tenant_a, branch_a, order_a)
+            sample_a = _seed_sample(conn, tenant_a, branch_a, order_a)
+
+            # Sample image + rendition: 3000 + 300 bytes, unattributed.
+            image_storage = _seed_storage_object(
+                conn, key="samples/a/full.jpg", size_bytes=3000, tenant_id=None
+            )
+            image_id = _seed_sample_image(
+                conn, tenant_a, branch_a, sample_a, image_storage
+            )
+            thumb_storage = _seed_storage_object(
+                conn, key="samples/a/thumb.jpg", size_bytes=300, tenant_id=None
+            )
+            _seed_sample_image_rendition(conn, image_id, "thumbnail", thumb_storage)
+
+            # Official PDF (sha256 set) + report JSON body.
+            official_pdf = _seed_storage_object(
+                conn, key="reports/a/official.pdf", size_bytes=5000, tenant_id=None,
+                content_type="application/pdf", sha256_hex="f" * 64,
+            )
+            report_json = _seed_storage_object(
+                conn, key="reports/a/body.json", size_bytes=700, tenant_id=None,
+                content_type="application/json",
+            )
+            _seed_report_version(
+                conn, report_a, version_no=1,
+                pdf_storage_id=official_pdf, json_storage_id=report_json,
+            )
+
+            # A signature on a live user.
+            signature = _seed_storage_object(
+                conn, key="users/a/signature.png", size_bytes=120, tenant_id=None,
+                content_type="image/png",
+            )
+            user_a = _seed_app_user(
+                conn, tenant_a, email=f"a-{uuid.uuid4().hex[:8]}@lab.test",
+                signature_storage_id=signature,
+            )
+            # A second tenant with nothing billable, to prove isolation.
+            user_b = _seed_app_user(
+                conn, tenant_b, email=f"b-{uuid.uuid4().hex[:8]}@lab.test"
+            )
+
+        return {
+            "tenant_a": tenant_a,
+            "tenant_b": tenant_b,
+            "patient_a": patient_a,
+            "order_a": order_a,
+            "report_a": report_a,
+            "sample_a": sample_a,
+            "user_a": user_a,
+            "user_b": user_b,
+            "image_storage": image_storage,
+            "thumb_storage": thumb_storage,
+            "official_pdf": official_pdf,
+            "report_json": report_json,
+            "signature": signature,
+        }
+
+    def test_clinical_rows_survive_the_upgrade(self, migration_db):
+        _alembic(LAST_PRE_1_3_REVISION)
+        seeded = self._seed_pre_1_3_lab(migration_db)
+
+        _alembic("head")
+
+        assert _current_revision(migration_db) == RELEASE_REVISION
+        with migration_db.connect() as conn:
+            for table, row_id in (
+                ("tenant", seeded["tenant_a"]),
+                ("patient", seeded["patient_a"]),
+                ('"order"', seeded["order_a"]),
+                ("report", seeded["report_a"]),
+                ("sample", seeded["sample_a"]),
+                ("app_user", seeded["user_a"]),
+                ("storage_object", seeded["official_pdf"]),
+            ):
+                count = conn.execute(
+                    text(f"SELECT COUNT(*) FROM {table} WHERE id = :id"),
+                    {"id": row_id},
+                ).scalar_one()
+                assert count == 1, f"{table} row did not survive the upgrade"
+
+    def test_storage_attribution_is_backfilled_for_all_four_categories(
+        self, migration_db
+    ):
+        _alembic(LAST_PRE_1_3_REVISION)
+        seeded = self._seed_pre_1_3_lab(migration_db)
+
+        _alembic("head")
+
+        with migration_db.connect() as conn:
+            for label in (
+                "image_storage", "thumb_storage", "official_pdf",
+                "report_json", "signature",
+            ):
+                attributed = conn.execute(
+                    text("SELECT tenant_id FROM storage_object WHERE id = :id"),
+                    {"id": seeded[label]},
+                ).scalar_one()
+                assert attributed == seeded["tenant_a"], (
+                    f"{label} was not attributed by the backfill"
+                )
+
+    def test_the_usage_baseline_is_initialized_per_tenant(self, migration_db):
+        """3000 + 300 + 5000 + 700 + 120 = 9120 for the working tenant, and a
+        real zero row — not a missing row — for the tenant with nothing."""
+        _alembic(LAST_PRE_1_3_REVISION)
+        seeded = self._seed_pre_1_3_lab(migration_db)
+
+        _alembic("head")
+
+        with migration_db.connect() as conn:
+            usage = dict(
+                conn.execute(
+                    text(
+                        "SELECT tenant_id, billable_storage_bytes FROM tenant_usage"
+                    )
+                ).all()
+            )
+        assert usage[seeded["tenant_a"]] == 9120
+        assert usage[seeded["tenant_b"]] == 0, (
+            "every tenant gets a row; absence would mean 'not initialized'"
+        )
+
+    def test_tenant_isolation_holds_across_the_upgrade(self, migration_db):
+        """Tenant B's baseline must not absorb tenant A's objects, and no
+        storage object may end up attributed to the wrong tenant."""
+        _alembic(LAST_PRE_1_3_REVISION)
+        seeded = self._seed_pre_1_3_lab(migration_db)
+
+        _alembic("head")
+
+        with migration_db.connect() as conn:
+            misattributed = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM storage_object WHERE tenant_id = :b"
+                ),
+                {"b": seeded["tenant_b"]},
+            ).scalar_one()
+        assert misattributed == 0
+
+    def test_the_upgrade_creates_no_notification_and_no_threshold_state(
+        self, migration_db
+    ):
+        """§11 and §12 of the squash contract, against populated data.
+
+        A tenant is seeded *over* a storage limit before the upgrade, which
+        is the exact condition a baseline evaluation inside the migration
+        would have fired on. Nothing may be created: first evaluation is
+        runtime behaviour, and a tenant already above a threshold must get
+        its notification from the application, once, rather than silently
+        having the crossing recorded and swallowed at deploy time.
+        """
+        _alembic(LAST_PRE_1_3_REVISION)
+        self._seed_pre_1_3_lab(migration_db)
+
+        _alembic("head")
+
+        with migration_db.begin() as conn:
+            # tenant_limits only exists after the upgrade, so the "already
+            # over the limit" condition is established here and the
+            # migration is replayed below.
+            over_limit = conn.execute(
+                text("SELECT tenant_id FROM tenant_usage ORDER BY "
+                     "billable_storage_bytes DESC LIMIT 1")
+            ).scalar_one()
+            conn.execute(
+                text(
+                    "INSERT INTO tenant_limits (tenant_id, storage_limit_bytes, "
+                    "user_limit, updated_at) VALUES (:id, 100, 1, now())"
+                ),
+                {"id": over_limit},
+            )
+
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
+        _alembic("head")
+
+        with migration_db.connect() as conn:
+            for table in (
+                "notification",
+                "notification_recipient",
+                "notification_delivery",
+                "tenant_usage_threshold_state",
+            ):
+                count = conn.execute(
+                    text(f"SELECT COUNT(*) FROM {table}")
+                ).scalar_one()
+                assert count == 0, f"the migration created rows in {table}"
+
+    def test_downgrade_and_re_upgrade_reproduces_the_same_baseline(
+        self, migration_db
+    ):
+        """The full round trip the release runbook needs: upgrade, roll back,
+        roll forward, and land on the same numbers."""
+        _alembic(LAST_PRE_1_3_REVISION)
+        seeded = self._seed_pre_1_3_lab(migration_db)
+
+        _alembic("head")
+        with migration_db.connect() as conn:
+            first = conn.execute(
+                text(
+                    "SELECT billable_storage_bytes FROM tenant_usage "
+                    "WHERE tenant_id = :id"
+                ),
+                {"id": seeded["tenant_a"]},
+            ).scalar_one()
+
+        _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
+        assert _current_revision(migration_db) == LAST_PRE_1_3_REVISION
+        _alembic("head")
+
+        with migration_db.connect() as conn:
+            second = conn.execute(
+                text(
+                    "SELECT billable_storage_bytes FROM tenant_usage "
+                    "WHERE tenant_id = :id"
+                ),
+                {"id": seeded["tenant_a"]},
+            ).scalar_one()
+            # And the clinical record is still there after the round trip.
+            report_count = conn.execute(
+                text("SELECT COUNT(*) FROM report WHERE id = :id"),
+                {"id": seeded["report_a"]},
+            ).scalar_one()
+
+        assert first == second == 9120
+        assert report_count == 1
 
 
 def _seed_tenant(conn) -> uuid.UUID:
@@ -2817,22 +3449,48 @@ def _seed_storage_object(
     content_type: str = "image/jpeg",
     sha256_hex: str | None = None,
 ) -> uuid.UUID:
+    """Insert one storage_object, at `v1_2_0` or at head.
+
+    `tenant_id` is omitted from the INSERT entirely when it is None rather
+    than being passed as SQL NULL. The two are equivalent at head and only
+    the former works at `v1_2_0`, where `storage_object.tenant_id` does not
+    exist yet — that column is part of the 1.3 delta.
+
+    This matters more than it looks. Before the pre-Phase-5 squash these
+    fixtures were seeded at an intermediate Phase 4 revision, where the
+    column existed and a test could hand a storage object its attribution up
+    front. Post-squash the only seam before the release migration is
+    `v1_2_0`, which is also what a real upgrading database looks like: every
+    storage object arrives unattributed, and the backfill is the only thing
+    that attributes any of them.
+    """
     storage_id = uuid.uuid4()
+    columns = [
+        "id", "provider", "region", "bucket", "object_key",
+        "content_type", "size_bytes", "sha256_hex", "created_at",
+    ]
+    values = [
+        ":id", "'aws'", "'mx-test-1'", "'celuma-test-bucket'", ":key",
+        ":content_type", ":size_bytes", ":sha256_hex", "now()",
+    ]
+    params = {
+        "id": storage_id,
+        "key": key,
+        "content_type": content_type,
+        "size_bytes": size_bytes,
+        "sha256_hex": sha256_hex,
+    }
+    if tenant_id is not None:
+        columns.append("tenant_id")
+        values.append(":tenant_id")
+        params["tenant_id"] = tenant_id
+
     conn.execute(
         text(
-            "INSERT INTO storage_object (id, provider, region, bucket, object_key, "
-            "content_type, size_bytes, sha256_hex, tenant_id, created_at) "
-            "VALUES (:id, 'aws', 'mx-test-1', 'celuma-test-bucket', :key, "
-            ":content_type, :size_bytes, :sha256_hex, :tenant_id, now())"
+            f"INSERT INTO storage_object ({', '.join(columns)}) "
+            f"VALUES ({', '.join(values)})"
         ),
-        {
-            "id": storage_id,
-            "key": key,
-            "content_type": content_type,
-            "size_bytes": size_bytes,
-            "sha256_hex": sha256_hex,
-            "tenant_id": tenant_id,
-        },
+        params,
     )
     return storage_id
 
