@@ -23,7 +23,14 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 # Shared limits (documented in report-template-snapshot-contract.md)
 # ---------------------------------------------------------------------------
 
-MIN_MARGIN_CM = 0.5
+# `0` is a VALID, explicit margin: "no intentional page-margin gap", i.e. the
+# outermost visible printed content sits on the physical page edge. It is NOT
+# "unset" — a missing/null margin is a different thing and falls back to a
+# default. Never test a margin for truthiness (`margin or default` would turn
+# an explicit 0.0 into the default). Negative margins stay invalid; the upper
+# bound is unchanged. See
+# docs/celuma-1.3/pre-phase-5-legacy-margin-remediation/legacy-margin-contract.md.
+MIN_MARGIN_CM = 0.0
 MAX_MARGIN_CM = 4.0
 MAX_TEMPLATE_BYTES = 500_000  # 500 KB — sanity bound on the opaque clinical structure blob
 _HEX_COLOR_PATTERN = re.compile(r"^#[0-9A-Fa-f]{6}$")
