@@ -7,6 +7,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 jobs:
   docker-build-main:
     runs-on: ubuntu-latest
@@ -88,6 +91,7 @@ jobs:
     needs: docker-build-main
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: stg
 
     permissions:
       id-token: write   # OIDC for AWS
@@ -211,6 +215,9 @@ jobs:
     if: >
       github.event_name == 'push' &&
       startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: prod
+      url: https://app.celuma.mx/api
 
     permissions:
       id-token: write   # OIDC for AWS

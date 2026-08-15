@@ -1,8 +1,11 @@
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field, Relationship
 from .base import BaseModel, TimestampMixin
+
+if TYPE_CHECKING:
+    from .laboratory import SampleImage
 
 class StorageObject(BaseModel, TimestampMixin, table=True):
     """Storage object model for S3 and other cloud storage"""

@@ -1,10 +1,13 @@
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from uuid import UUID, uuid4
 from sqlalchemy import Column, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlmodel import SQLModel, Field, Relationship
 from .base import BaseModel, TimestampMixin
+
+if TYPE_CHECKING:
+    from .user import AppUser, UserBranch
 
 class Tenant(BaseModel, TimestampMixin, table=True):
     """Tenant model for multi-tenancy"""

@@ -6,7 +6,7 @@ complex testing framework").
 """
 import uuid
 from datetime import datetime, timedelta
-from typing import Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
 from sqlmodel import Session, select
 
@@ -18,6 +18,10 @@ from app.models.report_template_version import ReportTemplateVersion, ReportTemp
 from app.models.storage import StorageObject
 from app.models.tenant import Branch, Tenant
 from app.models.user import AppUser
+
+if TYPE_CHECKING:
+    from app.models.report_letterhead import ReportLetterhead
+    from app.models.report_letterhead_version import ReportLetterheadVersion
 
 
 # Céluma 1.3 Phase 2, Block B, Story B10: the RBAC catalog (permissions,
