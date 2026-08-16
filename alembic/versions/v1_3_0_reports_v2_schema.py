@@ -424,9 +424,10 @@ _TENANT_USAGE_BASELINE_INSERT = """
         GROUP BY tenant_id
     ),
     signature AS (
-        SELECT u.tenant_id AS tenant_id, so.size_bytes AS bytes
+        SELECT u.tenant_id AS tenant_id, SUM(so.size_bytes) AS bytes
         FROM app_user u
         JOIN storage_object so ON so.id = u.signature_storage_id
+        GROUP BY u.tenant_id
     )
     INSERT INTO tenant_usage (tenant_id, billable_storage_bytes, last_updated)
     SELECT

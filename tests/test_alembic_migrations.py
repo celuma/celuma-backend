@@ -3279,6 +3279,183 @@ class TestRealisticUpgradeFromCeluma12:
         assert report_count == 1
 
 
+class TestMultipleSignaturesPerTenantUpgrade:
+    """Finding B-001 — `v1_3_0` used to abort when a tenant had two or more
+    users with an uploaded signature.
+
+    `_TENANT_USAGE_BASELINE_INSERT`'s `signature` CTE was the only one of its
+    eight without `SUM`/`GROUP BY`. It emitted one row per signature-bearing
+    user, `LEFT JOIN signature sg ON sg.tenant_id = t.id` fanned the tenant's
+    row out by that many, and `INSERT INTO tenant_usage` then violated
+    `tenant_usage_pkey`. A `v1_2_0 -> v1_3_0` upgrade of any laboratory with
+    two signing pathologists failed outright and rolled back.
+
+    Every pre-existing signature fixture in this file — including
+    `TestRealisticUpgradeFromCeluma12`, realistic in every other dimension —
+    seeds exactly **one** signature-bearing user per tenant, which is the
+    single shape under which the defective CTE behaved correctly. That is why
+    139 tests passed while a realistically-shaped database could not be
+    upgraded at all.
+
+    These tests seed the shape that was missing. They assert the arithmetic,
+    not merely that the migration survives: "does not raise" would have been
+    satisfied by a CTE that silently dropped one of the two signatures.
+    """
+
+    def test_two_signature_bearing_users_in_one_tenant_sum_into_one_usage_row(
+        self, migration_db
+    ):
+        """The minimal reproduction of B-001, inverted into a regression.
+
+        One tenant, two active users, one signature each and nothing else
+        billable: 1000 + 2000 = 3000 bytes in exactly one `tenant_usage` row.
+        Before the fix this upgrade aborted with a `UniqueViolation` on
+        `tenant_usage_pkey` and left the database at `v1_2_0`.
+        """
+        _alembic(LAST_PRE_1_3_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            signature_a = _seed_storage_object(
+                conn, key="users/a/signature/sign_1.png", size_bytes=1000,
+                tenant_id=None, content_type="image/png",
+            )
+            signature_b = _seed_storage_object(
+                conn, key="users/b/signature/sign_2.png", size_bytes=2000,
+                tenant_id=None, content_type="image/png",
+            )
+            _seed_app_user(
+                conn, tenant_id, email=f"sig-a-{uuid.uuid4().hex[:8]}@lab.test",
+                signature_storage_id=signature_a,
+            )
+            _seed_app_user(
+                conn, tenant_id, email=f"sig-b-{uuid.uuid4().hex[:8]}@lab.test",
+                signature_storage_id=signature_b,
+            )
+
+        _alembic("head")
+
+        assert _current_revision(migration_db) == RELEASE_REVISION, (
+            "the upgrade did not complete; B-001 has regressed"
+        )
+
+        with migration_db.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT billable_storage_bytes FROM tenant_usage "
+                    "WHERE tenant_id = :id"
+                ),
+                {"id": tenant_id},
+            ).scalars().all()
+            duplicates = conn.execute(
+                text(
+                    "SELECT COALESCE(SUM(c - 1), 0) FROM ("
+                    "  SELECT COUNT(*) AS c FROM tenant_usage "
+                    "  GROUP BY tenant_id HAVING COUNT(*) > 1"
+                    ") d"
+                )
+            ).scalar_one()
+            attributed = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM storage_object "
+                    "WHERE id IN (:a, :b) AND tenant_id = :id"
+                ),
+                {"a": signature_a, "b": signature_b, "id": tenant_id},
+            ).scalar_one()
+
+        assert len(rows) == 1, f"expected exactly one tenant_usage row, got {len(rows)}"
+        assert duplicates == 0
+        assert rows[0] == 3000, (
+            "both signatures must be summed into the tenant's baseline; "
+            f"got {rows[0]} instead of 1000 + 2000"
+        )
+        assert attributed == 2, "both signature objects must be attributed"
+
+        with migration_db.connect() as conn:
+            for table in (
+                "notification",
+                "notification_recipient",
+                "notification_delivery",
+                "notification_preference",
+                "tenant_usage_threshold_state",
+            ):
+                count = conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one()
+                assert count == 0, f"the migration created rows in {table}"
+
+    def test_three_signatures_sum_alongside_the_other_billable_categories(
+        self, migration_db
+    ):
+        """Aggregation over more than two rows, and composition with a
+        non-signature category — 100 + 200 + 400 signatures plus a 50-byte
+        report JSON body is 750, in one row.
+
+        The two-user case above proves the `GROUP BY` exists. This one proves
+        the CTE aggregates rather than picking a single row, and that the
+        aggregated value still adds to the other seven categories instead of
+        replacing them. A second tenant with a single signature runs in the
+        same upgrade, so the grouped CTE is shown not to leak across tenants.
+        """
+        _alembic(LAST_PRE_1_3_REVISION)
+        with migration_db.begin() as conn:
+            tenant_a = _seed_tenant(conn)
+            tenant_b = _seed_tenant(conn)
+
+            for index, size in enumerate((100, 200, 400), start=1):
+                signature = _seed_storage_object(
+                    conn, key=f"users/a{index}/signature/sign_{index}.png",
+                    size_bytes=size, tenant_id=None, content_type="image/png",
+                )
+                _seed_app_user(
+                    conn, tenant_a,
+                    email=f"sig-{index}-{uuid.uuid4().hex[:8]}@lab.test",
+                    signature_storage_id=signature,
+                )
+
+            branch_a = _seed_branch(conn, tenant_a)
+            patient_a = _seed_patient(conn, tenant_a, branch_a)
+            order_a = _seed_order(conn, tenant_a, branch_a, patient_a)
+            report_a = _seed_report(conn, tenant_a, branch_a, order_a)
+            report_json = _seed_storage_object(
+                conn, key="reports/a/body.json", size_bytes=50, tenant_id=None,
+                content_type="application/json",
+            )
+            _seed_report_version(
+                conn, report_a, version_no=1, json_storage_id=report_json,
+            )
+
+            # A single-signature tenant in the same run: the shape the old
+            # CTE handled correctly must keep working.
+            lone_signature = _seed_storage_object(
+                conn, key="users/b/signature/sign_1.png", size_bytes=7,
+                tenant_id=None, content_type="image/png",
+            )
+            _seed_app_user(
+                conn, tenant_b, email=f"sig-b-{uuid.uuid4().hex[:8]}@lab.test",
+                signature_storage_id=lone_signature,
+            )
+
+        _alembic("head")
+
+        assert _current_revision(migration_db) == RELEASE_REVISION
+
+        with migration_db.connect() as conn:
+            usage = dict(
+                conn.execute(
+                    text(
+                        "SELECT tenant_id, billable_storage_bytes FROM tenant_usage"
+                    )
+                ).all()
+            )
+            row_count = conn.execute(
+                text("SELECT COUNT(*) FROM tenant_usage")
+            ).scalar_one()
+
+        assert row_count == 2
+        assert usage[tenant_a] == 750, (
+            "three signatures (700) plus a report JSON body (50) must sum to 750"
+        )
+        assert usage[tenant_b] == 7
+
+
 def _seed_tenant(conn) -> uuid.UUID:
     """A minimal tenant row — everything `tenant_usage`/`tenant_limits`/
     `tenant_usage_reconciliation` need to satisfy their tenant_id FK."""
