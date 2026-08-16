@@ -328,15 +328,26 @@ def create_order(
 ):
     """Create a new laboratory order (requires lab:create_order)."""
     _require(user.id, "lab:create_order", session)
+    # Céluma 1.3 Phase 5, Block C (finding C-001): the body's `tenant_id` is
+    # client-supplied and must be anchored to the authenticated context
+    # before anything else is validated against it — otherwise every check
+    # below merely confirms the payload is self-consistent, which a caller
+    # writing into someone else's tenant can trivially arrange. Same guard,
+    # same wording as `reports.py::create_report` and `patients.py::create_patient`.
+    if str(order_data.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Cannot create orders for a different tenant")
+
     # Verify tenant, branch, patient and requesting physician exist
     tenant = session.get(Tenant, order_data.tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
-    
+
     branch = session.get(Branch, order_data.branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
-    
+    if str(branch.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Branch does not belong to your tenant")
+
     if not order_data.patient_id and not order_data.requesting_physician_id:
         raise HTTPException(400, "Patient or requesting physician is required")
     patient = _validate_patient(session, order_data.patient_id, order_data.tenant_id)
@@ -1172,19 +1183,27 @@ def create_sample(
 ):
     """Create a new sample (requires lab:create_sample)."""
     _require(user.id, "lab:create_sample", session)
+    # Céluma 1.3 Phase 5, Block C (finding C-001) — see `create_order`.
+    if str(sample_data.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Cannot create samples for a different tenant")
+
     # Verify tenant, branch, and order exist
     tenant = session.get(Tenant, sample_data.tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
-    
+
     branch = session.get(Branch, sample_data.branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
-    
+    if str(branch.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Branch does not belong to your tenant")
+
     order = session.get(Order, sample_data.order_id)
     if not order:
         raise HTTPException(404, "Order not found")
-    
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Order does not belong to your tenant")
+
     # Check if sample_code is unique for this order
     existing_sample = session.exec(
         select(Sample).where(
@@ -1293,6 +1312,10 @@ def create_order_with_samples(
     """
     _require(user.id, "lab:create_order", session)
     _require(user.id, "lab:create_sample", session)
+    # Céluma 1.3 Phase 5, Block C (finding C-001) — see `create_order`. This
+    # is the route the frontend's order-registration screen actually calls.
+    if str(payload.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Cannot create orders for a different tenant")
 
     # Validate tenant, branch, patient and requesting physician
     tenant = session.get(Tenant, payload.tenant_id)
@@ -1301,6 +1324,8 @@ def create_order_with_samples(
     branch = session.get(Branch, payload.branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
+    if str(branch.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Branch does not belong to your tenant")
     if not payload.patient_id and not payload.requesting_physician_id:
         raise HTTPException(400, "Patient or requesting physician is required")
     patient = _validate_patient(session, payload.patient_id, payload.tenant_id)
@@ -1509,6 +1534,12 @@ def upload_sample_image(
 
     sample = session.get(Sample, sample_id)
     if not sample:
+        raise HTTPException(404, "Sample not found")
+    # Céluma 1.3 Phase 5, Block C (finding C-001). Without this, a foreign
+    # upload also books its `StorageObject` rows and its `TenantUsage` delta
+    # against the *owning* tenant — a billing effect on top of the isolation
+    # one. 404 rather than 403, matching every other sample route.
+    if str(sample.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Sample not found")
 
     filename = file.filename or "upload"
@@ -1754,6 +1785,10 @@ def list_sample_images(
     _require(user.id, "lab:read", session)
     sample = session.get(Sample, sample_id)
     if not sample:
+        raise HTTPException(404, "Sample not found")
+    # Céluma 1.3 Phase 5, Block C (finding C-001). Clinical images are patient
+    # data and this response carries resolvable media URLs for each of them.
+    if str(sample.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Sample not found")
 
     s3 = S3Service()
