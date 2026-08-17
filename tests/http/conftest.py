@@ -196,6 +196,16 @@ def _patch_s3(monkeypatch):
     # so the manual-trigger endpoint (which constructs the service itself)
     # never reaches the real bucket in a test.
     monkeypatch.setattr("app.services.usage_reconciliation.S3Service", FakeS3Service)
+    # Céluma 1.3 Phase 5, Block D (D-002): the last import site outside this
+    # list. `report_publishing` builds a real S3Service at :95 to read the
+    # stored report JSON back during signing — correct in production, but it
+    # means a test that reaches that line with `json_storage_id` set would go
+    # to the configured bucket, which locally is the real `celuma-media-stg`.
+    # No current test reaches it (every path returns at the
+    # `json_storage_id is None` guard at :83, confirmed by re-running the whole
+    # suite with S3_ENDPOINT_URL pointed at a black hole and getting identical
+    # results). Patched so that stays true by construction rather than by luck.
+    monkeypatch.setattr("app.services.report_publishing.S3Service", FakeS3Service)
 
 
 # ---------------------------------------------------------------------------
