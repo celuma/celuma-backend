@@ -4,10 +4,12 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 import logging
 import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
 from collections import defaultdict
+from urllib.parse import parse_qsl
 import asyncio
 from app.api.v1.users import router as users_router
 from app.api.v1.auth import router as auth_router
@@ -261,6 +263,45 @@ async def basic_rate_limiting(request: Request, call_next):
     
     return await call_next(request)
 
+# Céluma 1.3 Phase 5, Block E (E-003): credential redaction for the request
+# line below.
+#
+# `log_requests` already redacts sensitive *headers* before logging them, so
+# the rule "a credential must not reach the application log" was established
+# long before this block. The request line itself logged `request.url`, and
+# two of this API's credentials travel in the URL rather than in a header:
+#
+#   * `GET /portal/patient/report?code=…` — the patient access code is the
+#     only thing between an anonymous caller and a published report, its
+#     patient name, and a resolvable presigned URL for the official PDF.
+#   * `GET|POST /users/invitations/{token}[/accept]` — the invitation token
+#     authorizes creating an account inside a tenant with a preassigned role.
+#
+# Both were written verbatim, at INFO, on every request. Logs are retained and
+# read by a wider audience than the data they describe, so a log reader could
+# replay either one.
+#
+# Only the credential positions are redacted: paths and ordinary query
+# parameters stay intact, because worklist filters and pagination cursors are
+# what make these lines worth logging at all. `_SENSITIVE_QUERY_KEYS` is the
+# contract — a new credential-bearing query parameter must be added here, and
+# `tests/http/test_block_e_request_log_redaction.py` is what holds it.
+_SENSITIVE_QUERY_KEYS = {"code", "token", "access_code", "secret", "password", "api_key"}
+_INVITATION_TOKEN_RE = re.compile(r"(/invitations/)[^/?]+")
+
+
+def _safe_request_target(request: Request) -> str:
+    """`path?query` with credential values replaced by `<redacted>`."""
+    path = _INVITATION_TOKEN_RE.sub(r"\1<redacted>", request.url.path)
+    if not request.url.query:
+        return path
+    redacted = "&".join(
+        f"{key}=<redacted>" if key.lower() in _SENSITIVE_QUERY_KEYS else f"{key}={value}"
+        for key, value in parse_qsl(request.url.query, keep_blank_values=True)
+    )
+    return f"{path}?{redacted}"
+
+
 # Enhanced logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -284,7 +325,7 @@ async def log_requests(request: Request, call_next):
         return redacted
 
     client_ip = request.client.host if request.client else "unknown"
-    logger.info(f"🔥 [{request_id[:8]}] INCOMING REQUEST: {request.method} {request.url} | client={client_ip}")
+    logger.info(f"🔥 [{request_id[:8]}] INCOMING REQUEST: {request.method} {_safe_request_target(request)} | client={client_ip}")
     
     # Only log headers for auth endpoints or if there's an auth header
     if "/auth/" in str(request.url) or "authorization" in dict(request.headers):

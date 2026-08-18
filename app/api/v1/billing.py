@@ -270,14 +270,27 @@ def create_invoice(
     if not tenant:
         raise HTTPException(404, "Tenant not found")
     
+    # Céluma 1.3 Phase 5, Block E (E-001): `tenant_id` above is the caller's
+    # own declared tenant, so checking it proves nothing about who owns the
+    # branch and order referenced alongside it. Without these two guards a
+    # tenant-A billing user could invoice against a tenant-B order, and the
+    # `update_order_payment_lock` call below would then set `billed_lock` on
+    # that foreign order — the flag `portal.py` uses to gate report delivery
+    # to patients and requesting physicians. Anchored to `ctx` the same way
+    # `patients.py::create_patient` anchors its own body-supplied `branch_id`,
+    # with the same 403 wording.
     branch = session.get(Branch, invoice_data.branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
-    
+    if str(branch.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Branch does not belong to your tenant")
+
     order = session.get(Order, invoice_data.order_id)
     if not order:
         raise HTTPException(404, "Order not found")
-    
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Order does not belong to your tenant")
+
     # Check if invoice_number is unique for this branch
     existing_invoice = session.exec(
         select(Invoice).where(
@@ -619,10 +632,20 @@ def create_payment(
     if str(tenant.id) != ctx.tenant_id:
         raise HTTPException(403, "Cannot create payment for different tenant")
     
+    # Céluma 1.3 Phase 5, Block E (E-002): same defect as `create_invoice` —
+    # the tenant check above is on the caller's own declared `tenant_id`, not
+    # on the referenced invoice. Unanchored, a tenant-A user could register a
+    # payment against a tenant-B invoice, and `update_invoice_status` plus
+    # `update_order_payment_lock` below would mark that invoice paid and clear
+    # `billed_lock` on tenant B's order — releasing B's report to the patient
+    # and requesting physician before B had been paid. Same 403 wording as
+    # `get_invoice` and the other reads in this module.
     invoice = session.get(Invoice, payment_data.invoice_id)
     if not invoice:
         raise HTTPException(404, "Invoice not found")
-    
+    if str(invoice.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Invoice does not belong to your tenant")
+
     payment = Payment(
         tenant_id=payment_data.tenant_id,
         invoice_id=payment_data.invoice_id,
