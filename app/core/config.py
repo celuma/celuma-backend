@@ -154,6 +154,21 @@ class Settings(BaseSettings):
     # Falls back to `aws_region` when unset (see `effective_email_ses_region`)
     # so a region where SES *is* available needs no extra configuration.
     email_ses_region: str | None = None
+    # Céluma 1.3 Phase 5, Block F SES closure (F-016): the SES configuration
+    # set every send is associated with.
+    #
+    # Optional, and unset by default, so nothing about local development or
+    # the fake provider changes. When it *is* set, `SesEmailProvider` passes
+    # it as `ConfigurationSetName`, which is what makes SES publish SEND /
+    # DELIVERY / BOUNCE / COMPLAINT events for Céluma mail. Without the
+    # parameter a configuration set can exist in AWS and still observe
+    # nothing, because no send references it — which was the third and least
+    # obvious half of F-016.
+    #
+    # The value is owned by `celuma-infra`, which creates the configuration
+    # set and exports its name onto the task definition. The backend must not
+    # invent a second name.
+    email_configuration_set: str | None = None
     # The origin the "log in to Céluma" call to action points at. Only ever
     # used as a bare origin: content policy §3 forbids a notification email
     # from deep-linking into a protected resource or carrying a signed URL.
@@ -329,10 +344,27 @@ class Settings(BaseSettings):
         ):
             problems.append("EMAIL_SENDER is not a bare email address")
 
-        if self.email_provider == "ses" and not self.effective_email_ses_region:
+        # Céluma 1.3 Phase 5, Block F, F-005: the SES region must be
+        # **explicit**, not inherited from `aws_region`.
+        #
+        # `effective_email_ses_region` still falls back — an environment whose
+        # own region offers SES is entitled to that, and other callers rely on
+        # it. But Céluma's application region is `mx-central-1`, where SES has
+        # no endpoint at all, so for *this* product the fallback silently
+        # produces a client that cannot resolve a host. That surfaces as
+        # `provider_unavailable` on every delivery attempt: a network-shaped
+        # error for what is really a missing setting, discovered one failed
+        # send at a time.
+        #
+        # Checking the explicit field instead turns it into a startup
+        # configuration problem with a stable, greppable message, before any
+        # send is attempted. The fake provider is untouched — local
+        # development must not require an AWS concept.
+        if self.email_provider == "ses" and not (self.email_ses_region or "").strip():
             problems.append(
-                "EMAIL_SES_REGION (or AWS_REGION) is not set, and the SES "
-                "provider cannot resolve an endpoint without one"
+                "EMAIL_SES_REGION is not set. The SES provider requires an "
+                "explicit region and must not inherit AWS_REGION, because the "
+                "Céluma application region does not offer SES"
             )
         return problems
 

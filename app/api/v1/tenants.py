@@ -5,9 +5,8 @@ from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.core.rbac import has_permission, get_user_roles
 from app.models.tenant import Tenant
 from app.models.user import AppUser
-from app.schemas.tenant import TenantCreate, TenantResponse, TenantDetailResponse
+from app.schemas.tenant import TenantResponse, TenantDetailResponse
 from app.services.storage_billing import resolve_current_tenant_logo_storage_object
-from app.services.usage import UsageService
 from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from app.services.managed_tenant_image_service import (
     ManagedTenantImageService,
@@ -49,21 +48,14 @@ def list_tenants(
         for t in tenants
     ]
 
-@router.post("/", response_model=TenantResponse)
-def create_tenant(tenant_data: TenantCreate, session: Session = Depends(get_session)):
-    """Create a new tenant"""
-    tenant = Tenant(name=tenant_data.name, legal_name=tenant_data.legal_name, tax_id=tenant_data.tax_id)
-    session.add(tenant)
-    session.flush()
-    # Céluma 1.3 Phase 4, Block C §3: a brand-new tenant has no historical
-    # storage, so a zero baseline is valid to initialize right away, in the
-    # same transaction as the tenant itself — this is the only case where
-    # initializing at creation time (rather than via the historical
-    # backfill) is correct. See tenant-usage-initialization-contract.md.
-    UsageService.initialize_usage(session, tenant.id, billable_storage_bytes=0, source="tenant_creation")
-    session.commit()
-    session.refresh(tenant)
-    return TenantResponse(id=str(tenant.id), name=tenant.name, legal_name=tenant.legal_name, reports_v2_enabled=tenant.reports_v2_enabled)
+# Céluma 1.3 Phase 5, Block F §1 — E-012: the collection-level
+# ``POST /api/v1/tenants/`` route was removed. It was a pre-
+# ``/auth/register/unified`` remnant: authenticated but ungated, with no
+# frontend caller and no test, and it persisted a Tenant plus a TenantUsage
+# row with no branch and no user — an orphan tenant nobody can authenticate
+# into. Tenant onboarding is ``POST /api/v1/auth/register/unified``, which
+# creates tenant + default branch + admin user atomically.
+# See block-e-release-findings.md §4a and block-f-release-findings.md.
 
 @router.get("/{tenant_id}", response_model=TenantDetailResponse)
 def get_tenant(
