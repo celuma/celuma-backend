@@ -167,9 +167,29 @@ class SesEmailProvider(EmailProvider):
 
     name = "ses"
 
-    def __init__(self, *, client=None, region: Optional[str] = None):
+    def __init__(
+        self,
+        *,
+        client=None,
+        region: Optional[str] = None,
+        configuration_set: Optional[str] = None,
+    ):
         self._client = client
         self._region = region if region is not None else settings.effective_email_ses_region
+        # Céluma 1.3 Phase 5, Block F SES closure (F-016). Resolved once, here,
+        # rather than read from `settings` inside `send` — the same reason the
+        # region is: a provider instance should be a fixed thing a test can
+        # construct with explicit values, not something whose behaviour changes
+        # under it when a setting is monkeypatched mid-run.
+        #
+        # `None` and `""` both mean "not configured", and both leave the send
+        # call byte-identical to what it was before this block.
+        resolved = (
+            configuration_set
+            if configuration_set is not None
+            else settings.email_configuration_set
+        )
+        self._configuration_set: Optional[str] = (resolved or "").strip() or None
 
     # -- client ------------------------------------------------------------
 
@@ -208,15 +228,23 @@ class SesEmailProvider(EmailProvider):
         if message.html_body:
             body["Html"] = {"Data": message.html_body, "Charset": "UTF-8"}
 
+        send_kwargs: dict = {
+            "Source": _format_source(message),
+            "Destination": {"ToAddresses": [message.to_address]},
+            "Message": {
+                "Subject": {"Data": message.subject, "Charset": "UTF-8"},
+                "Body": body,
+            },
+        }
+        # Only present when configured. SES rejects an empty
+        # `ConfigurationSetName`, and an environment that has not opted in must
+        # produce exactly the call it produced before F-016 — so this is an
+        # added key, never a key set to a falsy value.
+        if self._configuration_set:
+            send_kwargs["ConfigurationSetName"] = self._configuration_set
+
         try:
-            response = self._get_client().send_email(
-                Source=_format_source(message),
-                Destination={"ToAddresses": [message.to_address]},
-                Message={
-                    "Subject": {"Data": message.subject, "Charset": "UTF-8"},
-                    "Body": body,
-                },
-            )
+            response = self._get_client().send_email(**send_kwargs)
         except Exception as exc:  # noqa: BLE001 — every failure becomes a code
             # Deliberately broad. A vendor exception that escaped this method
             # would reach the worker as something the worker must then decide

@@ -20,6 +20,14 @@ from app.models.tenant import Branch, Tenant
 from app.models.user import AppUser
 
 if TYPE_CHECKING:
+    # Céluma 1.3 Phase 5, Block F §29: `Notification` and
+    # `NotificationRecipient` are imported inside the factory bodies (to keep
+    # module import cheap) but named in quoted return annotations, which the
+    # backend lint gate flagged as five F821 "undefined name" errors — the
+    # only findings in `app`, `tests` and `alembic`. Declaring them here is
+    # the whole fix: the annotations are never evaluated at runtime, so this
+    # changes no behaviour and adds no import cost.
+    from app.models.notification import Notification, NotificationRecipient
     from app.models.report_letterhead import ReportLetterhead
     from app.models.report_letterhead_version import ReportLetterheadVersion
 

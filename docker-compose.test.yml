@@ -1,0 +1,175 @@
+# Isolated release-validation stack (Céluma 1.3, Phase 5, Block F §23).
+#
+# Stands up a complete, disposable Céluma — Postgres, an S3-compatible object
+# store, and the API with its headless-Chromium PDF generator — so that C-002
+# (official PDF end to end) and C-004 (browser E2E) can run for real without
+# any write reaching `celuma-media-stg` or `celuma-media-prod`.
+#
+# It is a **standalone** compose file, not an overlay merged onto
+# `docker-compose.yml`, and that is deliberate. The default file carries
+# `env_file: .env`, which holds the developer's real `AWS_ACCESS_KEY_ID` for
+# the staging bucket. Merging would load those values and then rely on this
+# file's `environment:` block out-ranking them — correct today, and one
+# forgotten key away from a write landing in staging. Nothing here reads
+# `.env` at all, so there is no real credential in the process to misuse.
+#
+# Every service is named `celuma-blockf-*` and the project is `celuma-blockf`,
+# so this stack cannot collide with, restart or reconfigure the developer's
+# own `celuma-backend-api-1` / `celuma-backend-db-1`. Published host ports are
+# likewise shifted (8100/5433/9100/9101) to leave 8000/5432/9000 alone.
+#
+# Storage isolation is asserted, not assumed: `api` runs
+# `scripts/assert_isolated_storage.py` before `start.sh`, and that script
+# refuses to start the container if the effective bucket, endpoint or
+# credentials look like a real environment. See §23 of the block brief and
+# `block-d-object-storage-isolation-assessment.md` §5.
+#
+# Usage:
+#
+#     docker compose -f docker-compose.test.yml -p celuma-blockf up -d
+#     docker compose -f docker-compose.test.yml -p celuma-blockf down -v
+#
+# The frontend half runs on the host, not here — the PDF generator renders
+# `{PDF_GENERATOR_BASE_URL}/internal/report-render/...`, which must be the
+# *same* frontend the E2E specs drive. See the Block F isolated-stack report.
+
+name: celuma-blockf
+
+services:
+  db:
+    image: postgres:15
+    container_name: celuma-blockf-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: celumatest
+    ports: ["5433:5432"]
+    # An anonymous volume, never a named one: `down -v` takes the database
+    # with it, so no run can inherit state from the previous one. (A tmpfs
+    # would be tidier still, but Postgres needs to own its data directory and
+    # a tmpfs mount arrives root-owned.)
+    volumes: ["/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d celumatest"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  s3:
+    image: minio/minio:latest
+    container_name: celuma-blockf-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: blockftest
+      MINIO_ROOT_PASSWORD: blockftestsecret
+    ports:
+      - "9100:9000"
+      - "9101:9001"
+    volumes: ["/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # One-shot bucket bootstrap. Exits 0 once `celuma-media-test` exists, which
+  # is what `api`'s `service_completed_successfully` condition waits on.
+  s3-init:
+    image: minio/mc:latest
+    container_name: celuma-blockf-minio-init
+    depends_on:
+      s3:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+      mc alias set blockf http://s3:9000 blockftest blockftestsecret &&
+      mc mb --ignore-existing blockf/celuma-media-test &&
+      mc ls blockf &&
+      echo 'bucket celuma-media-test ready'
+      "
+
+  api:
+    build:
+      context: .
+      # Same `dev` target the default compose file uses: it ships pytest and
+      # the Playwright/Chromium browser build the PDF generator drives.
+      target: dev
+    container_name: celuma-blockf-api
+    depends_on:
+      db:
+        condition: service_healthy
+      s3-init:
+        condition: service_completed_successfully
+    # The guard runs first and exits non-zero if storage is not isolated, so a
+    # misconfigured stack fails at startup instead of writing somewhere real.
+    command: bash -c "python scripts/assert_isolated_storage.py && bash start.sh"
+    ports: ["8100:8000"]
+    # `host.docker.internal` is how the in-container Chromium reaches the
+    # frontend dev server running on the host. Docker Desktop provides it on
+    # macOS/Windows; this mapping makes it resolve on Linux too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/celumatest
+      # Disposable, and obviously so. Never a real secret.
+      JWT_SECRET: blockf-isolated-stack-not-a-real-secret
+      JWT_EXPIRES_MIN: "480"
+      APP_NAME: celuma
+      ENV: test
+
+      # ---- storage isolation: the whole point of this file ----
+      #
+      # Dummy credentials matter as much as the endpoint. If the endpoint were
+      # ever wrong, these cannot authenticate against real AWS, so the run
+      # fails loudly instead of succeeding somewhere it should not.
+      AWS_ACCESS_KEY_ID: blockftest
+      AWS_SECRET_ACCESS_KEY: blockftestsecret
+      AWS_REGION: us-east-1
+      # Defaults to the compose-internal endpoint, which is all the API itself
+      # needs. Override it when running the browser E2E specs that assert a
+      # real **download**: `GET /reports/{id}/versions/{n}/pdf` answers with a
+      # *presigned URL*, the SPA opens it in the browser, and the browser runs
+      # on the host — where `s3` does not resolve. The signature is bound to
+      # the host header, so the same name has to work on both sides; this
+      # machine's LAN address does, via MinIO's published 9100.
+      #
+      #     CELUMA_BLOCKF_S3_ENDPOINT=http://$(ipconfig getifaddr en0):9100 \
+      #       docker compose -f docker-compose.test.yml -p celuma-blockf up -d
+      #
+      # Left as `s3:9000` by default so the stack needs no host-specific value
+      # to start. See the Block F isolated-stack report.
+      S3_ENDPOINT_URL: ${CELUMA_BLOCKF_S3_ENDPOINT:-http://s3:9000}
+      S3_BUCKET_NAME: celuma-media-test
+      MEDIA_PUBLIC_BASE_URL: ""
+      MEDIA_PRESIGNED_EXPIRE_SECONDS: "3600"
+
+      # ---- rate limit: raised for this stack only ----
+      #
+      # `app/main.py`'s limiter is per-IP, and the whole browser E2E suite
+      # arrives from one address, so the 100/60s production default is
+      # exhausted mid-run and tests that have nothing wrong fail on 429 at
+      # `POST /auth/register/unified`. 2000 is the value the third
+      # post-Phase-2 remediation established for exactly this
+      # (`remediation-3-e2e-report.md`); it is raised **here only**, and no
+      # production or staging default changes. This is an environment
+      # accommodation, not a weakened assertion — E-004 (the limiter sees only
+      # the ALB address behind CloudFront) is a separate, unresolved matter.
+      RATE_LIMIT_MAX_REQUESTS: "2000"
+      RATE_LIMIT_WINDOW_SECONDS: "60"
+
+      # ---- official PDF generation (C-002) ----
+      #
+      # Must point at the *same* frontend the E2E specs drive, or the rendered
+      # artifact and the data under test come from two different systems and
+      # the run proves nothing. 5273, not 5173, so the developer's own dev
+      # server is left alone.
+      PDF_GENERATOR_BASE_URL: http://host.docker.internal:5273
+      FRONTEND_URL: http://localhost:5273
+
+      # ---- email stays off ----
+      #
+      # Block F validates SES against the real API from a separate, explicit
+      # harness. This stack must never send.
+      EMAIL_ENABLED: "false"
+      EMAIL_PROVIDER: fake
+      EMAIL_SENDER: blockf@localhost.test
