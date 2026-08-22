@@ -1,20 +1,38 @@
-fastapi==0.116.*
-uvicorn[standard]==0.35.*
-sqlmodel==0.0.*
-sqlalchemy==2.0.*
-alembic==1.16.*
-pydantic-settings==2.10.*
-psycopg2-binary==2.9.*
-python-jose[cryptography]==3.5.*
-passlib==1.7.*
-python-multipart==0.0.*
-email-validator==2.2.*
+# Céluma backend runtime dependencies.
+#
+# Céluma 1.3 Phase 5, Block G-B (G-008): these are pinned to EXACT versions,
+# not wildcards. Wildcard pins (`Pillow==10.*`) let two builds of the same
+# source commit resolve different dependency sets, which breaks the release
+# provenance chain the RC depends on: the artifact must be reproducible from
+# the commit alone. Exact pins are consumed unchanged by the Dockerfile
+# (`pip install -r requirements.txt`) and by CI — no new tooling.
+#
+# To update a dependency: change the version here deliberately, rebuild, and
+# run the full gate suite. Do not relax a pin back to a wildcard.
+fastapi==0.116.2
+uvicorn[standard]==0.35.0
+sqlmodel==0.0.39
+sqlalchemy==2.0.52
+alembic==1.16.5
+pydantic-settings==2.10.1
+psycopg2-binary==2.9.12
+python-jose[cryptography]==3.5.0
+passlib==1.7.4
+python-multipart==0.0.32
+email-validator==2.2.0
 
 # AWS and Imaging
-boto3==1.34.*
-Pillow==10.*
-rawpy==0.25.*
-imageio==2.34.*
+#
+# Block G-B (F-007): Pillow 10.4.0 -> 12.3.0. Pillow decodes ATTACKER-SUPPLIED
+# bytes — `Image.open()` on uploaded sample/logo/avatar images auto-detects the
+# format, and `ImageCms.profileToProfile()` parses an embedded ICC profile that
+# also comes from the upload. That made the PSD, FITS, JPEG2000 and GD decoder
+# advisories genuinely reachable. 12.3.0 is the first release fixing all of
+# them. See docs/celuma-1.3/phase-5-block-g/block-g-dependency-disposition.md.
+boto3==1.34.162
+Pillow==12.3.0
+rawpy==0.25.1
+imageio==2.34.2
 
 # Céluma 1.3 Fase 2, Bloque E: official PDF generation. `playwright` drives
 # headless Chromium against the frontend's internal render route; `pypdf`
@@ -25,8 +43,14 @@ imageio==2.34.*
 # ._render_pdf() launches Chromium and calls page.pdf() to produce the
 # official, hashed, immutable PDF. See
 # docs/celuma-1.3/phase-2-closure/browser-dependency-classification.md.
-playwright==1.49.*
-pypdf==5.1.*
+#
+# Block G-B (F-007): pypdf 5.1.0 -> 6.16.1. pypdf never parses an uploaded
+# PDF — Céluma has no PDF ingestion endpoint — but the bytes it validates are
+# rendered from tenant-authored report content, so the DoS advisories are
+# indirectly influenced by an authenticated user. Defence in depth on a
+# four-call-site surface.
+playwright==1.49.1
+pypdf==6.16.1
 
 # Test-only dependencies (pytest, pytest-cov, httpx) live in
 # requirements-dev.txt so they never reach the production image.

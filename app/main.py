@@ -172,15 +172,39 @@ async def add_request_id_and_security_headers(request: Request, call_next):
     
     return response
 
+# Céluma 1.3 Phase 5, Block G-B (F-007): read the routed path from the ASGI
+# scope, never from `request.url.path`.
+#
+# Starlette rebuilds `request.url` as f"{scheme}://{host_header}{path}" and
+# re-parses the result, where `host_header` is the raw, UNVALIDATED `Host`
+# header (starlette/datastructures.py, URL.__init__). A `Host` value carrying
+# `?`, `#` or a path segment therefore shifts what `.path` returns, so the
+# value can disagree with the path Starlette actually routed on. That is the
+# substance of CVE-2026-48710 and CVE-2026-54282, neither of which is fixed
+# in any Starlette release FastAPI 0.116.2 permits (`starlette<0.49.0`).
+#
+# The middleware below uses the path to decide whether to SKIP rate limiting
+# and request-size limiting. Those decisions must be made on the same value
+# the router uses, which is `scope["path"]` — the input Starlette itself
+# feeds into the reconstruction. Reading it directly removes the
+# concatenate-and-reparse round trip through attacker-controlled input
+# entirely, and is identical to `request.url.path` for every well-formed
+# request.
+#
+# See docs/celuma-1.3/phase-5-block-g/block-g-dependency-disposition.md.
+def _routed_path(request: Request) -> str:
+    return request.scope.get("path", "")
+
+
 # Request size limiting middleware
 @app.middleware("http")
 async def limit_request_size(request: Request, call_next):
     # Skip size check for health endpoints
-    if request.url.path in ["/", "/health", "/api/v1/health"]:
+    if _routed_path(request) in ["/", "/health", "/api/v1/health"]:
         return await call_next(request)
 
     # Determine per-route/per-type limits
-    path = request.url.path.lower()
+    path = _routed_path(request).lower()
     content_type = (request.headers.get("content-type") or "").lower()
 
     # Endpoints that handle streaming/chunked reads with their own limits
@@ -232,7 +256,7 @@ rate_limit_lock = asyncio.Lock()
 @app.middleware("http")
 async def basic_rate_limiting(request: Request, call_next):
     # Skip rate limiting for health endpoints
-    if request.url.path in ["/", "/health", "/api/v1/health"]:
+    if _routed_path(request) in ["/", "/health", "/api/v1/health"]:
         return await call_next(request)
     
     client_ip = request.client.host if request.client else "unknown"
@@ -306,7 +330,7 @@ def _safe_request_target(request: Request) -> str:
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     # Skip logging for health endpoints to avoid noise
-    if request.url.path in ["/", "/health", "/api/v1/health"]:
+    if _routed_path(request) in ["/", "/health", "/api/v1/health"]:
         return await call_next(request)
     
     start_time = time.time()

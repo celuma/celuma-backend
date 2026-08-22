@@ -1,4 +1,6 @@
-from pydantic import field_validator
+from typing import ClassVar
+
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 #: Céluma 1.3 Phase 3, Block E, Story E1: the providers `email_provider` may
@@ -319,6 +321,64 @@ class Settings(BaseSettings):
                 "angle brackets (it is rendered into a From header)"
             )
         return candidate
+
+    #: Céluma 1.3 Phase 5, Block G-B, F-018: the environment names for which
+    #: explicit AWS credentials are refused. Only production — local
+    #: development and the test suites legitimately authenticate with static
+    #: keys against MinIO or a developer's own account.
+    _CREDENTIAL_GUARDED_ENVS: ClassVar[frozenset[str]] = frozenset({"prod"})
+
+    @model_validator(mode="after")
+    def _reject_static_aws_credentials_in_prod(self) -> "Settings":
+        """Refuse to start in production when static AWS credentials are set.
+
+        Céluma 1.3 Phase 5, Block G-B — F-018.
+
+        `boto3` resolves credentials in a fixed order and explicit
+        `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` win over the container
+        credential provider. Setting either one in production therefore makes
+        `SesEmailProvider` and `S3Service` silently stop using the ECS task
+        role: the least-privilege, auto-rotating identity the infrastructure
+        grants is replaced by a long-lived key whose scope nobody reviewed.
+
+        Nothing fails loudly when that happens. Block F found it the hard way
+        — a mounted `.env` made every SES send return
+        `provider_access_denied`, which reads like a permissions bug in SES,
+        not like a credential-precedence problem in the container.
+
+        The production task definition sets neither variable today, so this is
+        a guard against a future regression rather than a live defect. It
+        fails closed at import, before any AWS client is constructed, because
+        the alternative is discovering the bypass from an audit log.
+
+        Empty strings count as unset. `docker-compose.yml` forwards
+        `AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}` unconditionally, so an
+        unexported variable arrives as `""` — that is absence, not
+        configuration, and blanking the values is exactly how Block F
+        restored SES.
+
+        No credential value is ever echoed: the error names the offending
+        variables only, so it is safe in a log or a crash report.
+        """
+        if (self.env or "").strip().lower() not in self._CREDENTIAL_GUARDED_ENVS:
+            return self
+
+        offenders = [
+            name
+            for name, value in (
+                ("AWS_ACCESS_KEY_ID", self.aws_access_key_id),
+                ("AWS_SECRET_ACCESS_KEY", self.aws_secret_access_key),
+            )
+            if (value or "").strip()
+        ]
+        if offenders:
+            raise ValueError(
+                f"{' and '.join(offenders)} must not be set when ENV=prod. "
+                "Explicit AWS credentials take precedence over the ECS task "
+                "role, so S3 and SES would bypass it. Unset the variable and "
+                "let the default credential provider chain use the task role."
+            )
+        return self
 
     @property
     def effective_email_ses_region(self) -> str | None:
