@@ -102,16 +102,68 @@ class FakeS3Service:
     def delete_object(self, key):
         FakeS3Service.store.pop(key, None)
 
+    # -- Céluma 1.3 Phase 4, Block D: read-only integrity verification ------
+    #
+    # The reconciliation engine HEADs every billable object and lists the
+    # tenant-attributable prefixes. Both are modelled here against the same
+    # in-memory `store` every other method uses, so a test can create real
+    # drift (delete a key to make an object "missing", write a different
+    # payload to make its size disagree) instead of mocking the service.
+
+    #: Keys whose HEAD should report a size/etag that disagrees with the DB
+    #: row: {key: (size_bytes, etag)}. Lets a test produce a metadata
+    #: mismatch without having to make the stored bytes lie.
+    head_overrides: dict = {}
+
+    def head_object(self, key):
+        from app.services.s3 import S3HeadInfo
+
+        if key in FakeS3Service.head_overrides:
+            size_bytes, etag = FakeS3Service.head_overrides[key]
+            return S3HeadInfo(
+                key=key, size_bytes=size_bytes, etag=etag, content_type=None
+            )
+        if key not in FakeS3Service.store:
+            return None
+        return S3HeadInfo(
+            key=key,
+            size_bytes=len(FakeS3Service.store[key]),
+            etag="fake-etag",
+            content_type=None,
+        )
+
+    def iter_object_keys(self, prefix):
+        for key in sorted(FakeS3Service.store):
+            if key.startswith(prefix):
+                yield key
+
+    @staticmethod
+    def put_raw(key: str, data: bytes = b"x"):
+        """Place an object in the bucket with no StorageObject row — how a
+        test builds a physical orphan (or a retained signature PNG)."""
+        FakeS3Service.store[key] = data
+
 
 @pytest.fixture(autouse=True)
 def _reset_fake_s3():
     FakeS3Service.store = {}
     FakeS3Service.fail_next_upload = False
+    FakeS3Service.head_overrides = {}
     yield
 
 
 @pytest.fixture(autouse=True)
 def _patch_s3(monkeypatch):
+    # `FakeS3Service.object_public_url` below is hardcoded to
+    # `https://fake-cdn.example/...` regardless of what real environment
+    # variable is configured; the setting is pinned to match so any test
+    # that asserts on a stored `logo_url` string sees a consistent value.
+    #
+    # Céluma 1.3 Phase 4, Block D: this pin is no longer load-bearing for
+    # *resolution* — the current tenant logo is now found through
+    # `Tenant.logo_storage_id`, not by stripping this prefix off a URL, so
+    # a mismatch here can no longer make a logo silently unresolvable.
+    monkeypatch.setattr(settings, "media_public_base_url", "https://fake-cdn.example")
     monkeypatch.setattr("app.api.v1.reports.S3Service", FakeS3Service)
     monkeypatch.setattr("app.api.v1.portal.S3Service", FakeS3Service)
     # Céluma 1.3 Phase 2, Block E: ReportPdfGenerationService uploads the
@@ -133,6 +185,112 @@ def _patch_s3(monkeypatch):
     # this remediation.
     monkeypatch.setattr("app.services.letterhead_portability.S3Service", FakeS3Service)
     monkeypatch.setattr("app.services.letterhead_resources.S3Service", FakeS3Service)
+    # Céluma 1.3 Phase 4, Block C: sample-image upload/delete and signature
+    # upload/replace/delete had no HTTP-level test coverage before this
+    # block (confirmed by grep — neither module was ever patched here), so
+    # this block's own new tests are the first callers that need it.
+    monkeypatch.setattr("app.api.v1.laboratory.S3Service", FakeS3Service)
+    monkeypatch.setattr("app.api.v1.users.S3Service", FakeS3Service)
+    # Céluma 1.3 Phase 4, Block D: the reconciliation engine builds its own
+    # S3 client lazily when a run verifies storage integrity. Patched here
+    # so the manual-trigger endpoint (which constructs the service itself)
+    # never reaches the real bucket in a test.
+    monkeypatch.setattr("app.services.usage_reconciliation.S3Service", FakeS3Service)
+    # Céluma 1.3 Phase 5, Block D (D-002): the last import site outside this
+    # list. `report_publishing` builds a real S3Service at :95 to read the
+    # stored report JSON back during signing — correct in production, but it
+    # means a test that reaches that line with `json_storage_id` set would go
+    # to the configured bucket, which locally is the real `celuma-media-stg`.
+    # No current test reaches it (every path returns at the
+    # `json_storage_id is None` guard at :83, confirmed by re-running the whole
+    # suite with S3_ENDPOINT_URL pointed at a black hole and getting identical
+    # results). Patched so that stays true by construction rather than by luck.
+    monkeypatch.setattr("app.services.report_publishing.S3Service", FakeS3Service)
+
+
+# ---------------------------------------------------------------------------
+# Céluma 1.3, Phase 4, Block E — log-leak test helpers
+# ---------------------------------------------------------------------------
+#
+# Block D sanitized what reconciliation *stores* (`error_code` is a stable
+# code, never a message). Block E closes the other half: what it *logs*. A
+# boto3/botocore error's message routinely quotes the bucket ARN, the object
+# key and a presigned URL's query string, and traceback-printing log helpers
+# put exactly that text into ordinary application logs.
+#
+# These helpers live here, next to `FakeS3Service`, because both the engine
+# tests and the worker tests need them — same reason the fake S3 client is
+# shared rather than duplicated.
+
+#: Marker strings planted inside a simulated AWS failure. None of them may
+#: appear in a log record, in the database, or in an HTTP response.
+SECRET_MARKERS = (
+    "SECRET_BUCKET_ARN",
+    "SECRET_BUCKET_NAME",
+    "SECRET_OBJECT_KEY",
+    "SECRET_QUERY_STRING",
+)
+
+LEAKY_AWS_MESSAGE = (
+    "An error occurred (AccessDenied) when calling the HeadObject operation: "
+    "arn:aws:s3:::SECRET_BUCKET_ARN/SECRET_OBJECT_KEY is denied on bucket "
+    "SECRET_BUCKET_NAME; see https://s3.example/SECRET_OBJECT_KEY"
+    "?X-Amz-Signature=SECRET_QUERY_STRING"
+)
+
+
+class ClientError(Exception):
+    """Shaped like `botocore.exceptions.ClientError`: a message quoting the
+    bucket ARN, the object key, the bucket name and a presigned query
+    string, plus the `response` dict Block D's classifier reads.
+
+    Named after the real class on purpose — the sanitized log line reports
+    `exception_type`, and that field's value is this name.
+    """
+
+    def __init__(self, code: str = "InternalError"):
+        super().__init__(LEAKY_AWS_MESSAGE)
+        self.response = {"Error": {"Code": code, "Message": LEAKY_AWS_MESSAGE}}
+
+
+class FailingS3Service(FakeS3Service):
+    """Every read raises `ClientError`. The failure is what is under test,
+    not the sweep."""
+
+    def __init__(self, code: str = "InternalError"):
+        self._code = code
+
+    def head_object(self, key):
+        raise ClientError(self._code)
+
+    def iter_object_keys(self, prefix):
+        raise ClientError(self._code)
+
+
+def rendered_log_text(caplog) -> str:
+    """Every captured record, rendered the way a log shipper would see it —
+    the formatted message *plus* the record's own attribute dict, so a
+    marker smuggled through `extra={...}`, or left on the record's captured
+    exception, is caught too (an exception object's `repr()` contains its
+    message)."""
+    import logging as _logging
+
+    formatter = _logging.Formatter("%(message)s")
+    parts = []
+    for record in caplog.records:
+        parts.append(formatter.format(record))
+        parts.append(repr(record.__dict__))
+    return "\n".join(parts)
+
+
+def log_records_for(caplog, event: str):
+    """Captured records carrying a given structured `event` field."""
+    return [r for r in caplog.records if getattr(r, "event", None) == event]
+
+
+def assert_no_secret_markers(text: str, where: str) -> None:
+    for marker in SECRET_MARKERS:
+        assert marker not in text, f"{marker} leaked into {where}"
 
 
 def make_pdf_bytes(num_pages: int = 1) -> bytes:

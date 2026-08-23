@@ -153,14 +153,20 @@ records releases rather than the order in which features were developed:
 v1_0_0 → v1_1_0 → v1_2_0 → v1_3_0 (head)
 ```
 
-`v1_3_0` is the whole **Céluma 1.3** database delta — versioned report
-templates, the letterhead domain, official-PDF artifact fields and the
-publish lock — in one revision. It replaced the seven revisions the release
-was developed across, none of which was ever deployed. See
-[`docs/celuma-1.3/phase-2-closure/`](../docs/celuma-1.3/phase-2-closure/):
-`alembic-v1-3-contract.md` for the full DDL and
-`local-database-transition-guide.md` if your local database is stamped at a
-revision that no longer exists.
+`v1_3_0` is the whole **Céluma 1.3** database delta in one revision —
+versioned report templates, the letterhead domain, official-PDF artifact
+fields, the publish lock, the notification domain, and the tenant-usage
+domain with its reconciliation and threshold state. It replaced the fourteen
+revisions the release was developed across, none of which was ever deployed
+to staging, production or a customer database.
+
+**`v1_3_0` is frozen.** It is the final Céluma 1.3 database contract; Phase 5
+validates it and does not rewrite it. Céluma 1.4's schema evolution begins
+from `v1_3_0` and is expected to ship as `v1_4_0`. See
+[`docs/celuma-1.3/pre-phase-5-migration-squash/`](../docs/celuma-1.3/pre-phase-5-migration-squash/):
+`migration-release-contract.md` for the numbering rule and the freeze, and
+`migration-local-database-transition-guide.md` if your local database is
+stamped at a revision that no longer exists (`v1_10_0`–`v1_13_0`).
 
 ### Automatic Migrations
 Migrations run automatically on startup:
@@ -180,7 +186,11 @@ alembic revision --autogenerate -m "short description"
 alembic upgrade head
 ```
 
-> **Note:** `v1_0_0` is the baseline — `alembic downgrade` is not supported. To reset a local
+> **Note:** `v1_0_0` is the baseline. `alembic downgrade v1_2_0` (rolling the
+> Céluma 1.3 release back) is supported and validated, and destroys every row
+> in the tables 1.3 introduced — the notification history, usage counters,
+> limits, reconciliation history and threshold state. Clinical data is not
+> touched. Downgrading *below* `v1_0_0` is not supported; to reset a local
 > database, drop and recreate it, then run `alembic upgrade head`.
 
 ### Reset local database

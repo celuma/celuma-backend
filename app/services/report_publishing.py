@@ -39,6 +39,8 @@ from app.models.storage import StorageObject
 from app.models.user import AppUser
 from app.schemas.report import SignatureMetadata
 from app.services.s3 import S3Service
+from app.services.usage import UsageService
+from app.services.usage_thresholds import record_storage_delta_with_thresholds
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +85,12 @@ def embed_signature_metadata_if_required(
     json_storage = session.get(StorageObject, current_version.json_storage_id)
     if json_storage is None:
         return
+    # Céluma 1.3 Phase 4, Block C: captured before the in-place rewrite
+    # below mutates this same row — this is the one billable write path
+    # that updates size_bytes on an existing StorageObject rather than
+    # creating a new one (see storage-flow-accounting-matrix.md "report
+    # JSON in-place rewrite").
+    old_size_bytes = json_storage.size_bytes or 0
 
     s3 = S3Service()
     try:
@@ -140,6 +148,22 @@ def embed_signature_metadata_if_required(
     json_storage.size_bytes = info.size_bytes
     json_storage.version_id = info.version_id
     session.add(json_storage)
+
+    tenant_id = json_storage.tenant_id
+    if tenant_id is None:
+        report = session.get(Report, report_id)
+        tenant_id = report.tenant_id if report else None
+    if tenant_id is not None:
+        delta = (info.size_bytes or 0) - old_size_bytes
+        record_storage_delta_with_thresholds(
+            session,
+            tenant_id,
+            delta,
+            source="report_json",
+            resource_type="report_json",
+            actor_id=user.id,
+        )
+
     session.commit()
 
 

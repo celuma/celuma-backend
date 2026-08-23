@@ -17,6 +17,8 @@ from app.models.events import OrderEvent
 from app.models.enums import EventType, SampleState, AssignmentItemType, ReviewStatus
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
+from app.services.usage import UsageService
+from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from datetime import datetime
 from app.schemas.laboratory import (
     OrderCreate,
@@ -68,6 +70,14 @@ from app.schemas.patient import PatientFullResponse
 from app.schemas.events import EventCreate, EventResponse, EventsListResponse
 from app.services.s3 import S3Service
 from app.services.image_processing import process_image_bytes
+# Céluma 1.3 Phase 3, Block F: the domain -> notification integration layer.
+# The only notification symbols this module imports.
+from app.services.notification_integrations import (
+    notify_order_assignments_added,
+    notify_order_reviewers_added,
+    notify_sample_assignments_added,
+    notify_sample_status_changed,
+)
 from uuid import uuid4, UUID
 import os
 from sqlmodel import select
@@ -318,15 +328,26 @@ def create_order(
 ):
     """Create a new laboratory order (requires lab:create_order)."""
     _require(user.id, "lab:create_order", session)
+    # Céluma 1.3 Phase 5, Block C (finding C-001): the body's `tenant_id` is
+    # client-supplied and must be anchored to the authenticated context
+    # before anything else is validated against it — otherwise every check
+    # below merely confirms the payload is self-consistent, which a caller
+    # writing into someone else's tenant can trivially arrange. Same guard,
+    # same wording as `reports.py::create_report` and `patients.py::create_patient`.
+    if str(order_data.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Cannot create orders for a different tenant")
+
     # Verify tenant, branch, patient and requesting physician exist
     tenant = session.get(Tenant, order_data.tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
-    
+
     branch = session.get(Branch, order_data.branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
-    
+    if str(branch.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Branch does not belong to your tenant")
+
     if not order_data.patient_id and not order_data.requesting_physician_id:
         raise HTTPException(400, "Patient or requesting physician is required")
     patient = _validate_patient(session, order_data.patient_id, order_data.tenant_id)
@@ -1001,10 +1022,25 @@ def update_sample_state(
         created_by=user.id,
     )
     session.add(event)
-    
+
     # Update order status based on sample state change
     update_order_status(str(sample.order_id), session)
-    
+
+    # Céluma 1.3 Phase 3, Block F: in-app only — the delivery policy gives
+    # SAMPLE_STATUS_CHANGED `email_supported = False`, enforced in
+    # materialization, so no delivery row can exist however this is called.
+    # A no-op transition (same state re-sent) is filtered inside the
+    # integration, which still writes its timeline row as it always has.
+    notify_sample_status_changed(
+        session,
+        sample=sample,
+        order=session.get(Order, sample.order_id) if sample.order_id else None,
+        old_state=(old_state.value if hasattr(old_state, "value") else str(old_state)),
+        new_state=new_state.value,
+        actor=user,
+        occurrence_marker=str(event.id),
+    )
+
     session.commit()
     session.refresh(sample)
     
@@ -1147,19 +1183,27 @@ def create_sample(
 ):
     """Create a new sample (requires lab:create_sample)."""
     _require(user.id, "lab:create_sample", session)
+    # Céluma 1.3 Phase 5, Block C (finding C-001) — see `create_order`.
+    if str(sample_data.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Cannot create samples for a different tenant")
+
     # Verify tenant, branch, and order exist
     tenant = session.get(Tenant, sample_data.tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
-    
+
     branch = session.get(Branch, sample_data.branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
-    
+    if str(branch.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Branch does not belong to your tenant")
+
     order = session.get(Order, sample_data.order_id)
     if not order:
         raise HTTPException(404, "Order not found")
-    
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Order does not belong to your tenant")
+
     # Check if sample_code is unique for this order
     existing_sample = session.exec(
         select(Sample).where(
@@ -1268,6 +1312,10 @@ def create_order_with_samples(
     """
     _require(user.id, "lab:create_order", session)
     _require(user.id, "lab:create_sample", session)
+    # Céluma 1.3 Phase 5, Block C (finding C-001) — see `create_order`. This
+    # is the route the frontend's order-registration screen actually calls.
+    if str(payload.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Cannot create orders for a different tenant")
 
     # Validate tenant, branch, patient and requesting physician
     tenant = session.get(Tenant, payload.tenant_id)
@@ -1276,6 +1324,8 @@ def create_order_with_samples(
     branch = session.get(Branch, payload.branch_id)
     if not branch:
         raise HTTPException(404, "Branch not found")
+    if str(branch.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Branch does not belong to your tenant")
     if not payload.patient_id and not payload.requesting_physician_id:
         raise HTTPException(400, "Patient or requesting physician is required")
     patient = _validate_patient(session, payload.patient_id, payload.tenant_id)
@@ -1485,6 +1535,12 @@ def upload_sample_image(
     sample = session.get(Sample, sample_id)
     if not sample:
         raise HTTPException(404, "Sample not found")
+    # Céluma 1.3 Phase 5, Block C (finding C-001). Without this, a foreign
+    # upload also books its `StorageObject` rows and its `TenantUsage` delta
+    # against the *owning* tenant — a billing effect on top of the isolation
+    # one. 404 rather than 403, matching every other sample route.
+    if str(sample.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Sample not found")
 
     filename = file.filename or "upload"
     # Basic size guard: read up to 50MB for non-RAW, 500MB for RAW candidates
@@ -1544,6 +1600,7 @@ def upload_sample_image(
         etag=processed_info.etag,
         content_type="image/jpeg",
         size_bytes=processed_info.size_bytes,
+        tenant_id=sample.tenant_id,
     )
     session.add(processed_storage)
     session.flush()
@@ -1557,6 +1614,7 @@ def upload_sample_image(
         etag=thumb_info.etag,
         content_type="image/jpeg",
         size_bytes=thumb_info.size_bytes,
+        tenant_id=sample.tenant_id,
     )
     session.add(thumb_storage)
     session.flush()
@@ -1598,6 +1656,7 @@ def upload_sample_image(
             etag=raw_info.etag,
             content_type=file.content_type,
             size_bytes=raw_info.size_bytes,
+            tenant_id=sample.tenant_id,
         )
         session.add(original_storage)
         session.flush()
@@ -1659,10 +1718,42 @@ def upload_sample_image(
             created_by=user.id,
         )
         session.add(state_event)
+        # Céluma 1.3 Phase 3, Block F: the automatic RECEIVED -> PROCESSING
+        # transition is a real state change with its own persisted
+        # SAMPLE_STATE_CHANGED event, so it notifies like any other. Notifying
+        # only the explicit PATCH would mean the same visible transition
+        # sometimes reaches assignees and sometimes does not, depending on how
+        # it was triggered. Volume is bounded: this fires once per sample, on
+        # the first image, and only from RECEIVED.
+        notify_sample_status_changed(
+            session,
+            sample=sample,
+            order=session.get(Order, sample.order_id) if sample.order_id else None,
+            old_state=SampleState.RECEIVED.value,
+            new_state=SampleState.PROCESSING.value,
+            actor=user,
+            occurrence_marker=str(state_event.id),
+        )
 
     # Update order status based on sample state change (if it changed)
     if is_first_image and sample.state == SampleState.PROCESSING:
         update_order_status(str(sample.order_id), session)
+
+    # Céluma 1.3 Phase 4, Block C: one aggregated delta for the whole
+    # upload (processed + thumbnail + optional RAW) rather than one
+    # adjustment per StorageObject, in the same transaction as the inserts
+    # above — see storage-flow-accounting-matrix.md "sample image upload".
+    upload_total_bytes = (processed_info.size_bytes or 0) + (thumb_info.size_bytes or 0)
+    if original_storage is not None:
+        upload_total_bytes += original_storage.size_bytes or 0
+    record_storage_delta_with_thresholds(
+        session,
+        sample.tenant_id,
+        upload_total_bytes,
+        source="sample_image_upload",
+        resource_type="sample_image",
+        actor_id=user.id,
+    )
 
     session.commit()
 
@@ -1694,6 +1785,10 @@ def list_sample_images(
     _require(user.id, "lab:read", session)
     sample = session.get(Sample, sample_id)
     if not sample:
+        raise HTTPException(404, "Sample not found")
+    # Céluma 1.3 Phase 5, Block C (finding C-001). Clinical images are patient
+    # data and this response carries resolvable media URLs for each of them.
+    if str(sample.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Sample not found")
 
     s3 = S3Service()
@@ -1763,19 +1858,29 @@ def delete_sample_image(
     
     # Collect storage IDs before deleting anything
     storage_ids_to_delete = [sample_image.storage_id]
-    
+
     # Delete renditions first (thumbnail, original_raw, etc.)
     renditions = session.exec(
         select(SampleImageRendition).where(SampleImageRendition.sample_image_id == sample_image.id)
     ).all()
-    
+
     for rendition in renditions:
         storage_ids_to_delete.append(rendition.storage_id)
         session.delete(rendition)
-    
+
+    # Céluma 1.3 Phase 4, Block C: capture billable bytes before the
+    # StorageObject rows are deleted below — the accounting delta reflects
+    # DB-row removal, not S3 cleanup (there is none here, by design — see
+    # storage-flow-accounting-matrix.md "sample image delete").
+    deleted_bytes = sum(
+        (obj.size_bytes or 0)
+        for obj in (session.get(StorageObject, sid) for sid in storage_ids_to_delete)
+        if obj is not None
+    )
+
     # Delete the sample image record
     session.delete(sample_image)
-    
+
     # Flush to ensure SampleImage and renditions are deleted before we delete storage objects
     session.flush()
     
@@ -1803,9 +1908,18 @@ def delete_sample_image(
         created_by=user.id,
     )
     session.add(event)
-    
+
+    record_storage_delta_with_thresholds(
+        session,
+        sample.tenant_id,
+        -deleted_bytes,
+        source="sample_image_delete",
+        resource_type="sample_image",
+        actor_id=user.id,
+    )
+
     session.commit()
-    
+
     logger.info(
         f"Image deleted from sample {sample_id}",
         extra={
@@ -2563,7 +2677,18 @@ def update_order_assignees(
             created_by=user.id,
         )
         session.add(event)
-    
+        # Céluma 1.3 Phase 3, Block F: one notification per NEWLY added user.
+        # Guarded by `if added`, so a PUT that only removes people — or one
+        # that changes nothing — notifies nobody. That is a correct no-op, not
+        # a missing-recipient case (recipient matrix, Assignment row).
+        notify_order_assignments_added(
+            session,
+            order=order,
+            added_user_ids=sorted(added, key=str),
+            actor=user,
+            order_event_id=event.id,
+        )
+
     if removed:
         removed_users = session.exec(select(AppUser).where(AppUser.id.in_(removed))).all()
         event = OrderEvent(
@@ -2671,7 +2796,17 @@ def update_order_reviewers(
             created_by=user.id,
         )
         session.add(event)
-    
+        # Céluma 1.3 Phase 3, Block F: being made a reviewer is an assignment
+        # from the recipient's side. Being asked to review a *submitted*
+        # report is the separate REPORT_SUBMITTED event, fired at submission.
+        notify_order_reviewers_added(
+            session,
+            order=order,
+            added_user_ids=sorted(added, key=str),
+            actor=user,
+            order_event_id=event.id,
+        )
+
     if removed:
         removed_users = session.exec(select(AppUser).where(AppUser.id.in_(removed))).all()
         event = OrderEvent(
@@ -2892,7 +3027,17 @@ def update_sample_assignees(
             created_by=user.id,
         )
         session.add(event)
-    
+        # Céluma 1.3 Phase 3, Block F: the deep link points at the SAMPLE, not
+        # its order — the assignment is to this specimen.
+        notify_sample_assignments_added(
+            session,
+            sample=sample,
+            order=session.get(Order, sample.order_id) if sample.order_id else None,
+            added_user_ids=sorted(added, key=str),
+            actor=user,
+            order_event_id=event.id,
+        )
+
     if removed:
         removed_users = session.exec(select(AppUser).where(AppUser.id.in_(removed))).all()
         event = OrderEvent(

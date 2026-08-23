@@ -5,7 +5,9 @@ from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.core.rbac import has_permission, get_user_roles
 from app.models.tenant import Tenant
 from app.models.user import AppUser
-from app.schemas.tenant import TenantCreate, TenantResponse, TenantDetailResponse
+from app.schemas.tenant import TenantResponse, TenantDetailResponse
+from app.services.storage_billing import resolve_current_tenant_logo_storage_object
+from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from app.services.managed_tenant_image_service import (
     ManagedTenantImageService,
     InvalidImageError,
@@ -46,14 +48,14 @@ def list_tenants(
         for t in tenants
     ]
 
-@router.post("/", response_model=TenantResponse)
-def create_tenant(tenant_data: TenantCreate, session: Session = Depends(get_session)):
-    """Create a new tenant"""
-    tenant = Tenant(name=tenant_data.name, legal_name=tenant_data.legal_name, tax_id=tenant_data.tax_id)
-    session.add(tenant)
-    session.commit()
-    session.refresh(tenant)
-    return TenantResponse(id=str(tenant.id), name=tenant.name, legal_name=tenant.legal_name, reports_v2_enabled=tenant.reports_v2_enabled)
+# Céluma 1.3 Phase 5, Block F §1 — E-012: the collection-level
+# ``POST /api/v1/tenants/`` route was removed. It was a pre-
+# ``/auth/register/unified`` remnant: authenticated but ungated, with no
+# frontend caller and no test, and it persisted a Tenant plus a TenantUsage
+# row with no branch and no user — an orphan tenant nobody can authenticate
+# into. Tenant onboarding is ``POST /api/v1/auth/register/unified``, which
+# creates tenant + default branch + admin user atomically.
+# See block-e-release-findings.md §4a and block-f-release-findings.md.
 
 @router.get("/{tenant_id}", response_model=TenantDetailResponse)
 def get_tenant(
@@ -206,6 +208,17 @@ def upload_tenant_logo(
     if str(tenant.id) != ctx.tenant_id:
         raise HTTPException(403, "Cannot update different tenant")
 
+    # Céluma 1.3 Phase 4, Block C: resolve the currently-referenced logo
+    # BEFORE it is superseded below — only the *current* tenant logo is
+    # billable (§12), so a replacement must decrement the outgoing one.
+    #
+    # Block D: this is now a direct `Tenant.logo_storage_id` FK lookup with
+    # an ownership check, not a parse of `logo_url` against the configured
+    # CDN prefix. A tenant whose logo was uploaded under a different
+    # MEDIA_PUBLIC_BASE_URL is still correctly decremented on replacement.
+    previous_logo = resolve_current_tenant_logo_storage_object(session, tenant)
+    previous_logo_size_bytes = previous_logo.size_bytes or 0 if previous_logo else 0
+
     file_bytes = file.file.read()
     try:
         result = ManagedTenantImageService().upload(
@@ -221,12 +234,23 @@ def upload_tenant_logo(
     except ImageRegistrationError:
         raise HTTPException(500, "Failed to register uploaded logo") from None
 
-    # Update tenant logo_url. Tenant does not carry a logo_storage_id FK
-    # (out of scope for this remediation — see managed-logo-upload-contract.md);
-    # the StorageObject row created above still exists and is tenant-scoped,
-    # it is just not referenced by id from Tenant.
+    # Céluma 1.3 Phase 4, Block D: the FK is the authoritative record of
+    # which StorageObject is now the tenant's logo; `logo_url` is the
+    # presentation value clients keep reading. Both are written here, in
+    # that order of importance — every future "which object is the current
+    # logo?" question is answered by `logo_storage_id`, and nothing parses
+    # the URL back into a key any more.
+    tenant.logo_storage_id = result.storage_object.id
     tenant.logo_url = result.url
     session.add(tenant)
+    record_storage_delta_with_thresholds(
+        session,
+        tenant.id,
+        result.size_bytes - previous_logo_size_bytes,
+        source="tenant_logo",
+        resource_type="tenant_logo",
+        actor_id=user.id,
+    )
     session.commit()
     
     logger.info(

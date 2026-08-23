@@ -100,3 +100,41 @@ Resumen:
 - Useful to verify the full flow still works after changes
 - Can be run at any time against a working system
 - Created data remains in the database (not deleted automatically)
+
+## capture_schema_snapshot.py
+
+Captures a normalized, comparable snapshot of a PostgreSQL schema as JSON —
+tables, columns (with ordinal position, type, nullability, default),
+constraints (`pg_get_constraintdef`) and indexes (`pg_indexes.indexdef`).
+Deliberately excludes OIDs, sizes, statistics and `alembic_version`.
+
+Written for the Céluma 1.3 pre-Phase-5 migration squash, whose central claim
+is that the squashed `v1_3_0` produces exactly the schema the pre-squash
+`v1_10_0 … v1_13_0` chain produced. It is read-only: no DDL, no DML.
+
+### Usage
+
+```bash
+# Snapshot an ephemeral database to a file
+docker compose exec api python scripts/capture_schema_snapshot.py \
+  --database celuma_migration_test \
+  --output tests/fixtures/schema/some_snapshot.json
+
+# Or print to stdout
+docker compose exec api python scripts/capture_schema_snapshot.py --database celumadb
+```
+
+Host and credentials come from `DATABASE_URL`; only the database *name* is
+taken from `--database`.
+
+### Who uses it
+
+- `tests/test_alembic_migrations.py::TestSchemaEquivalence` imports `capture()`
+  directly, so the committed fixture and the comparison can never diverge in
+  how they normalize.
+- `docs/celuma-1.3/pre-phase-5-migration-squash/migration-local-database-transition-guide.md`
+  uses it as the precondition check before stamping a local database.
+
+> The committed fixture `tests/fixtures/schema/v1_13_0_pre_squash_schema.json`
+> is the frozen evidence for the migration squash. Regenerating it is not a
+> routine action.

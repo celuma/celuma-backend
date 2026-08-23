@@ -7,12 +7,16 @@
 #
 # Céluma 1.3 Phase 2 closure — see
 # docs/celuma-1.3/phase-2-closure/browser-dependency-classification.md.
+#
+# Céluma 1.3 Phase 5, Block G-B (G-008): pinned exactly, like requirements.txt.
+# These tools decide whether a release gate passes, so a silent minor bump can
+# change a gate result without any source change.
 -r requirements.txt
 
 pytest==8.4.1
 pytest-cov==6.2.1
-ruff==0.12.*
+ruff==0.12.12
 
 # httpx is required by fastapi.testclient.TestClient, which only the HTTP
 # integration tests use — no application module imports it.
-httpx==0.27.*
+httpx==0.27.2

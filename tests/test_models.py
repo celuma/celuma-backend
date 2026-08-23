@@ -147,3 +147,155 @@ class TestRBACModels:
         assert role.code == "pathologist"
         assert role.is_system is True
         assert role.id is not None
+
+
+class TestNotificationModels:
+    """Céluma 1.3 Phase 3, Block B — in-memory field/default assertions.
+
+    Constraint behaviour (uniqueness, CHECKs, nullability) is tested against
+    the real migrated schema in tests/http/test_notification_models.py, since
+    a constraint that exists only in a model definition guarantees nothing.
+    """
+
+    def _notification(self, **overrides):
+        import uuid
+
+        from app.models.notification import Notification, NotificationType
+
+        values = {
+            "tenant_id": uuid.uuid4(),
+            "type": NotificationType.REPORT_SUBMITTED,
+            "title": "Reporte listo para revisión — Orden ORD-1",
+            "resource_type": "report",
+            "resource_id": uuid.uuid4(),
+            "idempotency_key": "REPORT_SUBMITTED:report:abc:marker",
+        }
+        values.update(overrides)
+        return Notification(**values)
+
+    def test_notification_defaults(self):
+        from app.models.notification import NotificationSeverity
+
+        notification = self._notification()
+        assert notification.id is not None
+        assert notification.severity == NotificationSeverity.INFO
+        assert notification.body is None
+        assert notification.created_by is None
+        assert notification.notification_metadata is None
+        assert notification.created_at is not None
+
+    def test_notification_metadata_is_not_named_metadata(self):
+        """`metadata` is reserved by SQLModel/SQLAlchemy on a declarative
+        class. The codebase already resolves this the same way for
+        `event_metadata`/`comment_metadata`."""
+        from app.models.notification import Notification
+
+        notification = self._notification(notification_metadata={"template_key": "x"})
+        assert notification.notification_metadata == {"template_key": "x"}
+        assert not isinstance(getattr(Notification, "metadata", None), dict)
+
+    def test_recipient_defaults_to_unread(self):
+        import uuid
+
+        from app.models.notification import (
+            NotificationRecipient,
+            NotificationRecipientStatus,
+        )
+
+        recipient = NotificationRecipient(
+            notification_id=uuid.uuid4(),
+            tenant_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+        )
+        assert recipient.status == NotificationRecipientStatus.UNREAD
+        assert recipient.read_at is None
+        assert recipient.created_at is not None
+
+    def test_delivery_defaults(self):
+        import uuid
+
+        from app.models.notification import (
+            NotificationChannel,
+            NotificationDelivery,
+            NotificationDeliveryStatus,
+        )
+
+        delivery = NotificationDelivery(
+            notification_id=uuid.uuid4(),
+            tenant_id=uuid.uuid4(),
+            recipient_address="destinatario@example.test",
+            channel=NotificationChannel.EMAIL,
+        )
+        assert delivery.status == NotificationDeliveryStatus.PENDING
+        assert delivery.attempts == 0
+        assert delivery.recipient_user_id is None
+        assert delivery.error_code is None
+
+    def test_preference_defaults_to_both_channels_enabled(self):
+        import uuid
+
+        from app.models.notification import NotificationPreference, NotificationType
+
+        preference = NotificationPreference(
+            tenant_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            notification_type=NotificationType.REPORT_PUBLISHED,
+        )
+        assert preference.in_app_enabled is True
+        assert preference.email_enabled is True
+
+    def test_the_approved_types_and_nothing_speculative(self):
+        """The six Phase 3 clinical events plus Céluma 1.3, Phase 4, Block G's
+        four usage-threshold events — and nothing else.
+
+        The point of the assertion is unchanged: no type may be declared
+        before there is a real transition producing it, a template rendering
+        it, a delivery policy for it and a recipient rule. Block G's four
+        satisfy all four; there is deliberately no `STORAGE_USAGE_90` or any
+        other per-percentage type, because the threshold percentages are
+        policy constants in `app/services/usage_thresholds.py`, not identity.
+        """
+        from app.models.notification import NotificationType
+
+        assert {t.value for t in NotificationType} == {
+            "REPORT_SUBMITTED",
+            "REPORT_PDF_READY",
+            "REPORT_PUBLISHED",
+            "REPORT_RETRACTED",
+            "ASSIGNMENT_ADDED",
+            "SAMPLE_STATUS_CHANGED",
+            "STORAGE_USAGE_APPROACHING",
+            "STORAGE_LIMIT_REACHED",
+            "USER_LIMIT_APPROACHING",
+            "USER_LIMIT_REACHED",
+        }
+
+    def test_email_is_the_only_declared_channel(self):
+        """PUSH/SMS/WHATSAPP are deliberately absent until they are real."""
+        from app.models.notification import NotificationChannel
+
+        assert {c.value for c in NotificationChannel} == {"EMAIL"}
+
+    def test_the_reserved_enum_values_are_modeled_completely(self):
+        from app.models.notification import (
+            NotificationDeliveryStatus,
+            NotificationRecipientStatus,
+            NotificationSeverity,
+        )
+
+        assert {s.value for s in NotificationSeverity} == {
+            "INFO",
+            "WARNING",
+            "ACTION_REQUIRED",
+        }
+        assert {s.value for s in NotificationRecipientStatus} == {
+            "UNREAD",
+            "READ",
+            "DISMISSED",
+        }
+        assert {s.value for s in NotificationDeliveryStatus} == {
+            "PENDING",
+            "SENDING",
+            "SENT",
+            "FAILED",
+        }

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterator, Optional
 import boto3
 from botocore.client import Config as BotoConfig
 from app.core.config import settings
@@ -16,6 +16,23 @@ class S3ObjectInfo:
     content_type: Optional[str]
     etag: Optional[str]
     version_id: Optional[str]
+
+
+@dataclass(frozen=True)
+class S3HeadInfo:
+    """What `head_object` reports about a live object.
+
+    Céluma 1.3 Phase 4, Block D. Deliberately a small, explicit shape rather
+    than the raw boto3 response dict: reconciliation logs and persists what
+    it finds, and a raw AWS response carries request ids, headers and (on
+    error paths) messages that quote bucket names — none of which may reach
+    a log line or a database column.
+    """
+
+    key: str
+    size_bytes: Optional[int]
+    etag: Optional[str]
+    content_type: Optional[str]
 
 
 class S3Service:
@@ -136,5 +153,66 @@ class S3Service:
     def delete_object(self, key: str) -> None:
         """Delete an object from the configured bucket. No-op if it does not exist."""
         self._client.delete_object(Bucket=self.bucket, Key=key)
+
+    # -- Céluma 1.3 Phase 4, Block D: read-only integrity verification ------
+    #
+    # Both helpers below exist for reconciliation and are strictly read-only.
+    # They reuse this class's already-configured client (the region-endpoint
+    # handling above matters as much for HEAD/LIST as it does for presigned
+    # URLs) rather than introducing a second S3 abstraction.
+
+    def head_object(self, key: str) -> Optional[S3HeadInfo]:
+        """Live metadata for one object, or `None` if it does not exist.
+
+        "Does not exist" is returned rather than raised because it is an
+        expected, meaningful answer for reconciliation — a DB row pointing
+        at a missing object is a finding to report, not an error to abort
+        the run on. Every other failure (denied, throttled, unreachable)
+        still raises, because those say nothing about the object and must
+        not be silently recorded as "missing".
+        """
+        try:
+            response = self._client.head_object(Bucket=self.bucket, Key=key)
+        except self._client.exceptions.NoSuchKey:
+            return None
+        except self._client.exceptions.ClientError as exc:
+            # S3 answers HEAD on an absent key with a bare 404 rather than
+            # the NoSuchKey error shape it uses for GET, so the status code
+            # is the only reliable signal here.
+            status = (
+                exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+                if isinstance(getattr(exc, "response", None), dict)
+                else None
+            )
+            if status == 404:
+                return None
+            raise
+
+        etag = response.get("ETag")
+        return S3HeadInfo(
+            key=key,
+            size_bytes=(
+                int(response["ContentLength"])
+                if response.get("ContentLength") is not None
+                else None
+            ),
+            etag=etag.strip('"') if isinstance(etag, str) else None,
+            content_type=response.get("ContentType"),
+        )
+
+    def iter_object_keys(self, prefix: str) -> Iterator[str]:
+        """Every object key under `prefix`, paginated.
+
+        A generator, not a list: a tenant's whole sample-image prefix can be
+        large, and reconciliation only ever needs to test each key for
+        membership in a set — materializing the listing would cost memory
+        for nothing.
+        """
+        paginator = self._client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for item in page.get("Contents", []) or []:
+                key = item.get("Key")
+                if key:
+                    yield key
 
 

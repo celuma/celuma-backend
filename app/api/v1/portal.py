@@ -91,7 +91,21 @@ def get_physician_report(
     order = session.get(Order, order_id)
     if not order:
         raise HTTPException(404, "Order not found")
-    
+
+    # Céluma 1.3 Phase 5, Block D (D-001): anchor the path-addressed order to
+    # the caller's own tenant before any other check. `requested_by` is a free
+    # text email column with no cross-tenant uniqueness, so the ownership test
+    # below is not a tenant boundary on its own: a physician whose address is
+    # recorded as the requesting physician in two tenants would otherwise read
+    # the other tenant's published report and its presigned PDF URL.
+    #
+    # 404 rather than 403, matching `list_physician_orders`' tenant filter and
+    # the convention every other path-addressed route in this codebase uses
+    # (and that C-001 restored in `laboratory.py`): a foreign resource hides
+    # its existence rather than confirming it.
+    if str(order.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Order not found")
+
     # Verify this physician requested this order
     if order.requested_by != user.email:
         raise HTTPException(403, "You are not authorized to view this report")
