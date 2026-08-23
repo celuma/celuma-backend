@@ -14,7 +14,7 @@
 -r requirements.txt
 
 pytest==8.4.1
-pytest-cov==6.2.1
+pytest-cov==7.1.0
 ruff==0.12.12
 
 # httpx is required by fastapi.testclient.TestClient, which only the HTTP
