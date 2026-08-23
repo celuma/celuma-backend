@@ -30,14 +30,79 @@ class EmailService:
     not Block E's scope.
     """
 
-    def __init__(self):
-        self.client = boto3.client(
-            'ses',
-            region_name=settings.effective_email_ses_region,
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-        )
+    def __init__(self, client=None):
+        # Céluma 1.3 Phase 5, Block G-B CI remediation.
+        #
+        # The client used to be built here. Constructing a boto3 client
+        # resolves a region, credentials and an endpoint, so an eager one made
+        # *instantiating* this service an operation that can fail — and
+        # `create_invitation` instantiates it on every invitation, whether or
+        # not an email will actually be sent.
+        #
+        # In GitHub Actions, where no AWS variable exists, that raised
+        # `botocore.exceptions.NoRegionError` out of `__init__` and turned a
+        # seat-accounting test into a 500. Locally it passed only because a
+        # gitignored `.env` supplies `AWS_REGION`, which
+        # `effective_email_ses_region` falls back to. The test was never about
+        # email.
+        #
+        # `SesEmailProvider` already solved this — it builds nothing until a
+        # send happens, locked by
+        # `test_no_client_is_built_until_a_send_happens`. This is the same
+        # pattern applied to the class `block-e-dependencies.md` recorded as
+        # untestable precisely because it built its client in `__init__`.
+        #
+        # `client` is injectable for the same reason it is on
+        # `SesEmailProvider`: so the mapping logic can be exercised without
+        # credentials, a network or a region that offers SES.
+        self._client = client
         self.sender_email = settings.email_sender
+
+    @property
+    def client(self):
+        """The SES client, built on first use.
+
+        A property rather than an attribute so existing call sites
+        (`self.client.send_email(...)`) are unchanged, while construction
+        moves to the point where a send is genuinely about to happen.
+        """
+        if self._client is None:
+            self._client = boto3.client(
+                'ses',
+                region_name=settings.effective_email_ses_region,
+                aws_access_key_id=settings.aws_access_key_id,
+                aws_secret_access_key=settings.aws_secret_access_key,
+            )
+        return self._client
+
+    def _sending_is_enabled(self) -> bool:
+        """Whether this environment may send account email at all.
+
+        Céluma 1.3 Phase 5, Block G-B CI remediation.
+
+        `EMAIL_ENABLED` is documented as the single guard between Céluma and a
+        real inbox, and since SES production access was granted the sandbox no
+        longer backs that claim up. This class did not honour it: it predates
+        the flag, so invitation and password-reset mail was gated only by
+        whether `EMAIL_SENDER` happened to be set.
+
+        Production is unaffected today — the task definition sets no `EMAIL_*`
+        variable, so `email_sender` is `None` and `_sender_or_none()` already
+        refuses. The gap is what happens next: configuring `EMAIL_SENDER`
+        while deliberately leaving `EMAIL_ENABLED=false` would have started
+        sending real mail to real people with no other change. Checking the
+        flag here makes the documented invariant true rather than incidental.
+        """
+        if not settings.email_enabled:
+            logger.info(
+                "Email delivery is disabled; no account email was sent",
+                extra={
+                    "event": "email.delivery_disabled",
+                    "error_code": "email_delivery_disabled",
+                },
+            )
+            return False
+        return True
 
     def _sender_or_none(self) -> str | None:
         """The configured sender, or None with one log line explaining why no
@@ -96,6 +161,9 @@ class EmailService:
         Saludos,
         Equipo Céluma
         """
+
+        if not self._sending_is_enabled():
+            return False
 
         sender = self._sender_or_none()
         if sender is None:
@@ -179,6 +247,9 @@ class EmailService:
         Saludos,
         Equipo Céluma
         """
+
+        if not self._sending_is_enabled():
+            return False
 
         sender = self._sender_or_none()
         if sender is None:
