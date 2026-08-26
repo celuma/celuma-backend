@@ -90,7 +90,29 @@ jobs:
   deploy-stg:
     needs: docker-build-main
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Céluma 1.3 Phase 5, Block G-D — F-004.
+    #
+    # There is no staging environment: no `celuma-stg` ECS cluster, no staging
+    # RDS instance, no staging S3 bucket and no staging CloudFront
+    # distribution. This job therefore failed on every push to main — the
+    # backend with `AccessDeniedException` on `ecs:UpdateService` (IAM denies
+    # before the missing resource is even resolved), the frontend with
+    # "Could not find stg CloudFront distribution".
+    #
+    # A permanently red job is worse than an absent one: it trains everyone to
+    # ignore the signal, which is how a real regression eventually gets missed.
+    #
+    # The job is GATED rather than deleted, so the deployment recipe survives
+    # for the day staging actually exists. To re-enable, provision the
+    # environment and set the repository variable CELUMA_STG_ENABLED=true.
+    #
+    # Pre-production validation for 1.3 is covered by the isolated
+    # release-validation stack (D-004), which runs the real browser E2E suite
+    # against real Chromium PDF generation at $0/month.
+    # See docs/celuma-1.3/phase-5-block-g/block-g-staging-decision.md
+    if: >-
+      vars.CELUMA_STG_ENABLED == 'true' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: stg
 
     permissions:
