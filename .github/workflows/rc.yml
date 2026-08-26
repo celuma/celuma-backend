@@ -1,0 +1,159 @@
+# Céluma 1.3 Phase 5, Block G-C — Release Candidate build.
+#
+# Why this workflow exists (G-002): no existing path produced a release
+# artifact in the PRODUCTION ECR repository without also deploying.
+# `docker-build-main` pushes to the *staging* repository; `docker-release`
+# pushes to production but only fires on a `v*` tag, and that same tag then
+# runs `deploy-prod` — so the only way to get a production artifact was to
+# deploy production at the same time (G-001).
+#
+# This workflow separates the two. It builds and pushes ONE immutable release
+# candidate from an EXACT commit and does nothing else.
+#
+# What it deliberately does NOT do:
+#   * it does not push `latest` — production currently consumes that tag, so
+#     moving it would change what a running service pulls (F-015);
+#   * it does not deploy anything: the job assumes GitHubActionsECRPushRole,
+#     whose policy grants ECR push/pull on the four Céluma repositories and
+#     nothing else — no ecs:UpdateService, no S3, no CloudFront;
+#   * it does not create a git tag;
+#   * it does not touch the database or any EMAIL_* setting.
+#
+# The tag it writes (`rc-<short-sha>`) is a convenience label. The AUTHORITATIVE
+# artifact identity is the image DIGEST printed in the summary, which is what
+# the CDK configuration pins.
+name: rc
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Exact commit on main to build (full 40-char SHA preferred)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-rc:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # OIDC only; no packages: write, nothing is sent to GHCR
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+
+      # A release candidate may only come from canonical main. Without this,
+      # `workflow_dispatch` would happily build any commit that exists in the
+      # repository, including one that was never reviewed or merged.
+      - name: Verify the commit is on main
+        run: |
+          set -euo pipefail
+          FULL_SHA="$(git rev-parse HEAD)"
+          git fetch origin main --quiet
+          if ! git merge-base --is-ancestor "$FULL_SHA" origin/main; then
+            echo "::error::$FULL_SHA is not an ancestor of origin/main — refusing to build a release candidate from it"
+            exit 1
+          fi
+          echo "CELUMA_SHA=$FULL_SHA"                        >> "$GITHUB_ENV"
+          echo "CELUMA_SHORT=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::385511156241:role/GitHubActionsECRPushRole
+          aws-region: mx-central-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # `no-cache: true` mirrors `docker-release`: a release artifact is built
+      # from source, not from whatever layers a runner happened to keep.
+      #
+      # Both platforms are built because the existing release images are
+      # multi-arch OCI indexes. Production Fargate is X86_64; arm64 is kept so
+      # the index stays equivalent to previous releases and developers on Apple
+      # silicon can pull the same reference.
+      #
+      # CELUMA_VERSION is the FULL COMMIT SHA, not the git ref (D-5). It is
+      # baked into the image and surfaced at /api/v1/health, so an operator can
+      # prove which exact source commit a running task came from — and it stays
+      # true if the artifact is later promoted under a release tag, which is
+      # what stops promotion from requiring a rebuild (G-003).
+      - name: Build and push the release candidate
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: |
+            CELUMA_VERSION=${{ env.CELUMA_SHA }}
+          push: true
+          no-cache: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:rc-${{ env.CELUMA_SHORT }}
+          labels: |
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.revision=${{ env.CELUMA_SHA }}
+            org.opencontainers.image.title=Celuma-Release-Candidate
+            org.opencontainers.image.version=rc-${{ env.CELUMA_SHORT }}
+
+      # Read the digest back from ECR rather than trusting the builder's
+      # output: the provenance chain is only worth anything if the value was
+      # observed at the registry.
+      - name: Resolve and verify the digest from ECR
+        id: digest
+        run: |
+          set -euo pipefail
+          DIGEST="$(aws ecr describe-images \
+            --repository-name celuma/celuma-backend \
+            --region mx-central-1 \
+            --image-ids imageTag=rc-${CELUMA_SHORT} \
+            --query 'imageDetails[0].imageDigest' --output text)"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+          TAGS="$(aws ecr describe-images \
+            --repository-name celuma/celuma-backend \
+            --region mx-central-1 \
+            --image-ids imageTag=rc-${CELUMA_SHORT} \
+            --query 'imageDetails[0].imageTags' --output text)"
+
+          # `latest` must never end up on a release candidate: production pulls
+          # it, so the RC would silently become what production runs.
+          if echo "$TAGS" | tr '\t' '\n' | grep -qx 'latest'; then
+            echo "::error::the release candidate carries the mutable tag 'latest'"
+            exit 1
+          fi
+          echo "TAGS=$TAGS" >> "$GITHUB_ENV"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Céluma release candidate"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| source commit | \`${CELUMA_SHA}\` |"
+            echo "| CELUMA_VERSION | \`${CELUMA_SHA}\` |"
+            echo "| ECR repository | \`celuma/celuma-backend\` |"
+            echo "| tag | \`rc-${CELUMA_SHORT}\` |"
+            echo "| tags present | \`${TAGS}\` |"
+            echo "| **digest (authoritative)** | \`${{ steps.digest.outputs.digest }}\` |"
+            echo
+            echo "Pin this in \`cdk.json\` as \`backend_image_tag\`:"
+            echo
+            echo '```'
+            echo "${{ steps.digest.outputs.digest }}"
+            echo '```'
+            echo
+            echo "This artifact has NOT been deployed. Deployment is Block H."
+          } >> "$GITHUB_STEP_SUMMARY"
