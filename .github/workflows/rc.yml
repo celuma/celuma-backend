@@ -43,6 +43,24 @@ jobs:
       id-token: write   # OIDC only; no packages: write, nothing is sent to GHCR
 
     steps:
+      # Céluma 1.3 Phase 5, Block G-E: resolve the input to a commit object
+      # BEFORE checkout, so an ambiguous ref can never become the artifact's
+      # identity. `actions/checkout` treats anything shorter than 40 hex
+      # characters as a branch/tag name, so a full SHA is also what the caller
+      # must supply.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and verify the input is a commit
+        run: |
+          set -euo pipefail
+          if ! FULL_SHA="$(git rev-parse --verify --quiet "${{ inputs.sha }}^{commit}")"; then
+            echo "::error::'${{ inputs.sha }}' does not resolve to a commit in this repository"
+            exit 1
+          fi
+          echo "CELUMA_RESOLVED_SHA=$FULL_SHA" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.sha }}
@@ -114,26 +132,44 @@ jobs:
         id: digest
         run: |
           set -euo pipefail
-          DIGEST="$(aws ecr describe-images \
+          # Céluma 1.3 Phase 5, Block G-E — G-014.
+          #
+          # This step used `aws ecr describe-images`, which the least-privilege
+          # role does NOT grant: every run failed here with
+          # AccessDeniedException on ecr:DescribeImages *after* pushing a
+          # perfectly good image. A red run on a valid artifact is worse than
+          # no check — it trains people to ignore the signal.
+          #
+          # `ecr:BatchGetImage` IS granted by CelumaECRPushMinimal and returns
+          # the authoritative digest, so the fix needs no IAM change. The
+          # standing rule — never widen IAM to make a workflow pass — holds.
+          DIGEST="$(aws ecr batch-get-image \
             --repository-name celuma/celuma-backend \
             --region mx-central-1 \
             --image-ids imageTag=rc-${CELUMA_SHORT} \
-            --query 'imageDetails[0].imageDigest' --output text)"
+            --query 'images[0].imageId.imageDigest' --output text)"
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "None" ]; then
+            echo "::error::could not resolve the release-candidate digest from ECR"
+            exit 1
+          fi
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
-          TAGS="$(aws ecr describe-images \
+          # `latest` must never land on a release candidate: production pulls
+          # it. Resolve `latest` independently and compare digests — if they
+          # match, the RC has become what production would pull.
+          LATEST_DIGEST="$(aws ecr batch-get-image \
             --repository-name celuma/celuma-backend \
             --region mx-central-1 \
-            --image-ids imageTag=rc-${CELUMA_SHORT} \
-            --query 'imageDetails[0].imageTags' --output text)"
+            --image-ids imageTag=latest \
+            --query 'images[0].imageId.imageDigest' --output text 2>/dev/null || echo none)"
+          TAGS="rc-${CELUMA_SHORT}"
 
-          # `latest` must never end up on a release candidate: production pulls
-          # it, so the RC would silently become what production runs.
-          if echo "$TAGS" | tr '\t' '\n' | grep -qx 'latest'; then
-            echo "::error::the release candidate carries the mutable tag 'latest'"
+          if [ "$LATEST_DIGEST" = "$DIGEST" ]; then
+            echo "::error::the release candidate is also what 'latest' resolves to"
             exit 1
           fi
           echo "TAGS=$TAGS" >> "$GITHUB_ENV"
+          echo "LATEST_DIGEST=$LATEST_DIGEST" >> "$GITHUB_ENV"
 
       - name: Summary
         run: |
