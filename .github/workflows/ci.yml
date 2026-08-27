@@ -1,11 +1,31 @@
 name: ci
 
+# Céluma 1.3 Phase 5, Block G-E — G-001.
+#
+# The `tags: v*` trigger was REMOVED. Creating a release tag used to rebuild the
+# image with --no-cache, push it over `v1.3.0`/`1.3.0`/**latest** — the tag the
+# running service pulls — and then force a production ECS deployment, with no
+# human gate (both repositories' `prod` GitHub Environment has no protection
+# rules). Tagging a commit and shipping it to patients were the same act.
+#
+# A release tag must be a record of what was already released, not the thing
+# that releases it. With no tag trigger, creating `v1.3.0` starts nothing.
+#
+# The 1.3 release mechanics that replace it:
+#   * the ARTIFACT is built by rc.yml (workflow_dispatch, exact SHA, ECR-push
+#     credentials only) and is identified by its immutable digest;
+#   * the DEPLOYMENT is a reviewed `cdk deploy CelumaProdBackend`, which is the
+#     only mechanism that can deliver the 1.3 task definition at all — it needs
+#     the digest pin plus PDF_GENERATOR_BASE_URL, CORS_ALLOWED_ORIGINS,
+#     FORWARDED_ALLOW_IPS, RUN_MIGRATIONS_ON_START and the EMAIL_* settings,
+#     none of which `aws ecs update-service --force-new-deployment` can add;
+#   * the MIGRATION is a separate controlled one-off task.
+#
+# See docs/celuma-1.3/phase-5-block-g/block-g-deployment-review.md
 on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
 
 permissions:
   contents: read
@@ -141,129 +161,3 @@ jobs:
             --cluster celuma-stg \
             --services celuma-stg-backend
           echo "### ✅ Backend deployed to stg (${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
-
-  docker-release:
-    runs-on: ubuntu-latest
-    if: >
-      github.event_name == 'push' &&
-      startsWith(github.ref, 'refs/tags/v')
-
-    permissions:
-      contents: read
-      packages: write   # GHCR
-      id-token: write   # OIDC para AWS
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Set up QEMU (multi-arch emulation)
-        uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-
-      # GHCR (igual que ya tenías)
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # --- NUEVO: AWS OIDC + login ECR ---
-      - name: Configure AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::385511156241:role/GitHubActionsECRPushRole
-          aws-region: mx-central-1
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-      # -----------------------------------
-
-      - name: Extract release version
-        id: release_version
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "RELEASE_TAG=$VERSION" >> $GITHUB_ENV
-
-      - name: Build and push Docker image (tag → GHCR + ECR PROD)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          build-args: |
-            CELUMA_VERSION=${{ github.ref_name }}
-          push: true
-          no-cache: true
-          platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}:${{ steps.release_version.outputs.version }}
-            ghcr.io/${{ github.repository }}:latest
-            ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:${{ github.ref_name }}
-            ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:${{ steps.release_version.outputs.version }}
-            ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:latest
-          labels: |
-            org.opencontainers.image.source=${{ github.repositoryUrl }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.ref=${{ github.ref }}
-            org.opencontainers.image.title=Release-${{ github.ref_name }}
-            org.opencontainers.image.version=${{ steps.release_version.outputs.version }}
-
-      - name: Output release image reference
-        run: |
-          echo "### 🎉 Release Image Published" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Release:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**GHCR tags:**" >> $GITHUB_STEP_SUMMARY
-          echo "- ghcr.io/${{ github.repository }}:${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- ghcr.io/${{ github.repository }}:${{ steps.release_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- ghcr.io/${{ github.repository }}:latest" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**ECR (prod) tags:**" >> $GITHUB_STEP_SUMMARY
-          echo "- ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:${{ steps.release_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- ${{ steps.login-ecr.outputs.registry }}/celuma/celuma-backend:latest" >> $GITHUB_STEP_SUMMARY
-
-  deploy-prod:
-    needs: docker-release
-    runs-on: ubuntu-latest
-    if: >
-      github.event_name == 'push' &&
-      startsWith(github.ref, 'refs/tags/v')
-    environment:
-      name: prod
-      url: https://app.celuma.mx/api
-
-    permissions:
-      id-token: write   # OIDC for AWS
-      contents: read
-
-    steps:
-      - name: Configure AWS (OIDC, deploy role)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::385511156241:role/GitHubActionsECSDeployRole
-          aws-region: mx-central-1
-
-      - name: Force new ECS deployment (prod)
-        run: |
-          aws ecs update-service \
-            --cluster celuma-prod \
-            --service celuma-prod-backend \
-            --force-new-deployment \
-            --no-cli-pager > /dev/null
-          echo "Triggered rolling deploy for celuma-prod-backend"
-
-      - name: Wait for service stability
-        run: |
-          aws ecs wait services-stable \
-            --cluster celuma-prod \
-            --services celuma-prod-backend
-          echo "### ✅ Backend deployed to prod (${{ github.ref_name }})" >> $GITHUB_STEP_SUMMARY
