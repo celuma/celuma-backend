@@ -593,8 +593,15 @@ def list_letterhead_versions(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """List all published versions of a letterhead, newest first (requires reports:manage_templates)."""
-    _require(user.id, "reports:manage_templates", session)
+    """List all published versions of a letterhead, newest first (requires
+    reports:read).
+
+    H-0c: the report editor's letterhead selector walks
+    list-letterheads -> list-versions -> read-version to offer the ACTIVE
+    letterhead of each. Listing letterheads already required only
+    `reports:read`; this step required `reports:manage_templates`, so a
+    report author lost the selector. Mutating versions stays admin-only."""
+    _require(user.id, "reports:read", session)
     _get_owned_letterhead(letterhead_id, ctx, session)
     versions = session.exec(
         select(ReportLetterheadVersion)
@@ -625,8 +632,12 @@ def get_active_letterhead_version(
     "active" also matches the `{version_id}` pattern — if this endpoint
     were registered later it would be unreachable (the parametric route
     would intercept first, trying to use the string "active" as a UUID).
+
+    H-0c: requires `reports:read`, not `reports:manage_templates` — the
+    effective letterhead is configuration a report author must be able to
+    read. Saving a version still requires `reports:manage_templates`.
     """
-    _require(user.id, "reports:manage_templates", session)
+    _require(user.id, "reports:read", session)
     letterhead = _get_owned_letterhead(letterhead_id, ctx, session)
     try:
         active = sole_active_version(session, letterhead)
@@ -734,8 +745,14 @@ def get_letterhead_version(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Get a specific letterhead version, including its full immutable configuration."""
-    _require(user.id, "reports:manage_templates", session)
+    """Get a specific letterhead version, including its full immutable
+    configuration (requires reports:read).
+
+    H-0c: this is what the editor calls when the author picks a letterhead
+    from the selector, and it is a pure read of effective configuration.
+    Tenant anchoring is unchanged — `_get_owned_letterhead` /
+    `_get_owned_letterhead_version` still 404 across tenants."""
+    _require(user.id, "reports:read", session)
     _get_owned_letterhead(letterhead_id, ctx, session)
     version = _get_owned_letterhead_version(letterhead_id, version_id, ctx, session)
     return _version_detail_response(version, session)

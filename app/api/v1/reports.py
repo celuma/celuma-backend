@@ -1482,8 +1482,11 @@ def list_template_versions(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """List all published versions of a template, newest first (requires reports:manage_templates)."""
-    _require(user.id, "reports:manage_templates", session)
+    """List all published versions of a template, newest first (requires reports:read).
+
+    H-0c: reading versions is part of AUTHORING a report, not administering
+    templates. See `get_template_version` for the full rationale."""
+    _require(user.id, "reports:read", session)
     _get_owned_template(template_id, ctx, session)
     versions = session.exec(
         select(ReportTemplateVersion)
@@ -1506,8 +1509,23 @@ def get_template_version(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Get a specific template version, including its full immutable configuration."""
-    _require(user.id, "reports:manage_templates", session)
+    """Get a specific template version, including its full immutable
+    configuration (requires reports:read).
+
+    H-0c pre-cutover blocker. This read is step 3 of the report editor's V2
+    bootstrap chain: `report-defaults` returns `active_template_version_id`
+    and the editor immediately fetches that version's configuration to build
+    the empty report. Gating it behind `reports:manage_templates` meant only
+    administrators could open a new report — pathologists, the core
+    report-authoring role, got a 403 that the editor surfaced as "Falta el
+    membrete predeterminado del laboratorio".
+
+    READ and WRITE are now separated: authoring a report requires reading the
+    effective configuration (`reports:read`), while creating, activating and
+    archiving versions remain `reports:manage_templates`. Tenant anchoring is
+    unchanged — `_get_owned_template` / `_get_owned_template_version` still
+    404 across tenants, so this widens the ROLE, never the TENANT."""
+    _require(user.id, "reports:read", session)
     _get_owned_template(template_id, ctx, session)
     version = _get_owned_template_version(template_id, version_id, ctx, session)
     return ReportTemplateVersionDetailResponse(
