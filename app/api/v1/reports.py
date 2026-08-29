@@ -2950,16 +2950,42 @@ def sign_report(
     # signature URL in the persisted JSON — see report_publishing.py.
     try:
         embed_signature_metadata_if_required(session, report_id, current_version, user)
+        # H-0c Blocker B (§4). This endpoint used to publish whatever PDF
+        # happened to be READY — necessarily a PDF generated BEFORE signing,
+        # since it refuses to run without one. The result was an immutable,
+        # authoritative artifact for a report marked digitally signed whose
+        # PDF contained no signature; PUBLISHED status then blocks any
+        # regeneration, so the inconsistency was permanent. The UI no longer
+        # calls this route, but it is a live, non-deprecated, authenticated
+        # API any reviewer can invoke, so "the frontend doesn't call it" is
+        # not a safety argument.
+        #
+        # It now regenerates from the just-signed state with exactly the
+        # semantics `sign-and-publish` uses: `force=True` to bypass the stale
+        # READY, inside the same publish claim, with the same compensation.
+        pdf_service = ReportPdfGenerationService(session)
+        current_version = pdf_service.generate(
+            report, current_version, user.id, force=True
+        )
+    except (ReportPdfAlreadyInProgressError, ReportPdfImmutableError) as exc:
+        clear_publish_claim(session, current_version)
+        raise HTTPException(409, exc.message) from None
+    except ReportPdfGenerationError as exc:
+        clear_publish_claim(session, current_version)
+        raise HTTPException(422, exc.message) from None
     except ReportPublishError as exc:
         clear_publish_claim(session, current_version)
         raise HTTPException(422, exc.message) from None
 
+    # The same instant the renderer was shown (see get_internal_render_data):
+    # the PDF and the stored signature must not disagree.
+    signed_at = current_version.publish_started_at or datetime.utcnow()
     current_version.publish_started_at = None
     current_version.publish_started_by = None
 
     # Update version with signature
     current_version.signed_by = user.id
-    current_version.signed_at = datetime.utcnow()
+    current_version.signed_at = signed_at
     if data.changelog:
         current_version.changelog = data.changelog
     session.add(current_version)

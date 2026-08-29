@@ -337,7 +337,7 @@ class TestReportPublishedAndRetracted:
         return order, report, version
 
     def test_publishing_notifies_assignees_and_the_author_but_not_the_signer(
-        self, client, session, lab
+        self, client, session, lab, stub_pdf_render
     ):
         order, report, version = self._approved_report(session, lab)
 
@@ -361,7 +361,7 @@ class TestReportPublishedAndRetracted:
         assert_no_sentinels_leaked(session)
 
     def test_retracting_notifies_the_same_set_and_never_carries_the_reason(
-        self, client, session, lab
+        self, client, session, lab, stub_pdf_render
     ):
         order, report, version = self._approved_report(session, lab, order_code="ORD-RET-1")
         client.post(
@@ -392,7 +392,7 @@ class TestReportPublishedAndRetracted:
         assert_no_sentinels_leaked(session)
 
     def test_the_retraction_reason_still_reaches_the_timeline(
-        self, client, session, lab
+        self, client, session, lab, stub_pdf_render
     ):
         """The reason is withheld from the notification, not from the system.
 
