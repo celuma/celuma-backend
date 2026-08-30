@@ -34,6 +34,8 @@ from app.services.report_pdf_generation import (
     ReportPdfImmutableError,
     load_locked_version,
 )
+from app.models.study_type import StudyType
+from app.services.report_filename import build_report_pdf_filename
 from app.services.letterhead_resolution import (
     LetterheadArchivedError,
     LetterheadConfigurationError,
@@ -167,22 +169,35 @@ def authorize_report_read_access(
     return report
 
 
-_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+def official_pdf_filename(order_code: str, study_type: str | None = None) -> str:
+    """Céluma 1.3 Phase 2, Block E, Story E10: the download filename for an
+    official report PDF. Deliberately never derived from a patient name.
+
+    H-0c: now the canonical contract shared with the local copy —
+    `<ORDER_CODE>-<StudyTypePascalCase>.pdf`. The version was removed on
+    purpose: the official filename names the canonical artifact, and
+    provenance comes from the report id, version, object key, sha256 and
+    audit history, never from a human-visible name. See
+    app/services/report_filename.py."""
+    return build_report_pdf_filename(order_code, study_type, local_copy=False)
 
 
-def official_pdf_filename(order_code: str, version_no: int) -> str:
-    """Céluma 1.3 Phase 2, Block E, Story E10: the download filename for
-    an official report PDF. Deliberately never derived from a patient name —
-    only the order's human-readable code, which is already shown in the lab
-    UI and is not more sensitive than the case itself."""
-    safe_code = _UNSAFE_FILENAME_CHARS.sub("-", order_code or "reporte").strip("-") or "reporte"
-    return f"reporte-{safe_code}-v{version_no}.pdf"
+def _order_study_type_name(order, session: Session) -> str | None:
+    """The study type's display name for the filename. Returns None when the
+    order has none, which the filename builder handles deterministically."""
+    if order is None or getattr(order, "study_type_id", None) is None:
+        return None
+    study_type = session.get(StudyType, order.study_type_id)
+    return study_type.name if study_type else None
 
 
 def official_pdf_presigned_url(
-    s3: S3Service, object_key: str, order_code: str, version_no: int
+    s3: S3Service, object_key: str, order_code: str, study_type: str | None = None
 ) -> str:
-    filename = official_pdf_filename(order_code, version_no)
+    """The presigned URL carries the friendly name via Content-Disposition.
+    The stored object key is untouched — historical artifacts are never
+    renamed to match a naming change (H-0c §11)."""
+    filename = official_pdf_filename(order_code, study_type)
     return s3.generate_presigned_url(
         object_key,
         response_content_disposition=f'attachment; filename="{filename}"',
@@ -2013,7 +2028,10 @@ def get_pdf_of_latest_version(
         raise HTTPException(404, "Storage object not found")
 
     s3 = S3Service()
-    url = official_pdf_presigned_url(s3, storage.object_key, order.order_code if order else "", latest_version.version_no)
+    url = official_pdf_presigned_url(
+        s3, storage.object_key, order.order_code if order else "",
+        _order_study_type_name(order, session),
+    )
     return {
         "version_id": str(latest_version.id),
         "version_no": latest_version.version_no,
@@ -2405,7 +2423,10 @@ def get_pdf_of_specific_version(
         raise HTTPException(404, "Storage object not found")
 
     s3 = S3Service()
-    url = official_pdf_presigned_url(s3, storage.object_key, order.order_code if order else "", version.version_no)
+    url = official_pdf_presigned_url(
+        s3, storage.object_key, order.order_code if order else "",
+        _order_study_type_name(order, session),
+    )
     return {
         "version_id": str(version.id),
         "version_no": version.version_no,

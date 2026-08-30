@@ -47,7 +47,16 @@ class TestOfficialDownload:
         resp = client.get(f"/api/v1/reports/{report.id}/versions/1/pdf", headers=auth_headers(user))
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert "reporte-ORD-XYZ-42-v1.pdf" in body["pdf_url"]
+        # H-0c: canonical contract `<ORDER_CODE>-<StudyTypePascalCase>.pdf`,
+        # shared with the local copy. This order has no study type, so the
+        # study component takes its deterministic fallback. The official name
+        # deliberately carries NO version — provenance is the report id,
+        # version, object key, sha256 and audit history.
+        assert "ORD-XYZ-42-Reporte.pdf" in body["pdf_url"]
+        assert "-v1" not in body["pdf_url"].split("filename=")[-1]
+        # The point of this test, unchanged: no patient identity in the name.
+        for token in ("patient", "paciente", "Doe", "John"):
+            assert token not in body["pdf_url"].split("filename=")[-1]
 
     def test_download_via_latest_version_route_also_works(self, client, session, stub_pdf_render):
         tenant = create_tenant(session)

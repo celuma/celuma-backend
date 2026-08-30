@@ -10,7 +10,7 @@ from app.models.storage import StorageObject
 from app.models.user import AppUser
 from app.models.enums import ReportStatus
 from app.services.s3 import S3Service
-from app.api.v1.reports import official_pdf_presigned_url
+from app.api.v1.reports import official_pdf_presigned_url, _order_study_type_name
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -145,7 +145,9 @@ def get_physician_report(
     # physician actually tried to download a PDF. Fixed here as part of
     # connecting the portal to the persisted-PDF download flow (E11).
     s3 = S3Service()
-    url = official_pdf_presigned_url(s3, storage.object_key, order.order_code, latest_version.version_no)
+    url = official_pdf_presigned_url(
+        s3, storage.object_key, order.order_code, _order_study_type_name(order, session)
+    )
 
     return {
         "report_id": str(report.id),
@@ -220,7 +222,8 @@ def get_patient_report(
     # `expires_in` fix as get_physician_report above.
     s3 = S3Service()
     url = official_pdf_presigned_url(
-        s3, storage.object_key, matched_order.order_code, latest_version.version_no
+        s3, storage.object_key, matched_order.order_code,
+        _order_study_type_name(matched_order, session),
     )
 
     patient = session.get(Patient, matched_order.patient_id)
