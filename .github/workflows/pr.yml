@@ -101,7 +101,7 @@ jobs:
       # Always build and push for testing
       - name: Build & Push Docker image for PR testing
         id: buildpush
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           build-args: |

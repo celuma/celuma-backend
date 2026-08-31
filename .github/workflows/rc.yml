@@ -142,7 +142,7 @@ jobs:
       # what stops promotion from requiring a rebuild (G-003).
       - name: Build and push the release candidate
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           build-args: |
