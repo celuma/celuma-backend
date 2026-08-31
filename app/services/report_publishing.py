@@ -230,8 +230,17 @@ def finalize_publish(
         )
 
     now = datetime.utcnow()
+    # H-0c Blocker B. The signing instant is the moment the signer CLAIMED the
+    # publication, not the moment PDF rendering happened to finish. Those are
+    # seconds apart, but the difference is load-bearing: the official PDF is
+    # rendered between those two points, so the renderer must be able to see
+    # the very same `signed_at` that ends up stored here. Taking `now` made
+    # that impossible — the value did not exist yet while the PDF was being
+    # drawn. See `get_internal_render_data`, which exposes the claim as the
+    # effective signature state for exactly this window.
+    signed_at = version.publish_started_at or now
     version.signed_by = actor_id
-    version.signed_at = now
+    version.signed_at = signed_at
     if changelog:
         version.changelog = changelog
     version.publish_started_at = None

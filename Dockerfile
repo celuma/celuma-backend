@@ -48,8 +48,16 @@ RUN playwright install --with-deps --only-shell chromium
 
 COPY . .
 
+# Provenance: set to the full commit SHA at build time (Block G, D-5).
 ARG CELUMA_VERSION=dev
 ENV CELUMA_VERSION=${CELUMA_VERSION}
+
+# H-0c: the human-readable release identity (e.g. "v1.3.0"), independent of
+# the SHA above. Empty by default so a local build's /health output is
+# unchanged. Both are baked into the image, so tagging the validated digest
+# `v1.3.0` still requires no rebuild.
+ARG CELUMA_RELEASE=
+ENV CELUMA_RELEASE=${CELUMA_RELEASE}
 
 # Make start script executable
 RUN chmod +x start.sh

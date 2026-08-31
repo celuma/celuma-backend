@@ -224,9 +224,27 @@ class ReportPdfGenerationService:
                 try:
                     page = browser.new_page()
                     page.goto(url, timeout=timeout_ms, wait_until="load")
+                    # H-0c Blocker B: the render route now signals ONE of two
+                    # terminal states. Waiting only on the ready flag would turn
+                    # a refused render into an opaque RENDER_TIMEOUT after the
+                    # full timeout, so both are awaited and distinguished.
                     page.wait_for_selector(
-                        'html[data-report-ready="true"]', timeout=timeout_ms, state="attached"
+                        'html[data-report-ready="true"], html[data-report-render-error]',
+                        timeout=timeout_ms,
+                        state="attached",
                     )
+                    render_error = page.get_attribute("html", "data-report-render-error")
+                    if render_error:
+                        # Never produce an official PDF that misrepresents a
+                        # signed report. Failing here leaves the report
+                        # APPROVED and retryable (see sign_and_publish's
+                        # compensation) instead of publishing a clinical
+                        # document with an empty signature box.
+                        raise ReportPdfGenerationError(
+                            "SIGNATURE_RENDER_FAILED",
+                            "The report requires a digital signature but its autograph "
+                            f"could not be rendered ({render_error})",
+                        )
                     pdf_bytes = page.pdf(prefer_css_page_size=True, print_background=True)
                 finally:
                     browser.close()

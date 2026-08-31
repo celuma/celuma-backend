@@ -144,7 +144,8 @@ class TestReportPublishedSurvives:
         assign_to_order(session, lab["tenant"], order, lab["assignee"])
         return order, report, version
 
-    def test_the_report_still_publishes(self, client, session, lab, failing_notifications):
+    def test_the_report_still_publishes(self, client, session, lab, failing_notifications, stub_pdf_render
+    ):
         order, report, version = self._approved(session, lab, "ORD-F-PUB")
 
         response = client.post(

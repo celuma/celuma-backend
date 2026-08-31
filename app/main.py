@@ -423,14 +423,35 @@ app.include_router(notifications_router, prefix="/api/v1")
 # without a blanket Depends(current_user) — for the same 401-not-403 reason.
 app.include_router(notification_preferences_router, prefix="/api/v1")
 
+# PROVENANCE, not the release identity. Block G (D-5) deliberately sets this
+# build arg to the FULL COMMIT SHA so the value stays true when the image is
+# promoted by digest — promoting must never require a rebuild (G-003). Leave
+# it alone; it is what ties a running container back to its source.
 CELUMA_VERSION: str = os.environ.get("CELUMA_VERSION", "dev")
+
+# H-0c (section 10). The RELEASE identity — the human-readable semantic
+# version, e.g. "v1.3.0". Separate from CELUMA_VERSION on purpose: the UI
+# showed "dev" because it displayed the provenance value, and that value is a
+# SHA (or the "dev" default) by design. Both are baked at RC build time, so
+# adding this changes nothing about promotion: the digest still carries both
+# and is tagged, never rebuilt.
+#
+# Empty (not "dev") when unset, so `_health_payload` can fall back to the
+# provenance value and a local/dev container keeps reporting exactly what it
+# reports today.
+CELUMA_RELEASE: str = os.environ.get("CELUMA_RELEASE", "")
 
 
 def _health_payload() -> dict:
     return {
         "status": "healthy",
         "api_version": "v1",
+        # Unchanged key and unchanged meaning — existing Block A/G evidence,
+        # smoke checks and dashboards that read `celuma_version` keep working.
         "celuma_version": CELUMA_VERSION,
+        # H-0c: the version a human should be shown. Falls back to the
+        # provenance value so this key is never absent or empty.
+        "celuma_release": CELUMA_RELEASE or CELUMA_VERSION,
     }
 
 

@@ -118,4 +118,35 @@ def get_internal_render_data(
         },
     )
     detail = _build_report_detail_response(report, version, session)
-    return InternalRenderDataResponse(**detail.model_dump(), signer_lookup=signer_lookup)
+
+    # H-0c Blocker B — the actual root cause of "the autograph is missing from
+    # the official PDF".
+    #
+    # `sign-and-publish` runs: claim -> embed signature -> GENERATE PDF ->
+    # finalize (which is what sets `signed_by`/`signed_at`). The official PDF
+    # is therefore rendered in the window BEFORE the version is marked signed,
+    # so this endpoint served `signed_at = None`. `SignatureBlock` derives
+    # `isSigned` from `signed_at` and refuses to draw the autograph without it
+    # — so the official PDF came out with no signature and no "Firmado
+    # digitalmente el ..." caption, every time, deterministically. Reopening
+    # the same report afterwards showed the autograph, because by then
+    # finalize had run: exactly the reported local-vs-official asymmetry.
+    #
+    # The publish claim IS the signature intent: it records who is signing and
+    # when, it is held across generation, and `finalize_publish` now stores
+    # `publish_started_at` as `signed_at`. Reporting it here therefore does not
+    # invent a signed state — it reports the one that is already committed to,
+    # with the same identity and the same timestamp that will be persisted.
+    #
+    # Deliberately scoped to THIS endpoint: the public report API must keep
+    # reporting a mid-publication report as unsigned until it truly is.
+    signed_by = detail.signed_by
+    signed_at = detail.signed_at
+    if signed_at is None and version.publish_started_at and version.publish_started_by:
+        signed_by = str(version.publish_started_by)
+        signed_at = version.publish_started_at
+
+    payload = detail.model_dump()
+    payload["signed_by"] = signed_by
+    payload["signed_at"] = signed_at
+    return InternalRenderDataResponse(**payload, signer_lookup=signer_lookup)

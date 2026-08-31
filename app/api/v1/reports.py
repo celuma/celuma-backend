@@ -34,6 +34,8 @@ from app.services.report_pdf_generation import (
     ReportPdfImmutableError,
     load_locked_version,
 )
+from app.models.study_type import StudyType
+from app.services.report_filename import build_report_pdf_filename
 from app.services.letterhead_resolution import (
     LetterheadArchivedError,
     LetterheadConfigurationError,
@@ -167,22 +169,35 @@ def authorize_report_read_access(
     return report
 
 
-_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+def official_pdf_filename(order_code: str, study_type: str | None = None) -> str:
+    """Céluma 1.3 Phase 2, Block E, Story E10: the download filename for an
+    official report PDF. Deliberately never derived from a patient name.
+
+    H-0c: now the canonical contract shared with the local copy —
+    `<ORDER_CODE>-<StudyTypePascalCase>.pdf`. The version was removed on
+    purpose: the official filename names the canonical artifact, and
+    provenance comes from the report id, version, object key, sha256 and
+    audit history, never from a human-visible name. See
+    app/services/report_filename.py."""
+    return build_report_pdf_filename(order_code, study_type, local_copy=False)
 
 
-def official_pdf_filename(order_code: str, version_no: int) -> str:
-    """Céluma 1.3 Phase 2, Block E, Story E10: the download filename for
-    an official report PDF. Deliberately never derived from a patient name —
-    only the order's human-readable code, which is already shown in the lab
-    UI and is not more sensitive than the case itself."""
-    safe_code = _UNSAFE_FILENAME_CHARS.sub("-", order_code or "reporte").strip("-") or "reporte"
-    return f"reporte-{safe_code}-v{version_no}.pdf"
+def _order_study_type_name(order, session: Session) -> str | None:
+    """The study type's display name for the filename. Returns None when the
+    order has none, which the filename builder handles deterministically."""
+    if order is None or getattr(order, "study_type_id", None) is None:
+        return None
+    study_type = session.get(StudyType, order.study_type_id)
+    return study_type.name if study_type else None
 
 
 def official_pdf_presigned_url(
-    s3: S3Service, object_key: str, order_code: str, version_no: int
+    s3: S3Service, object_key: str, order_code: str, study_type: str | None = None
 ) -> str:
-    filename = official_pdf_filename(order_code, version_no)
+    """The presigned URL carries the friendly name via Content-Disposition.
+    The stored object key is untouched — historical artifacts are never
+    renamed to match a naming change (H-0c §11)."""
+    filename = official_pdf_filename(order_code, study_type)
     return s3.generate_presigned_url(
         object_key,
         response_content_disposition=f'attachment; filename="{filename}"',
@@ -1482,8 +1497,11 @@ def list_template_versions(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """List all published versions of a template, newest first (requires reports:manage_templates)."""
-    _require(user.id, "reports:manage_templates", session)
+    """List all published versions of a template, newest first (requires reports:read).
+
+    H-0c: reading versions is part of AUTHORING a report, not administering
+    templates. See `get_template_version` for the full rationale."""
+    _require(user.id, "reports:read", session)
     _get_owned_template(template_id, ctx, session)
     versions = session.exec(
         select(ReportTemplateVersion)
@@ -1506,8 +1524,23 @@ def get_template_version(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Get a specific template version, including its full immutable configuration."""
-    _require(user.id, "reports:manage_templates", session)
+    """Get a specific template version, including its full immutable
+    configuration (requires reports:read).
+
+    H-0c pre-cutover blocker. This read is step 3 of the report editor's V2
+    bootstrap chain: `report-defaults` returns `active_template_version_id`
+    and the editor immediately fetches that version's configuration to build
+    the empty report. Gating it behind `reports:manage_templates` meant only
+    administrators could open a new report — pathologists, the core
+    report-authoring role, got a 403 that the editor surfaced as "Falta el
+    membrete predeterminado del laboratorio".
+
+    READ and WRITE are now separated: authoring a report requires reading the
+    effective configuration (`reports:read`), while creating, activating and
+    archiving versions remain `reports:manage_templates`. Tenant anchoring is
+    unchanged — `_get_owned_template` / `_get_owned_template_version` still
+    404 across tenants, so this widens the ROLE, never the TENANT."""
+    _require(user.id, "reports:read", session)
     _get_owned_template(template_id, ctx, session)
     version = _get_owned_template_version(template_id, version_id, ctx, session)
     return ReportTemplateVersionDetailResponse(
@@ -1995,7 +2028,10 @@ def get_pdf_of_latest_version(
         raise HTTPException(404, "Storage object not found")
 
     s3 = S3Service()
-    url = official_pdf_presigned_url(s3, storage.object_key, order.order_code if order else "", latest_version.version_no)
+    url = official_pdf_presigned_url(
+        s3, storage.object_key, order.order_code if order else "",
+        _order_study_type_name(order, session),
+    )
     return {
         "version_id": str(latest_version.id),
         "version_no": latest_version.version_no,
@@ -2387,7 +2423,10 @@ def get_pdf_of_specific_version(
         raise HTTPException(404, "Storage object not found")
 
     s3 = S3Service()
-    url = official_pdf_presigned_url(s3, storage.object_key, order.order_code if order else "", version.version_no)
+    url = official_pdf_presigned_url(
+        s3, storage.object_key, order.order_code if order else "",
+        _order_study_type_name(order, session),
+    )
     return {
         "version_id": str(version.id),
         "version_no": version.version_no,
@@ -2932,16 +2971,42 @@ def sign_report(
     # signature URL in the persisted JSON — see report_publishing.py.
     try:
         embed_signature_metadata_if_required(session, report_id, current_version, user)
+        # H-0c Blocker B (§4). This endpoint used to publish whatever PDF
+        # happened to be READY — necessarily a PDF generated BEFORE signing,
+        # since it refuses to run without one. The result was an immutable,
+        # authoritative artifact for a report marked digitally signed whose
+        # PDF contained no signature; PUBLISHED status then blocks any
+        # regeneration, so the inconsistency was permanent. The UI no longer
+        # calls this route, but it is a live, non-deprecated, authenticated
+        # API any reviewer can invoke, so "the frontend doesn't call it" is
+        # not a safety argument.
+        #
+        # It now regenerates from the just-signed state with exactly the
+        # semantics `sign-and-publish` uses: `force=True` to bypass the stale
+        # READY, inside the same publish claim, with the same compensation.
+        pdf_service = ReportPdfGenerationService(session)
+        current_version = pdf_service.generate(
+            report, current_version, user.id, force=True
+        )
+    except (ReportPdfAlreadyInProgressError, ReportPdfImmutableError) as exc:
+        clear_publish_claim(session, current_version)
+        raise HTTPException(409, exc.message) from None
+    except ReportPdfGenerationError as exc:
+        clear_publish_claim(session, current_version)
+        raise HTTPException(422, exc.message) from None
     except ReportPublishError as exc:
         clear_publish_claim(session, current_version)
         raise HTTPException(422, exc.message) from None
 
+    # The same instant the renderer was shown (see get_internal_render_data):
+    # the PDF and the stored signature must not disagree.
+    signed_at = current_version.publish_started_at or datetime.utcnow()
     current_version.publish_started_at = None
     current_version.publish_started_by = None
 
     # Update version with signature
     current_version.signed_by = user.id
-    current_version.signed_at = datetime.utcnow()
+    current_version.signed_at = signed_at
     if data.changelog:
         current_version.changelog = data.changelog
     session.add(current_version)
