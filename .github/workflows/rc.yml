@@ -118,7 +118,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Configure AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::385511156241:role/GitHubActionsECRPushRole
           aws-region: mx-central-1
