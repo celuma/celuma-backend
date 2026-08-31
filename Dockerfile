@@ -15,7 +15,7 @@
 # --target) produces the production image. `docker-compose.yml` asks for
 # `target: dev` so `docker compose exec api pytest` keeps working locally
 # without putting pytest in anything deployable.
-FROM python:3.12-slim-bookworm AS base
+FROM python:3.14-slim-bookworm AS base
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
