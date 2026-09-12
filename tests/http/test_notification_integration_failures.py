@@ -43,6 +43,7 @@ from tests.http.factories import (
     auth_headers,
     create_branch,
     create_order,
+    assign_reviewer,
     create_patient,
     create_report,
     create_sample,
@@ -142,6 +143,9 @@ class TestReportPublishedSurvives:
             authored_by=lab["author"], pdf_generation_status="READY",
         )
         assign_to_order(session, lab["tenant"], order, lab["assignee"])
+        # 1.3.1 Block A: signing now requires the signer to be the assigned
+        # reviewer of the order, not merely to hold the `reviewer` role.
+        assign_reviewer(session, order, lab["signer"], report=report)
         return order, report, version
 
     def test_the_report_still_publishes(self, client, session, lab, failing_notifications, stub_pdf_render

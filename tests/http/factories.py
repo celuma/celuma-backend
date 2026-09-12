@@ -87,6 +87,38 @@ def create_user(
     return user
 
 
+def assign_reviewer(
+    session: Session,
+    order,
+    reviewer: AppUser,
+    *,
+    report=None,
+    status=None,
+):
+    """Assign a reviewer to an order, the way `PUT /orders/{id}/reviewers` does.
+
+    Céluma 1.3.1 Block A made this a PRECONDITION for approving and for
+    signing: holding the `reviewer` role is no longer enough, the reviewer must
+    also be assigned to the report's order (`ReportReview`). Tests written
+    before 1.3.1 created a reviewer and signed directly, which the assignment
+    lock now — correctly — refuses.
+    """
+    from app.models.enums import ReviewStatus
+    from app.models.report_review import ReportReview
+
+    review = ReportReview(
+        tenant_id=order.tenant_id,
+        order_id=order.id,
+        report_id=(report.id if report is not None else None),
+        reviewer_user_id=reviewer.id,
+        status=status or ReviewStatus.PENDING,
+    )
+    session.add(review)
+    session.commit()
+    session.refresh(review)
+    return review
+
+
 def auth_headers(user: AppUser) -> dict[str, str]:
     token = create_jwt(sub=str(user.id))
     return {"Authorization": f"Bearer {token}"}

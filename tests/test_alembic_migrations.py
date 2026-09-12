@@ -110,11 +110,30 @@ PRE_SQUASH_SCHEMA_SNAPSHOT = (
 #: revision `main` and tag v1.2.0 carry.
 LAST_PRE_1_3_REVISION = "v1_2_0"
 
-#: The single consolidated Céluma 1.3 release revision — and, after the
-#: pre-Phase-5 migration squash, the head. It carries the complete 1.3
-#: database contract and is **frozen**: Phase 5 validates it and does not
-#: rewrite it.
+#: The single consolidated Céluma 1.3 release revision. It carries the
+#: complete 1.3 database contract and is **frozen**: Phase 5 validates it and
+#: does not rewrite it, and Céluma 1.3.1 does not amend it either — 1.3.1
+#: adds its own revision on top rather than editing this one.
 RELEASE_REVISION = "v1_3_0"
+
+#: The Céluma 1.3.1 hotfix revision, and the current head.
+#:
+#: `test_release_revision_has_no_children` below was written to catch exactly
+#: this — a revision appended to the frozen release — and to force a
+#: deliberate decision rather than a quiet `down_revision`. That decision was
+#: taken for 1.3.1: CEL-131-01 requires revoking `reports:approve` from
+#: `pathologist` in persisted role-permission data, `v1_3_0` may not be
+#: edited, and the grant exists in production, so a new revision is the only
+#: correct instrument. See CELUMA-1.3.1-HOTFIX-PLAN.md, Block A.
+#:
+#: The release contract is unchanged in substance — still one revision per
+#: shipped product release, and 1.3.1 is a shipped product release.
+HOTFIX_REVISION = "v1_3_1"
+
+#: What `alembic upgrade head` lands on. Assertions that mean "the chain is
+#: fully applied" use this; assertions specifically about the 1.3 release
+#: migration's own behaviour keep using RELEASE_REVISION.
+HEAD_REVISION = HOTFIX_REVISION
 
 #: Revision ids that existed only on the unreleased `celuma-1.3` branch and
 #: were folded into RELEASE_REVISION. Nothing executable may reference them.
@@ -269,46 +288,67 @@ class TestChainShape:
     def test_exactly_one_head(self):
         assert len(_script_directory().get_heads()) == 1
 
-    def test_head_is_the_release_revision(self):
-        """The permanent release contract: one revision per product release,
-        and Céluma 1.3's is `v1_3_0`.
+    def test_head_is_the_current_release_revision(self):
+        """The permanent release contract: one revision per product release.
 
         This assertion moved forward four times while Phase 4 was built
         (`v1_10_0` → `v1_11_0` → `v1_12_0` → `v1_13_0`) because each block
-        added a development-time revision on top of the release. The
-        pre-Phase-5 squash folded all four back in, and this assertion is now
-        expected to *stay* here: `v1_3_0` is frozen, so the next legitimate
-        move is Céluma 1.4's own release revision, expected `v1_4_0`.
+        added a development-time revision on top of the release, and the
+        pre-Phase-5 squash folded all four back in.
+
+        It moves once more for Céluma 1.3.1 — but for a different reason, and
+        the difference is the point. Those four were development-time
+        revisions of an unreleased product; `v1_3_1` is the migration of a
+        *shipped hotfix release*, so the "one revision per product release"
+        contract is satisfied, not bent. `v1_3_0` remains frozen and
+        unedited.
         """
-        assert _script_directory().get_current_head() == RELEASE_REVISION
+        assert _script_directory().get_current_head() == HEAD_REVISION
 
     def test_release_revision_sits_directly_on_the_last_pre_1_3_revision(self):
         revision = _script_directory().get_revision(RELEASE_REVISION)
         assert revision.down_revision == LAST_PRE_1_3_REVISION
 
     def test_chain_is_exactly_one_revision_per_product_release(self):
-        """The whole point of the squash, as a single assertion: four
-        revisions, one per shipped release, base to head, in order."""
+        """The whole point of the squash, as a single assertion: one revision
+        per shipped release, base to head, in order. 1.3.1 adds the fifth."""
         script = _script_directory()
         revisions = list(script.walk_revisions())
         assert [r.revision for r in revisions] == [
+            HOTFIX_REVISION,
             RELEASE_REVISION,
             "v1_2_0",
             "v1_1_0",
             "v1_0_0",
         ]
 
-    def test_release_revision_has_no_children(self):
-        """Nothing may be appended to the frozen release revision. A Céluma
-        1.4 revision built on `v1_3_0` is exactly what this test is meant to
-        catch and force a deliberate decision about — the freeze means the
-        next schema change is a release decision, not a quiet `down_revision`.
+    def test_the_only_child_of_the_frozen_release_is_the_1_3_1_hotfix(self):
+        """`v1_3_0` is frozen, so anything appended to it is a release
+        decision rather than a quiet `down_revision`. Exactly one such
+        decision has been taken — Céluma 1.3.1 — and this test still catches
+        the next one.
+
+        It also pins that 1.3.1 did not *edit* the frozen revision: `v1_3_1`
+        sits on top of `v1_3_0`, which keeps `v1_2_0` as its parent (asserted
+        by `test_release_revision_sits_directly_on_the_last_pre_1_3_revision`).
         """
         script = _script_directory()
         children = [
             revision.revision
             for revision in script.walk_revisions()
             if revision.down_revision == RELEASE_REVISION
+        ]
+        assert children == [HOTFIX_REVISION]
+
+    def test_hotfix_revision_has_no_children(self):
+        """The freeze contract now applies at the new head: Céluma 1.4's
+        release revision is the next legitimate move, and it must be a
+        deliberate decision."""
+        script = _script_directory()
+        children = [
+            revision.revision
+            for revision in script.walk_revisions()
+            if revision.down_revision == HOTFIX_REVISION
         ]
         assert children == []
 
@@ -807,7 +847,7 @@ class TestNotificationDomain:
         _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
         _alembic("head")
 
-        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert _current_revision(migration_db) == HEAD_REVISION
         assert NOTIFICATION_TABLES <= set(inspect(migration_db).get_table_names())
 
     def test_unique_constraints_exist(self, migration_db):
@@ -1124,7 +1164,7 @@ class TestUsageDomainMigration:
         _alembic(LAST_PRE_1_3_REVISION, command="downgrade")
         _alembic("head")
 
-        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert _current_revision(migration_db) == HEAD_REVISION
         assert USAGE_DOMAIN_TABLES <= set(inspect(migration_db).get_table_names())
 
     def test_downgrade_removes_the_app_user_index(self, migration_db):
@@ -2893,7 +2933,7 @@ class TestUsageThresholdStateMigration:
         )
 
         _alembic("head")
-        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert _current_revision(migration_db) == HEAD_REVISION
         assert THRESHOLD_STATE_TABLES <= set(inspect(migration_db).get_table_names())
         with migration_db.connect() as conn:
             # Remembered state is lost, which is correct and safe: the next
@@ -3021,7 +3061,7 @@ class TestSchemaEquivalence:
         snapshot's exclusion list: the squash changes the revision identity
         and nothing else."""
         _alembic("head")
-        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert _current_revision(migration_db) == HEAD_REVISION
         assert "alembic_version" not in _capture_schema(_MIGRATION_TEST_DB)["tables"]
 
 
@@ -3115,7 +3155,7 @@ class TestRealisticUpgradeFromCeluma12:
 
         _alembic("head")
 
-        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert _current_revision(migration_db) == HEAD_REVISION
         with migration_db.connect() as conn:
             for table, row_id in (
                 ("tenant", seeded["tenant_a"]),
@@ -3334,7 +3374,7 @@ class TestMultipleSignaturesPerTenantUpgrade:
 
         _alembic("head")
 
-        assert _current_revision(migration_db) == RELEASE_REVISION, (
+        assert _current_revision(migration_db) == HEAD_REVISION, (
             "the upgrade did not complete; B-001 has regressed"
         )
 
@@ -3435,7 +3475,7 @@ class TestMultipleSignaturesPerTenantUpgrade:
 
         _alembic("head")
 
-        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert _current_revision(migration_db) == HEAD_REVISION
 
         with migration_db.connect() as conn:
             usage = dict(
@@ -3785,3 +3825,141 @@ def _insert_preference(conn, *, tenant_id, user_id):
         ),
         {"id": uuid.uuid4(), "tenant_id": tenant_id, "user_id": user_id},
     )
+
+
+class TestReviewerOnlyApprovalMigration:
+    """Céluma 1.3.1 Block A / CEL-131-01 — revision `v1_3_1`.
+
+    The DATA half of the reviewer-only approval fix. These tests defend the
+    migration's exact blast radius: one grant removed, one grant preserved,
+    nothing else moved. The CODE half (`report_authorization`) is covered by
+    tests/http/test_block_a_reviewer_authorization.py — and deliberately so:
+    if this migration were ever reverted, those tests must still pass.
+    """
+
+    @staticmethod
+    def _permissions_of(engine, role_code: str) -> set[str]:
+        with engine.connect() as conn:
+            return {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT p.code
+                        FROM role r
+                        JOIN role_permission rp ON rp.role_id = r.id
+                        JOIN permission p ON p.id = rp.permission_id
+                        WHERE r.code = :role
+                        """
+                    ),
+                    {"role": role_code},
+                )
+            }
+
+    def test_pathologist_loses_generic_approval(self, migration_db):
+        _alembic(RELEASE_REVISION)
+        assert "reports:approve" in self._permissions_of(migration_db, "pathologist"), (
+            "precondition: v1_3_0 must still carry the defective grant, "
+            "otherwise this migration is testing nothing"
+        )
+
+        _alembic(HOTFIX_REVISION)
+        assert "reports:approve" not in self._permissions_of(migration_db, "pathologist")
+
+    def test_reviewer_keeps_approval_and_signing(self, migration_db):
+        _alembic("head")
+        reviewer = self._permissions_of(migration_db, "reviewer")
+        assert "reports:approve" in reviewer
+        assert "reports:sign" in reviewer
+
+    def test_pathologist_keeps_every_other_permission(self, migration_db):
+        """The revocation is surgical: the clinical authoring flow is
+        untouched. A pathologist must still create, edit, submit and retract."""
+        _alembic("head")
+        pathologist = self._permissions_of(migration_db, "pathologist")
+        assert {
+            "reports:read",
+            "reports:create",
+            "reports:edit",
+            "reports:submit",
+            "reports:retract",
+            "lab:read",
+            "lab:manage_reviewers",
+        } <= pathologist
+        # v1_1_0 already removed this one; confirm 1.3.1 did not resurrect it.
+        assert "reports:sign" not in pathologist
+
+    def test_no_other_role_changes(self, migration_db):
+        """Every role except `pathologist` has byte-identical permissions
+        before and after the revision."""
+        _alembic(RELEASE_REVISION)
+        with migration_db.connect() as conn:
+            roles = [r[0] for r in conn.execute(text("SELECT code FROM role"))]
+        before = {r: self._permissions_of(migration_db, r) for r in roles}
+
+        _alembic(HOTFIX_REVISION)
+        after = {r: self._permissions_of(migration_db, r) for r in roles}
+
+        for role_code in roles:
+            if role_code == "pathologist":
+                continue
+            assert before[role_code] == after[role_code], role_code
+
+        assert before["pathologist"] - after["pathologist"] == {"reports:approve"}
+        assert after["pathologist"] - before["pathologist"] == set()
+
+    def test_superuser_still_holds_the_whole_catalogue(self, migration_db):
+        """`superuser` keeps `reports:approve` on purpose — the clinical rule
+        is enforced by the reviewer-role check in `report_authorization`, not
+        by carving a hole in the role that by definition holds everything."""
+        _alembic("head")
+        with migration_db.connect() as conn:
+            every_permission = {
+                r[0] for r in conn.execute(text("SELECT code FROM permission"))
+            }
+        assert self._permissions_of(migration_db, "superuser") == every_permission
+
+    def test_admin_never_had_approval_and_still_does_not(self, migration_db):
+        _alembic("head")
+        admin = self._permissions_of(migration_db, "admin")
+        assert "reports:approve" not in admin
+        assert "reports:sign" not in admin
+
+    def test_upgrade_is_idempotent_on_an_already_upgraded_database(self, migration_db):
+        """Production safety: 1.3.1 is applied to a live 1.3 database. Running
+        the revision's statement twice must not fail or remove anything else."""
+        _alembic("head")
+        first = self._permissions_of(migration_db, "pathologist")
+
+        _alembic(RELEASE_REVISION, command="downgrade")
+        _alembic(HOTFIX_REVISION)
+        assert self._permissions_of(migration_db, "pathologist") == first
+
+    def test_downgrade_restores_the_grant(self, migration_db):
+        """The downgrade contract is "return to the v1_3_0 state", which
+        necessarily re-opens CEL-131-01 at the data level. That is correct:
+        a downgrade is only run alongside a rollback of the application code
+        that enforces the reviewer contract."""
+        _alembic("head")
+        assert "reports:approve" not in self._permissions_of(migration_db, "pathologist")
+
+        _alembic(RELEASE_REVISION, command="downgrade")
+        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert "reports:approve" in self._permissions_of(migration_db, "pathologist")
+
+    def test_downgrade_then_re_upgrade_is_stable(self, migration_db):
+        _alembic("head")
+        _alembic(RELEASE_REVISION, command="downgrade")
+        _alembic("head")
+        assert _current_revision(migration_db) == HEAD_REVISION
+        assert "reports:approve" not in self._permissions_of(migration_db, "pathologist")
+        assert "reports:approve" in self._permissions_of(migration_db, "reviewer")
+
+    def test_upgrading_a_1_2_database_straight_to_head_lands_correctly(
+        self, migration_db
+    ):
+        """The full chain, as a fresh production install would run it."""
+        _alembic("head")
+        assert _current_revision(migration_db) == HEAD_REVISION
+        assert "reports:approve" not in self._permissions_of(migration_db, "pathologist")
+        assert "reports:approve" in self._permissions_of(migration_db, "reviewer")

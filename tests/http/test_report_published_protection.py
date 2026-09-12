@@ -101,7 +101,13 @@ class TestNewVersionBlockedOnImmutableStatuses:
 
 @pytest.mark.parametrize(
     "status",
-    [ReportStatus.DRAFT, ReportStatus.IN_REVIEW, ReportStatus.APPROVED],
+    # Céluma 1.3.1 Block B (finding B-3): APPROVED was in this list until the
+    # reopen route existed. It moved to the rejected set below — see
+    # `TestNewVersionBlockedAfterApproval` and
+    # `app/services/report_authorization.py::CONTENT_EDITABLE_STATUSES`.
+    # DRAFT and IN_REVIEW are unchanged: nothing has been approved in either,
+    # so an edit bypasses no decision.
+    [ReportStatus.DRAFT, ReportStatus.IN_REVIEW],
 )
 class TestNewVersionAllowedOnEditableStatuses:
     def test_new_version_succeeds(self, client, session, status):
@@ -122,3 +128,59 @@ class TestNewVersionAllowedOnEditableStatuses:
             headers=auth_headers(user),
         )
         assert resp.status_code == 200, resp.text
+
+
+class TestNewVersionBlockedAfterApproval:
+    """Céluma 1.3.1 Block B, finding B-3.
+
+    Story B9 (Phase 2, Block B) froze content for PUBLISHED and RETRACTED and
+    left APPROVED "fully editable", which was coherent while approval was the
+    last step before signing and there was no way back from it. Block B added
+    `POST /{id}/reopen`, and an editable APPROVED then became a hole straight
+    through the lifecycle it had just established.
+    """
+
+    def test_new_version_is_rejected_on_an_approved_report(self, client, session):
+        tenant = create_tenant(session)
+        branch = create_branch(session, tenant)
+        order = create_order(session, tenant, branch)
+        user = create_user(session, tenant, email="admin@t1.example")
+        report, _ = _create_report_at_status(
+            session, tenant, branch, order, ReportStatus.APPROVED
+        )
+
+        resp = client.post(
+            f"/api/v1/reports/{report.id}/new_version",
+            json={
+                "tenant_id": str(tenant.id),
+                "branch_id": str(branch.id),
+                "order_id": str(order.id),
+                "report": {"base": {}, "sections": {}},
+            },
+            headers=auth_headers(user),
+        )
+        assert resp.status_code == 409, resp.text
+
+    def test_the_rejection_points_at_the_reopen_route(self, client, session):
+        """The author is told what to do next, not merely refused — otherwise
+        the lifecycle looks broken rather than deliberate."""
+        tenant = create_tenant(session)
+        branch = create_branch(session, tenant)
+        order = create_order(session, tenant, branch)
+        user = create_user(session, tenant, email="admin@t1.example")
+        report, _ = _create_report_at_status(
+            session, tenant, branch, order, ReportStatus.APPROVED
+        )
+
+        resp = client.post(
+            f"/api/v1/reports/{report.id}/new_version",
+            json={
+                "tenant_id": str(tenant.id),
+                "branch_id": str(branch.id),
+                "order_id": str(order.id),
+                "report": {"base": {}, "sections": {}},
+            },
+            headers=auth_headers(user),
+        )
+        assert resp.status_code == 409
+        assert "reábrelo" in resp.json()["detail"].lower()

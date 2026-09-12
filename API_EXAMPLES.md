@@ -96,47 +96,36 @@ print("Branch:", branch_id)
 print("Admin user:", user_id)
 ```
 
-### User Registration
+### User Registration — **REMOVED (Céluma 1.3.1, CEL-131-11)**
+
+`POST /api/v1/auth/register` no longer exists; the path returns **404**.
+
+It was unauthenticated and took `tenant_id` and `role` from the request body,
+so anyone who knew a tenant UUID could create themselves an account there with
+any role — including `superuser`. The examples that used to live here have
+been removed rather than updated, because there is no safe form of them.
+
+To onboard a laboratory, use the unified registration shown above. To add a
+user to an existing laboratory, authenticate as an administrator and use
+`POST /api/v1/users/` or the invitation flow:
+
 ```bash
-curl -X POST "http://localhost:8000/api/v1/auth/register" \
+curl -X POST "http://localhost:8000/api/v1/users/" \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <admin_token>" \
   -d '{
     "email": "user@example.com",
     "username": "johndoe",
     "password": "securepassword123",
     "full_name": "John Doe",
-    "role": "admin",
-    "tenant_id": "tenant-uuid-here"
+    "role": "pathologist",
+    "branch_ids": ["branch-uuid-here"]
   }'
 ```
 
-**Notes:**
-- `username` field is **optional** - you can omit it if you don't want a username
-- If provided, username must be unique within the tenant
-- Email is always required and must be unique within the tenant
-
-**Python Example:**
-```python
-import requests
-
-response = requests.post(
-    "http://localhost:8000/api/v1/auth/register",
-    json={
-        "email": "user@example.com",
-        "username": "johndoe",  # Optional field
-        "password": "securepassword123",
-        "full_name": "John Doe",
-        "role": "admin",
-        "tenant_id": "tenant-uuid-here"
-    }
-)
-
-if response.status_code == 200:
-    user_data = response.json()
-    print(f"User created: {user_data['email']}")
-    if user_data.get('username'):
-        print(f"Username: {user_data['username']}")
-```
+The tenant is taken from the authenticated administrator's own token, never
+from the request body. Note also that from 1.3.1 nobody may grant themselves
+the clinical `reviewer` role — see `ROLES_Y_PERMISOS.md`.
 
 ### User Login (username or email)
 ```bash

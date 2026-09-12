@@ -17,6 +17,32 @@ class SignatureMetadata(BaseModel):
     signature_url: Optional[str] = None
 
 
+class ReportPresentationUpdate(BaseModel):
+    """Céluma 1.3.1 Block A / A4 — the reviewer-only presentation allowlist.
+
+    This is the ENTIRE mutable surface of `PATCH /reports/{id}/presentation`.
+    It is a closed schema on purpose: the reviewer role deliberately has no
+    `reports:edit`, so anything that is not one of these three fields must be
+    unreachable through this route. Do not add clinical fields here — a
+    reviewer who needs a content change requests changes instead.
+
+    Every field is optional so one toggle can be changed without restating
+    the others; `None` means "not submitted", not "set to null".
+    """
+    show_signature_section: Optional[bool] = None
+    require_digital_signature: Optional[bool] = None
+    letterhead_version_id: Optional[str] = None
+
+
+class ReportPresentationResponse(BaseModel):
+    """The effective presentation settings after the change."""
+    id: str
+    status: str
+    show_signature_section: bool
+    require_digital_signature: bool
+    letterhead_version_id: Optional[str] = None
+
+
 # Import ReviewerWithStatus from worklist schema
 class ReviewerWithStatus(BaseModel):
     """User with review status"""

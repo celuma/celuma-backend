@@ -206,6 +206,11 @@ def _patch_s3(monkeypatch):
     # suite with S3_ENDPOINT_URL pointed at a black hole and getting identical
     # results). Patched so that stays true by construction rather than by luck.
     monkeypatch.setattr("app.services.report_publishing.S3Service", FakeS3Service)
+    # Céluma 1.3.1 Block A (A4): the narrow reviewer presentation route reads
+    # and rewrites the stored report JSON in place, with its own S3Service
+    # import. Unlike `report_publishing` above, tests DO reach this line —
+    # the presentation tests require a real stored body to mutate.
+    monkeypatch.setattr("app.services.report_presentation.S3Service", FakeS3Service)
 
 
 # ---------------------------------------------------------------------------

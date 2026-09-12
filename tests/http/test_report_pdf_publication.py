@@ -9,7 +9,14 @@ from app.models.enums import ReportStatus
 from app.models.report import Report, ReportVersion
 
 from .conftest import make_pdf_bytes
-from .factories import auth_headers, create_branch, create_order, create_tenant, create_user
+from .factories import (
+    assign_reviewer,
+    auth_headers,
+    create_branch,
+    create_order,
+    create_tenant,
+    create_user,
+)
 
 
 def _create_approved_report(session: Session, tenant, branch, order) -> tuple[Report, ReportVersion]:
@@ -30,6 +37,8 @@ class TestSignRequiresReadyPdf:
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
         reviewer = create_user(session, tenant, email="reviewer@t1.example", roles=("reviewer",))
+        # 1.3.1 Block A: signing now requires assignment, not just the role.
+        assign_reviewer(session, order, reviewer)
         report, _ = _create_approved_report(session, tenant, branch, order)
 
         resp = client.post(
@@ -44,6 +53,8 @@ class TestSignRequiresReadyPdf:
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
         reviewer = create_user(session, tenant, email="reviewer@t1.example", roles=("reviewer",))
+        # 1.3.1 Block A: signing now requires assignment, not just the role.
+        assign_reviewer(session, order, reviewer)
         report, version = _create_approved_report(session, tenant, branch, order)
         from datetime import datetime
 
@@ -62,6 +73,8 @@ class TestSignRequiresReadyPdf:
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
         reviewer = create_user(session, tenant, email="reviewer@t1.example", roles=("reviewer",))
+        # 1.3.1 Block A: signing now requires assignment, not just the role.
+        assign_reviewer(session, order, reviewer)
         report, version = _create_approved_report(session, tenant, branch, order)
         version.pdf_generation_status = "FAILED"
         version.pdf_error_code = "RENDER_TIMEOUT"
@@ -82,6 +95,8 @@ class TestSignRequiresReadyPdf:
         # — see REVIEWER_PERMISSIONS in v1_1_0_digital_signature.py) signs it.
         editor = create_user(session, tenant, email="editor@t1.example", roles=("pathologist",))
         reviewer = create_user(session, tenant, email="reviewer@t1.example", roles=("reviewer",))
+        # 1.3.1 Block A: signing now requires assignment, not just the role.
+        assign_reviewer(session, order, reviewer)
         report, _ = _create_approved_report(session, tenant, branch, order)
 
         stub_pdf_render.succeed(make_pdf_bytes(1))

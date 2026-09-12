@@ -48,6 +48,7 @@ from app.services.report_pdf_generation import ReportPdfGenerationError
 
 from .conftest import FakeS3Service, make_pdf_bytes
 from .factories import (
+    assign_reviewer,
     auth_headers,
     create_branch,
     create_order,
@@ -113,9 +114,17 @@ def _approved_report(session, tenant, branch, order, *, show=True, require_digit
 
 
 def _signer(session, tenant, *, with_autograph=True, email="signer@a.example",
-            tenant_for_storage=None, roles=("reviewer",)):
-    """A reviewer — the only role allowed to sign."""
+            tenant_for_storage=None, roles=("reviewer",), order=None):
+    """A reviewer — the only role allowed to sign.
+
+    Céluma 1.3.1 Block A added assignment to the signing contract: holding the
+    `reviewer` role is no longer enough, the signer must also be the assigned
+    reviewer of the report's order. Pass `order` to make this signer eligible;
+    omit it when the test is precisely about an ineligible signer.
+    """
     user = create_user(session, tenant, email=email, roles=roles)
+    if order is not None:
+        assign_reviewer(session, order, user)
     if with_autograph:
         key = f"signatures/{user.id}.png"
         FakeS3Service().upload_bytes(PNG_1X1, key=key, content_type="image/png")
@@ -142,7 +151,7 @@ class TestSignatureEmbedding:
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
-        signer = _signer(session, tenant)
+        signer = _signer(session, tenant, order=order)
         report, _, storage = _approved_report(session, tenant, branch, order)
 
         stub_pdf_render.succeed(make_pdf_bytes(1))
@@ -172,7 +181,7 @@ class TestSignatureEmbedding:
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
-        signer = _signer(session, tenant)
+        signer = _signer(session, tenant, order=order)
         report, _, storage = _approved_report(
             session, tenant, branch, order, require_digital=False
         )
@@ -197,7 +206,7 @@ class TestSignatureEmbedding:
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
-        signer = _signer(session, tenant, with_autograph=False)
+        signer = _signer(session, tenant, with_autograph=False, order=order)
         report, _, _ = _approved_report(session, tenant, branch, order)
 
         stub_pdf_render.succeed(make_pdf_bytes(1))
@@ -225,7 +234,7 @@ class TestRenderRefusalIsHonoured:
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
-        signer = _signer(session, tenant)
+        signer = _signer(session, tenant, order=order)
         report, _, _ = _approved_report(session, tenant, branch, order)
 
         # Exactly what the generator now raises when the render route reports
@@ -258,7 +267,7 @@ class TestRenderRefusalIsHonoured:
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
-        signer = _signer(session, tenant)
+        signer = _signer(session, tenant, order=order)
         report, _, _ = _approved_report(session, tenant, branch, order)
 
         stub_pdf_render.fail(
@@ -292,7 +301,7 @@ class TestSignatureTenantIsolation:
         tenant_a = create_tenant(session, name="Tenant A")
         branch_a = create_branch(session, tenant_a)
         order_a = create_order(session, tenant_a, branch_a)
-        signer_a = _signer(session, tenant_a, email="a@a.example")
+        signer_a = _signer(session, tenant_a, email="a@a.example", order=order_a)
         report, _, storage = _approved_report(session, tenant_a, branch_a, order_a)
 
         stub_pdf_render.succeed(make_pdf_bytes(1))
@@ -370,7 +379,7 @@ class TestTheRendererSeesASignedReport:
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
-        signer = _signer(session, tenant)
+        signer = _signer(session, tenant, order=order)
         report, version, _ = _approved_report(session, tenant, branch, order)
 
         captured = self._capture_render_state(
@@ -401,7 +410,7 @@ class TestTheRendererSeesASignedReport:
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
-        signer = _signer(session, tenant)
+        signer = _signer(session, tenant, order=order)
         report, version, _ = _approved_report(session, tenant, branch, order)
 
         captured = self._capture_render_state(
@@ -431,7 +440,7 @@ class TestTheRendererSeesASignedReport:
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
-        signer = _signer(session, tenant)
+        signer = _signer(session, tenant, order=order)
         report, version, _ = _approved_report(session, tenant, branch, order)
 
         seen: dict = {}
@@ -482,7 +491,7 @@ class TestResidualSignEndpoint:
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
-        signer = _signer(session, tenant, roles=("pathologist", "reviewer"))
+        signer = _signer(session, tenant, roles=("pathologist", "reviewer"), order=order)
         report, version, storage = _approved_report(session, tenant, branch, order)
         before = self._ready_pdf(client, session, report, version, signer, stub_pdf_render)
 
@@ -507,7 +516,7 @@ class TestResidualSignEndpoint:
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
-        signer = _signer(session, tenant, roles=("pathologist", "reviewer"))
+        signer = _signer(session, tenant, roles=("pathologist", "reviewer"), order=order)
         report, version, _ = _approved_report(session, tenant, branch, order)
         self._ready_pdf(client, session, report, version, signer, stub_pdf_render)
 
@@ -530,7 +539,7 @@ class TestResidualSignEndpoint:
         tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
-        signer = _signer(session, tenant)
+        signer = _signer(session, tenant, order=order)
         report, _, _ = _approved_report(session, tenant, branch, order)
 
         resp = client.post(

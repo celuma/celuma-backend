@@ -17,7 +17,14 @@ from app.models.report import Report, ReportVersion
 from app.services.report_pdf_generation import ReportPdfGenerationError
 
 from .conftest import make_pdf_bytes
-from .factories import auth_headers, create_branch, create_order, create_tenant, create_user
+from .factories import (
+    assign_reviewer,
+    auth_headers,
+    create_branch,
+    create_order,
+    create_tenant,
+    create_user,
+)
 
 
 def _create_approved_report(session: Session, tenant, branch, order) -> tuple[Report, ReportVersion]:
@@ -40,6 +47,8 @@ class TestSingleActionFlow:
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
         reviewer = create_user(session, tenant, email="reviewer@t1.example", roles=("reviewer",))
+        # 1.3.1 Block A: signing now requires assignment, not just the role.
+        assign_reviewer(session, order, reviewer)
         report, _ = _create_approved_report(session, tenant, branch, order)
 
         stub_pdf_render.succeed(make_pdf_bytes(1))
@@ -89,6 +98,8 @@ class TestSingleActionFlow:
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
         reviewer = create_user(session, tenant, email="reviewer@t1.example", roles=("reviewer",))
+        # 1.3.1 Block A: signing now requires assignment, not just the role.
+        assign_reviewer(session, order, reviewer)
         report = Report(tenant_id=tenant.id, branch_id=branch.id, order_id=order.id, status=ReportStatus.DRAFT)
         session.add(report)
         session.commit()
@@ -105,6 +116,8 @@ class TestConcurrencyClaim:
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
         reviewer = create_user(session, tenant, email="reviewer@t1.example", roles=("reviewer",))
+        # 1.3.1 Block A: signing now requires assignment, not just the role.
+        assign_reviewer(session, order, reviewer)
         report, version = _create_approved_report(session, tenant, branch, order)
 
         # Simulate an in-flight sign-and-publish (fresh claim, not stale).
@@ -128,6 +141,8 @@ class TestConcurrencyClaim:
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
         reviewer = create_user(session, tenant, email="reviewer@t1.example", roles=("reviewer",))
+        # 1.3.1 Block A: signing now requires assignment, not just the role.
+        assign_reviewer(session, order, reviewer)
         report, version = _create_approved_report(session, tenant, branch, order)
 
         # A crashed prior attempt — claim well past the staleness window.
@@ -154,6 +169,8 @@ class TestFailedGenerationIsRetryable:
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
         reviewer = create_user(session, tenant, email="reviewer@t1.example", roles=("reviewer",))
+        # 1.3.1 Block A: signing now requires assignment, not just the role.
+        assign_reviewer(session, order, reviewer)
         report, version = _create_approved_report(session, tenant, branch, order)
 
         stub_pdf_render.fail(ReportPdfGenerationError("RENDER_FAILED", "boom"))
@@ -175,6 +192,8 @@ class TestFailedGenerationIsRetryable:
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
         reviewer = create_user(session, tenant, email="reviewer@t1.example", roles=("reviewer",))
+        # 1.3.1 Block A: signing now requires assignment, not just the role.
+        assign_reviewer(session, order, reviewer)
         report, _ = _create_approved_report(session, tenant, branch, order)
 
         stub_pdf_render.fail(ReportPdfGenerationError("RENDER_FAILED", "boom"))

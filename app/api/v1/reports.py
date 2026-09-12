@@ -18,7 +18,7 @@ from app.models.storage import StorageObject
 from app.models.user import AppUser
 from app.models.audit import AuditLog
 from app.models.enums import ReportStatus, AssignmentItemType, ReviewStatus
-from app.core.rbac import has_permission, has_any_role, ROLE_REVIEWER
+from app.core.rbac import has_permission
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
 from app.services.s3 import S3Service
@@ -55,6 +55,27 @@ from app.services.notification_integrations import (
 )
 from app.services.report_template_autoversion import snapshot_and_activate_template_version
 from app.services.usage import UsageService
+from app.services.report_authorization import (
+    ReportAlreadySignedError,
+    ReportAuthorizationError,
+    ReportStateError,
+    authorize_approval,
+    authorize_presentation_change,
+    authorize_reopen,
+    authorize_request_changes,
+    authorize_signing,
+    is_content_editable,
+)
+from app.services.report_presentation import (
+    SIGNATURE_METADATA_KEY,
+    author_requested_letterhead_change,
+    signature_defaults_from_template,
+    enforce_author_presentation_boundary,
+    PresentationContentMissingError,
+    PresentationLetterheadError,
+    PresentationLetterheadNotFoundError,
+    apply_presentation_change,
+)
 from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from app.services.report_publishing import (
     embed_signature_metadata_if_required,
@@ -67,6 +88,8 @@ from app.services.report_publishing import (
 )
 from app.schemas.report import (
     ReportCreate, 
+    ReportPresentationUpdate,
+    ReportPresentationResponse,
     ReportResponse, 
     ReportDetailResponse, 
     ReportVersionCreate, 
@@ -566,6 +589,22 @@ def create_report(
             body["schema_version"] = 2
             body["rendering_snapshot"] = validated_snapshot.model_dump(mode="json")
 
+        # Céluma 1.3.1 Block A (corrected A5/A6): same backend-authoritative
+        # principle as `rendering_snapshot` directly above, applied to the
+        # signature settings. A new report's presentation comes from the
+        # template's defaults, never from the creating author's request — the
+        # author does not own these fields at any point in the lifecycle, and
+        # creation is where they would otherwise be set for free.
+        #
+        # For V2 the defaults are read from the SERVER-resolved snapshot, not
+        # from `report.template` (which is the client's copy). Legacy reports
+        # have no server-side template authority at all — the whole template
+        # is client-supplied by design there — so they fall back to it; that
+        # is the pre-existing legacy trust model, not a new hole.
+        body[SIGNATURE_METADATA_KEY] = signature_defaults_from_template(
+            body["rendering_snapshot"].get("template") if is_v2 else report.template
+        )
+
         try:
             s3 = S3Service()
             # Build S3 key
@@ -894,14 +933,29 @@ def create_report_new_version(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
-    # Céluma 1.3 Phase 2, Block B, Story B9: a published (or retracted)
-    # report's content/template/branding is frozen. This moves the
-    # protection from the frontend (which already disables the relevant
-    # buttons) into the API itself — see phase-2-block-b-architecture-decision.md.
-    if report.status in _IMMUTABLE_REPORT_STATUSES:
-        raise HTTPException(
-            409, f"Cannot create a new version for a report in {report.status} status"
-        )
+    # Céluma 1.3 Phase 2, Block B, Story B9 moved content freezing out of the
+    # frontend and into the API. Céluma 1.3.1 Block B (finding B-3) narrows it
+    # from "PUBLISHED and RETRACTED are frozen" to an allowlist of the states
+    # in which authoring is actually valid — see CONTENT_EDITABLE_STATUSES.
+    #
+    # APPROVED used to be editable. Once Block B added an explicit way back
+    # from it (`POST /{id}/reopen`), leaving it editable was a hole straight
+    # through the lifecycle: a holder of `reports:edit` could rewrite the
+    # clinical content of an approved report and have it signed without the
+    # new content ever being reviewed, leaving the approval attesting to text
+    # that no longer existed. Reopening is now the only way back, and it costs
+    # a fresh review and a fresh approval.
+    #
+    # PUBLISHED and RETRACTED are unchanged: still refused, still 409.
+    if not is_content_editable(report):
+        detail = f"Cannot create a new version for a report in {report.status} status"
+        if report.status == ReportStatus.APPROVED:
+            detail = (
+                "Este reporte ya está aprobado y no puede editarse. Para "
+                "corregirlo, reábrelo primero: volverá a borrador y deberá "
+                "pasar de nuevo por revisión y aprobación."
+            )
+        raise HTTPException(409, detail)
 
     # Determine next version number
     current_version = session.exec(
@@ -917,25 +971,38 @@ def create_report_new_version(
         carried_letterhead_version_id,
     ) = _carry_forward_v2_metadata(current_version, report_data.report, session)
 
-    # Fifth post-Phase-2 remediation (Observation A): a normal DRAFT save
-    # now accepts `letterhead_version_id`. Extending this endpoint was
-    # preferred over creating a new one (brief §5, "preferred option")
-    # because the letterhead change ALWAYS travels with the content the
-    # user has on screen: a separate endpoint would force two non-atomic
-    # calls and open the door to saving the new letterhead with the old
-    # content. See remediation-5-architecture-decision.md.
-    (
-        carried_report_body,
-        carried_letterhead_version_id,
-        changed_letterhead_version,
-    ) = _apply_draft_letterhead_change(
+    # Céluma 1.3.1 Block A (corrected A5/A6). The letterhead is reviewer-only
+    # in EVERY state, so the content path no longer changes it.
+    #
+    # This supersedes the fifth post-Phase-2 remediation (Observation A),
+    # which let a DRAFT save carry `letterhead_version_id` on the reasoning
+    # that the change should travel with the content on screen. That reasoning
+    # still holds for whoever owns the choice — it is the OWNER that changed:
+    # the letterhead decides what the final clinical document looks like, and
+    # that is the reviewer's call, not the author's. The reviewer's equivalent
+    # is `PATCH /reports/{id}/presentation`, which keeps the atomicity
+    # argument intact for them (one call, validated the same way).
+    #
+    # Rejected rather than ignored, unlike the signature fields below: a
+    # letterhead is chosen explicitly and visibly, so silently keeping the old
+    # one would leave the caller believing the change landed.
+    if author_requested_letterhead_change(
+        report_data.letterhead_version_id, current_version
+    ):
+        raise HTTPException(
+            403,
+            "El membrete solo puede cambiarlo el revisor asignado, mientras el "
+            "reporte está en revisión.",
+        )
+
+    # The signature settings are reviewer-only too, and are carried forward
+    # from what is already persisted (or the template's defaults for a first
+    # body) regardless of what the request contains.
+    carried_report_body = enforce_author_presentation_boundary(
         session,
-        ctx,
-        report,
         carried_report_body,
-        carried_schema_version,
-        carried_letterhead_version_id,
-        report_data.letterhead_version_id,
+        current_version=current_version,
+        template=report.template,
     )
 
     json_storage_id = None
@@ -1024,33 +1091,6 @@ def create_report_new_version(
         created_by=report_data.created_by,
     )
     session.add(version_event)
-
-    # Fifth remediation (§3.4.8): a DRAFT letterhead change is audited
-    # separately from the content save — it is an administrative decision
-    # about how the official document will look, not just another clinical
-    # edit.
-    if changed_letterhead_version is not None:
-        _create_audit_log(
-            session=session,
-            tenant_id=ctx.tenant_id,
-            branch_id=str(report.branch_id),
-            actor_user_id=ctx.user_id,
-            action="REPORT.CHANGE_LETTERHEAD",
-            entity_type="report",
-            entity_id=str(report.id),
-            old_values={
-                "letterhead_version_id": (
-                    str(current_version.letterhead_version_id)
-                    if current_version and current_version.letterhead_version_id
-                    else None
-                ),
-            },
-            new_values={
-                "letterhead_version_id": str(changed_letterhead_version.id),
-                "letterhead_id": str(changed_letterhead_version.report_letterhead_id),
-                "version_no": next_version_no,
-            },
-        )
 
     session.commit()
     session.refresh(new_version)
@@ -2674,43 +2714,36 @@ def approve_report(
 ):
     """
     Approve a report (IN_REVIEW → APPROVED).
-    
-    The user must be either:
-    - A pathologist (can approve any report)
-    - An assigned reviewer for this report
-    
+
+    Céluma 1.3.1 Block A / CEL-131-01. The user must satisfy the full
+    clinical reviewer contract — reviewer role AND `reports:approve` AND an
+    assignment for this report's order. See
+    `app/services/report_authorization.py`.
+
+    Before 1.3.1 the rule was `assigned reviewer OR reports:approve`, and
+    because the seed granted `reports:approve` to `pathologist`, any
+    pathologist (and any superuser) could approve any report in the tenant.
+
     Updates the user's review record and applies MVP rule: ≥1 approved = report approved.
     """
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
-    
+
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
-    
-    if report.status != ReportStatus.IN_REVIEW:
-        raise HTTPException(400, f"Cannot approve report in {report.status} status")
-    
-    # Check if user has a pending review for this report
-    user_review = session.exec(
-        select(ReportReview).where(
-            and_(
-                ReportReview.tenant_id == report.tenant_id,
-                ReportReview.order_id == report.order_id,
-                ReportReview.reviewer_user_id == user.id,
-                ReportReview.status == ReviewStatus.PENDING,
-            )
-        )
-    ).first()
-    
-    # If user has a review, update it; otherwise check if they're a pathologist or admin
-    if user_review:
-        user_review.status = ReviewStatus.APPROVED
-        user_review.decision_at = datetime.utcnow()
-        session.add(user_review)
-    elif not has_permission(user.id, "reports:approve", session):
-        raise HTTPException(403, "Permission required: reports:approve")
-    
+
+    try:
+        user_review = authorize_approval(session, report, user)
+    except ReportStateError as exc:
+        raise HTTPException(400, exc.message) from None
+    except ReportAuthorizationError as exc:
+        raise HTTPException(403, exc.message) from None
+
+    user_review.status = ReviewStatus.APPROVED
+    user_review.decision_at = datetime.utcnow()
+    session.add(user_review)
+
     # Update report status (MVP rule: ≥1 approved = report approved)
     old_status = report.status
     report.status = ReportStatus.APPROVED
@@ -2728,7 +2761,7 @@ def approve_report(
             comment_metadata={
                 "source": "review_approval",
                 "report_id": str(report.id),
-                "review_id": str(user_review.id) if user_review else None,
+                "review_id": str(user_review.id),
             },
         )
         session.add(order_comment)
@@ -2776,7 +2809,7 @@ def approve_report(
             "event": "report.approve",
             "report_id": report_id,
             "user_id": ctx.user_id,
-            "had_review": user_review is not None,
+            "review_id": str(user_review.id),
         },
     )
     
@@ -2798,42 +2831,32 @@ def request_changes(
     """
     Request changes on a report (IN_REVIEW → DRAFT).
     
-    The user must be either:
-    - A pathologist (can request changes on any report)
-    - An assigned reviewer for this report
-    
+    Céluma 1.3.1 Block A. The rejection half of the review decision, and it
+    carried the identical `assigned reviewer OR reports:approve` defect as
+    approval. Both halves of one decision share one contract — otherwise
+    "request changes" becomes the unguarded way to move a report out of
+    IN_REVIEW. See `app/services/report_authorization.py`.
+
     Updates the user's review record to REJECTED with comment.
     """
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
-    
+
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
-    
-    if report.status != ReportStatus.IN_REVIEW:
-        raise HTTPException(400, f"Cannot request changes for report in {report.status} status")
-    
-    # Check if user has a pending review for this report
-    user_review = session.exec(
-        select(ReportReview).where(
-            and_(
-                ReportReview.tenant_id == report.tenant_id,
-                ReportReview.order_id == report.order_id,
-                ReportReview.reviewer_user_id == user.id,
-                ReportReview.status == ReviewStatus.PENDING,
-            )
-        )
-    ).first()
-    
-    # If user has a review, update it; otherwise check if they're a pathologist or admin
-    if user_review:
-        user_review.status = ReviewStatus.REJECTED
-        user_review.decision_at = datetime.utcnow()
-        session.add(user_review)
-    elif not has_permission(user.id, "reports:approve", session):
-        raise HTTPException(403, "Permission required: reports:approve")
-    
+
+    try:
+        user_review = authorize_request_changes(session, report, user)
+    except ReportStateError as exc:
+        raise HTTPException(400, exc.message) from None
+    except ReportAuthorizationError as exc:
+        raise HTTPException(403, exc.message) from None
+
+    user_review.status = ReviewStatus.REJECTED
+    user_review.decision_at = datetime.utcnow()
+    session.add(user_review)
+
     # Update status back to DRAFT
     old_status = report.status
     report.status = ReportStatus.DRAFT
@@ -2851,7 +2874,7 @@ def request_changes(
             comment_metadata={
                 "source": "review_rejection",
                 "report_id": str(report.id),
-                "review_id": str(user_review.id) if user_review else None,
+                "review_id": str(user_review.id),
             },
         )
         session.add(order_comment)
@@ -2909,6 +2932,223 @@ def request_changes(
     )
 
 
+@router.post("/{report_id}/reopen", response_model=ReportActionResponse)
+def reopen_report(
+    report_id: str,
+    data: ReportStatusUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Céluma 1.3.1 Block B / CEL-131-03 — reopen an approved report that has
+    NOT been signed (APPROVED → DRAFT).
+
+    The supported correction path when a mistake is found after approval but
+    before the signature: a wrong letterhead, a signature setting that should
+    not have been enabled, a clinical detail the reviewer wants rewritten. It
+    replaces the only alternative laboratories had, which was to publish a
+    document they knew was wrong and then retract it.
+
+    Deliberately NOT an amendment mechanism. A signed report is refused here
+    in every case — editing or amending one belongs to the Céluma 1.4
+    amendment workflow, and the guard is signature evidence on the report's
+    versions, not `report.status` alone (see `authorize_reopen`).
+
+    Reopening confers no other authority. The report re-enters the ordinary
+    lifecycle at DRAFT and must travel submit → IN_REVIEW → approve before it
+    can be signed again; the reopener does not gain the right to approve or
+    sign it, and an administrator never had it.
+    """
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
+
+    try:
+        current_version = authorize_reopen(session, report, user)
+    except ReportAlreadySignedError as exc:
+        raise HTTPException(409, exc.message) from None
+    except ReportStateError as exc:
+        raise HTTPException(400, exc.message) from None
+    except ReportAuthorizationError as exc:
+        raise HTTPException(403, exc.message) from None
+
+    old_status = report.status
+    report.status = ReportStatus.DRAFT
+    session.add(report)
+
+    # Nothing else is reset. Each related field was considered against the
+    # current lifecycle code; the full disposition table is in
+    # docs/celuma-1.3.1/block-b/lifecycle-contract.md §4. In short:
+    #
+    #   * `ReportReview` rows keep the previous decision and its
+    #     `decision_at`. They are historical evidence that this report WAS
+    #     reviewed, and `submit_report` already resets every reviewer of the
+    #     order to PENDING on the next submission — which is exactly the
+    #     "new review cycle" this transition needs, and exactly what the
+    #     existing IN_REVIEW → DRAFT path (request-changes) relies on.
+    #   * PDF generation state on the version is left alone. It is the record
+    #     of an artifact that really was produced, and `sign-and-publish`
+    #     regenerates with `force=True`, so a stale PDF can never be the one
+    #     published.
+    #   * `published_at` is necessarily NULL here (a published report is
+    #     refused above) and is never written by this route.
+    #   * The presentation settings and the frozen letterhead stay on the
+    #     current version. Reopening returns the report to DRAFT; it does not
+    #     re-open the presentation window, which remains IN_REVIEW-only and
+    #     reviewer-only (Block A). The correction path is
+    #     reopen → edit/resubmit → reviewer adjusts presentation → approve.
+
+    _create_audit_log(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        branch_id=str(report.branch_id),
+        actor_user_id=ctx.user_id,
+        action="REPORT.REOPEN",
+        entity_type="report",
+        entity_id=report_id,
+        old_values={"status": old_status},
+        new_values={
+            "status": report.status,
+            "reopened_version_no": current_version.version_no,
+            "changelog": data.changelog,
+        },
+    )
+
+    session.commit()
+    session.refresh(report)
+
+    logger.info(
+        f"Report {report_id} reopened to DRAFT by user {ctx.user_id}",
+        extra={
+            "event": "report.reopen",
+            "report_id": report_id,
+            "user_id": ctx.user_id,
+            "previous_status": old_status,
+        },
+    )
+
+    return ReportActionResponse(
+        id=str(report.id),
+        status=report.status,
+        message=(
+            "Reporte reabierto. Vuelve a borrador y debe enviarse a revisión "
+            "y aprobarse de nuevo antes de poder firmarse."
+        ),
+    )
+
+
+@router.patch("/{report_id}/presentation", response_model=ReportPresentationResponse)
+def update_report_presentation(
+    report_id: str,
+    data: ReportPresentationUpdate,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Céluma 1.3.1 Block A / A4-A5 — the reviewer-only presentation route.
+
+    Changes ONLY the signature-section toggle, the digital-signature toggle,
+    and the selected letterhead, and only while the report is IN_REVIEW, and
+    only for the assigned reviewer.
+
+    Why this endpoint exists at all: these three settings change the final
+    clinical document, so they are reviewer decisions — but they live inside
+    the report JSON body, which before 1.3.1 was reachable only through
+    `POST /{id}/new_version` and its `reports:edit` guard. The reviewer role
+    deliberately does not hold `reports:edit` and must not be given it (that
+    would let a reviewer rewrite clinical content), so the narrow route is
+    the mechanism that keeps the capability and the content boundary
+    separate. See `app/services/report_presentation.py`.
+
+    Lifecycle (A5):
+      * DRAFT     — not here. The author owns the document and changes these
+                    through the normal content path.
+      * IN_REVIEW — the reviewer's window. This route.
+      * APPROVED  — frozen. 409. The 1.3.1 route back is Block B's reopen,
+                    never a silent mutation of an approved document.
+    """
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    if str(report.tenant_id) != ctx.tenant_id:
+        # 404, not 403: never confirm another laboratory's report id.
+        raise HTTPException(404, "Report not found")
+
+    try:
+        authorize_presentation_change(session, report, user)
+    except ReportStateError as exc:
+        raise HTTPException(409, exc.message) from None
+    except ReportAuthorizationError as exc:
+        raise HTTPException(403, exc.message) from None
+
+    current_version = session.exec(
+        select(ReportVersion).where(
+            ReportVersion.report_id == report.id,
+            ReportVersion.is_current == True,  # noqa: E712
+        )
+    ).first()
+    if not current_version:
+        raise HTTPException(404, "No current version found for this report")
+
+    old_values = {
+        "letterhead_version_id": (
+            str(current_version.letterhead_version_id)
+            if current_version.letterhead_version_id
+            else None
+        ),
+    }
+
+    try:
+        effective = apply_presentation_change(
+            session,
+            report,
+            current_version,
+            user,
+            show_signature_section=data.show_signature_section,
+            require_digital_signature=data.require_digital_signature,
+            letterhead_version_id=data.letterhead_version_id,
+        )
+    except PresentationLetterheadNotFoundError as exc:
+        raise HTTPException(404, exc.message) from None
+    except PresentationLetterheadError as exc:
+        raise HTTPException(409, exc.message) from None
+    except PresentationContentMissingError as exc:
+        raise HTTPException(409, exc.message) from None
+
+    _create_audit_log(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        branch_id=str(report.branch_id),
+        actor_user_id=ctx.user_id,
+        action="REPORT.PRESENTATION_UPDATE",
+        entity_type="report",
+        entity_id=report_id,
+        old_values=old_values,
+        new_values=effective,
+    )
+
+    session.commit()
+    session.refresh(report)
+
+    logger.info(
+        f"Report {report_id} presentation updated by reviewer {ctx.user_id}",
+        extra={
+            "event": "report.presentation_update",
+            "report_id": report_id,
+            "user_id": ctx.user_id,
+        },
+    )
+
+    return ReportPresentationResponse(
+        id=str(report.id),
+        status=report.status,
+        **effective,
+    )
+
+
 @router.post("/{report_id}/sign", response_model=ReportActionResponse)
 def sign_report(
     report_id: str,
@@ -2917,22 +3157,29 @@ def sign_report(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Sign and publish a report (APPROVED → PUBLISHED) — requires reports:sign + 'reviewer' role."""
-    if not has_permission(user.id, "reports:sign", session):
-        raise HTTPException(403, "Permission required: reports:sign")
-    if not has_any_role(user.id, {ROLE_REVIEWER}, session):
-        raise HTTPException(403, f"Only users with the '{ROLE_REVIEWER}' role can sign reports")
+    """Sign and publish a report (APPROVED → PUBLISHED) — requires the full
+    reviewer contract: `reports:sign` + 'reviewer' role + assignment.
 
+    Céluma 1.3.1 Block A / A3 added the assignment half. The role and
+    permission halves were already correct (which is why superuser, holding
+    `reports:sign` but not the role, was already rejected), but any reviewer
+    in the tenant could sign any approved report — including one they were
+    never assigned to.
+    """
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
-    
+
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
-    
-    if report.status != ReportStatus.APPROVED:
-        raise HTTPException(400, f"Cannot sign report in {report.status} status. Report must be approved first.")
-    
+
+    try:
+        authorize_signing(session, report, user)
+    except ReportStateError as exc:
+        raise HTTPException(400, exc.message) from None
+    except ReportAuthorizationError as exc:
+        raise HTTPException(403, exc.message) from None
+
     # Get current version and sign it
     current_version = session.exec(
         select(ReportVersion).where(
@@ -3124,20 +3371,20 @@ def sign_and_publish_report(
     compatibility/internal use — this endpoint is the only one the main
     UI invokes.
     """
-    if not has_permission(user.id, "reports:sign", session):
-        raise HTTPException(403, "Permission required: reports:sign")
-    if not has_any_role(user.id, {ROLE_REVIEWER}, session):
-        raise HTTPException(403, f"Only users with the '{ROLE_REVIEWER}' role can sign reports")
-
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "Report not found")
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
-    if report.status != ReportStatus.APPROVED:
-        raise HTTPException(
-            400, f"Cannot sign report in {report.status} status. Report must be approved first."
-        )
+
+    # Céluma 1.3.1 Block A / A3: role + `reports:sign` + assignment. The
+    # assignment half is new; see `app/services/report_authorization.py`.
+    try:
+        authorize_signing(session, report, user)
+    except ReportStateError as exc:
+        raise HTTPException(400, exc.message) from None
+    except ReportAuthorizationError as exc:
+        raise HTTPException(403, exc.message) from None
 
     current_version = session.exec(
         select(ReportVersion).where(

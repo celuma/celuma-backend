@@ -18,7 +18,8 @@ from datetime import datetime
 
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
-from app.core.rbac import has_permission
+from app.core.rbac import ROLE_REVIEWER, has_permission
+from app.services.report_authorization import is_reviewer
 from app.models.user import AppUser
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
@@ -470,25 +471,38 @@ def make_review_decision(
     user: AppUser = Depends(current_user),
 ):
     """
-    Make a decision on a report review (requires reports:approve).
+    Make a decision on a report review.
+
+    Céluma 1.3.1 Block A: requires the reviewer role as well as
+    `reports:approve`. This route already enforced assignment — it is
+    addressed by review id and rejects anyone who is not that review's
+    `reviewer_user_id` — so it was the strictest of the three approval paths
+    and was never exploitable the way `POST /reports/{id}/approve` was. The
+    role check is added for consistency with the single reviewer contract, so
+    that a future broad grant of `reports:approve` cannot make this route the
+    weak one. See `app/services/report_authorization.py`.
 
     Allows changing decisions. Updates report status based on MVP rule: ≥1 approved = report approved.
     Creates timeline events and order comments for the decision.
     """
     if not has_permission(user.id, "reports:approve", session):
         raise HTTPException(403, "Permission required: reports:approve")
+    if not is_reviewer(user.id, session):
+        raise HTTPException(
+            403, f"Only users with the '{ROLE_REVIEWER}' role can decide a review"
+        )
     review = session.get(ReportReview, UUID(review_id))
-    
+
     if not review:
         raise HTTPException(404, "Review not found")
-    
+
     if str(review.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Review does not belong to your tenant")
-    
+
     # Only the assigned reviewer can make the decision
     if review.reviewer_user_id != user.id:
         raise HTTPException(403, "Only the assigned reviewer can make this decision")
-    
+
     # Get report to create events and check status (query by order_id)
     report = session.exec(
         select(Report).where(Report.order_id == review.order_id)

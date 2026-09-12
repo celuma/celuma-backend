@@ -159,10 +159,17 @@ class TestStorageTriggerCoverage:
     def test_every_wrapper_call_site_is_accounted_for(self):
         """The inventory itself, as a number.
 
-        Thirteen production storage flows, matching
+        Fourteen production storage flows, matching
         `usage-threshold-trigger-matrix.md` §Storage. If this count changes,
         the matrix needs a row added or removed — which is the point of
         asserting it.
+
+        Céluma 1.3.1 Block A added the fourteenth:
+        `app/services/report_presentation.py`, the narrow reviewer
+        presentation route. Like `report_publishing.embed_signature_metadata_
+        if_required`, it rewrites the report JSON in place and so records a
+        size *delta* on an existing StorageObject rather than a new object's
+        full size.
         """
         call_sites = []
         for relative, path in self._production_modules():
@@ -176,7 +183,7 @@ class TestStorageTriggerCoverage:
                     and node.func.id == "record_storage_delta_with_thresholds"
                 ):
                     call_sites.append(f"{relative}:{node.lineno}")
-        assert len(call_sites) == 13, sorted(call_sites)
+        assert len(call_sites) == 14, sorted(call_sites)
         assert {site.split(":")[0] for site in call_sites} == {
             "app/api/v1/laboratory.py",
             "app/api/v1/report_letterheads.py",
@@ -184,6 +191,7 @@ class TestStorageTriggerCoverage:
             "app/api/v1/tenants.py",
             "app/api/v1/users.py",
             "app/services/report_pdf_generation.py",
+            "app/services/report_presentation.py",
             "app/services/report_publishing.py",
         }
 
@@ -204,9 +212,15 @@ class TestUserTriggerCoverage:
         "user_activation_toggled",
         "invitation_accepted",
         "user_roles_replaced",
-        "user_self_registered",
         "tenant_registration",
     }
+    # `user_self_registered` was emitted by `POST /api/v1/auth/register`, the
+    # unauthenticated legacy registration route removed in Céluma 1.3.1 by
+    # CEL-131-11. With the route gone the label has no call site, so it is no
+    # longer part of the inventory. A user who joins a laboratory now arrives
+    # through `user_created` (an administrator creating them) or
+    # `invitation_accepted` — both already listed above, so no seat-accounting
+    # path was lost with it.
 
     def test_every_user_lifecycle_source_label_is_wired(self):
         found = set()
