@@ -126,6 +126,13 @@ RELEASE_REVISION = "v1_3_0"
 #: edited, and the grant exists in production, so a new revision is the only
 #: correct instrument. See CELUMA-1.3.1-HOTFIX-PLAN.md, Block A.
 #:
+#: It is the **consolidated** 1.3.1 revision: Block C (CEL-131-05) added its
+#: DDL to this same file rather than creating a second 1.3.1 revision, because
+#: 1.3.1 had not shipped and `v1_3_1` had never been applied to any database.
+#: That keeps "one revision per shipped product release" exact rather than
+#: carving a hotfix exception into it. `v1_3_1` becomes frozen on release, not
+#: before. See docs/celuma-1.3.1/block-c/block-c-summary.md.
+#:
 #: The release contract is unchanged in substance — still one revision per
 #: shipped product release, and 1.3.1 is a shipped product release.
 HOTFIX_REVISION = "v1_3_1"
@@ -3009,6 +3016,21 @@ class TestSchemaEquivalence:
     If this test fails, the release migration no longer produces the schema
     Phase 4 signed off on, and that is a release-blocking event rather than a
     test to update.
+
+    **Céluma 1.3.1 Block C.** The comparison upgrades to `RELEASE_REVISION`
+    rather than `head`. It used `head` only because, until 1.3.1, head *was*
+    `v1_3_0` and then `v1_3_1` carried no DDL — so the two were the same
+    schema and the distinction never mattered. The consolidated `v1_3_1` drops
+    `ck_report_version_v2_requires_template_version` (CEL-131-05), which is an
+    intentional post-release change and therefore *must* make head differ from
+    the pre-squash snapshot.
+
+    This is a retarget, not a weakening: the claim being proved has always
+    been about `v1_3_0` specifically, and it is now stated that way. The
+    fixture is **not** regenerated — it remains the frozen evidence captured
+    before the four Phase 4 revisions were deleted. Every later schema change
+    is asserted on its own terms by the revision that makes it
+    (`TestReportsV2TemplateVersionConstraint` below).
     """
 
     def test_the_snapshot_fixture_exists(self):
@@ -3018,7 +3040,7 @@ class TestSchemaEquivalence:
         )
 
     def test_squashed_schema_matches_the_pre_squash_head(self, migration_db):
-        _alembic("head")
+        _alembic(RELEASE_REVISION)
 
         pre = json.loads(PRE_SQUASH_SCHEMA_SNAPSHOT.read_text(encoding="utf-8"))
         post = _capture_schema(_MIGRATION_TEST_DB)
@@ -3828,13 +3850,19 @@ def _insert_preference(conn, *, tenant_id, user_id):
 
 
 class TestReviewerOnlyApprovalMigration:
-    """Céluma 1.3.1 Block A / CEL-131-01 — revision `v1_3_1`.
+    """Céluma 1.3.1 Block A / CEL-131-01 — **§1** of revision `v1_3_1`.
 
     The DATA half of the reviewer-only approval fix. These tests defend the
     migration's exact blast radius: one grant removed, one grant preserved,
     nothing else moved. The CODE half (`report_authorization`) is covered by
     tests/http/test_block_a_reviewer_authorization.py — and deliberately so:
     if this migration were ever reverted, those tests must still pass.
+
+    `v1_3_1` was later consolidated: Block C (CEL-131-05) added §2, the DDL
+    that drops `ck_report_version_v2_requires_template_version`. Every
+    assertion here is unchanged by that — the two halves touch disjoint
+    objects, and `TestTheConsolidatedHotfixRevision` below asserts they
+    neither interfere with nor depend on each other.
     """
 
     @staticmethod
@@ -3963,3 +3991,514 @@ class TestReviewerOnlyApprovalMigration:
         assert _current_revision(migration_db) == HEAD_REVISION
         assert "reports:approve" not in self._permissions_of(migration_db, "pathologist")
         assert "reports:approve" in self._permissions_of(migration_db, "reviewer")
+
+
+class TestReportsV2TemplateVersionConstraint:
+    """Céluma 1.3.1 Block C / CEL-131-05 — **§2** of revision `v1_3_1`.
+
+    `v1_3_0` created
+
+        ck_report_version_v2_requires_template_version
+          CHECK (schema_version IS DISTINCT FROM 2
+                 OR template_version_id IS NOT NULL)
+
+    which made an administrative `report_template_version` row a *database*
+    prerequisite for every V2 report. The final 1.3 architecture reconstructs
+    a V2 report exclusively from the `rendering_snapshot` frozen into its own
+    JSON body, so that prerequisite is obsolete — and it was the last thing
+    locking a laboratory out of Reports V2 when its template had been saved
+    before its letterhead was configured.
+
+    §2 drops the CHECK and nothing else. The column, its foreign key and its
+    index all survive, because historical rows carry real provenance that is
+    preserved verbatim — nothing is cleared, rewritten or backfilled in either
+    direction.
+    """
+
+    CHECK_NAME = "ck_report_version_v2_requires_template_version"
+
+    @staticmethod
+    def _check_constraints(engine) -> set[str]:
+        with engine.connect() as conn:
+            return {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        "SELECT conname FROM pg_constraint "
+                        "WHERE conrelid = 'report_version'::regclass "
+                        "AND contype = 'c'"
+                    )
+                )
+            }
+
+    @staticmethod
+    def _insert_v2_report_version(
+        engine, *, template_version_id=None, schema_version=2
+    ):
+        """The minimal row graph a `report_version` needs, inserted with raw
+        SQL through this file's existing seed helpers so the test exercises the
+        database's own rules rather than the application's. Returns the new
+        `report_version` id."""
+        version_id = uuid.uuid4()
+        with engine.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            branch_id = _seed_branch(conn, tenant_id)
+            patient_id = _seed_patient(conn, tenant_id, branch_id)
+            order_id = _seed_order(conn, tenant_id, branch_id, patient_id)
+            report_id = _seed_report(conn, tenant_id, branch_id, order_id)
+            conn.execute(
+                text(
+                    "INSERT INTO report_version "
+                    "(id, report_id, version_no, is_current, authored_at, "
+                    " created_at, schema_version, template_version_id) "
+                    "VALUES (:id, :report_id, 1, true, now(), now(), "
+                    "        :schema_version, :template_version_id)"
+                ),
+                {
+                    "id": version_id,
+                    "report_id": report_id,
+                    "schema_version": schema_version,
+                    "template_version_id": template_version_id,
+                },
+            )
+        return version_id
+
+    @staticmethod
+    def _insert_template_version(engine) -> uuid.UUID:
+        """A real `report_template_version`, so a historical row's provenance
+        can be asserted as preserved rather than merely non-null."""
+        template_id = uuid.uuid4()
+        version_id = uuid.uuid4()
+        with engine.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            conn.execute(
+                text(
+                    "INSERT INTO report_template "
+                    "(id, tenant_id, name, template_json, is_active, created_at) "
+                    "VALUES (:id, :tenant_id, 'Plantilla', '{}', true, now())"
+                ),
+                {"id": template_id, "tenant_id": tenant_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO report_template_version "
+                    "(id, tenant_id, report_template_id, version_number, "
+                    " schema_version, configuration, status, published_at, "
+                    " created_at) "
+                    "VALUES (:id, :tenant_id, :template_id, 1, 2, '{}', "
+                    "        'PUBLISHED', now(), now())"
+                ),
+                {"id": version_id, "tenant_id": tenant_id, "template_id": template_id},
+            )
+        return version_id
+
+    # -- the constraint's presence, before and after --------------------
+
+    def test_the_check_exists_at_the_frozen_release(self, migration_db):
+        """Precondition. If `v1_3_0` ever stopped creating it, §2 would be
+        dropping nothing and this whole class would pass vacuously."""
+        _alembic(RELEASE_REVISION)
+        assert self.CHECK_NAME in self._check_constraints(migration_db)
+
+    def test_the_check_is_absent_after_the_hotfix(self, migration_db):
+        _alembic(HOTFIX_REVISION)
+        assert self.CHECK_NAME not in self._check_constraints(migration_db)
+
+    def test_a_fresh_install_through_head_lands_without_the_check(self, migration_db):
+        """A brand-new laboratory and an upgraded one must end identically —
+        the regression must not survive on fresh installs."""
+        _alembic("head")
+        assert _current_revision(migration_db) == HEAD_REVISION
+        assert self.CHECK_NAME not in self._check_constraints(migration_db)
+
+    # -- what the drop permits, and what it must not loosen -------------
+
+    def test_a_v2_row_with_null_provenance_is_rejected_at_v1_3_0(self, migration_db):
+        """The regression itself, at the layer that enforced it."""
+        import sqlalchemy.exc
+
+        _alembic(RELEASE_REVISION)
+        with pytest.raises(sqlalchemy.exc.IntegrityError) as exc_info:
+            self._insert_v2_report_version(migration_db, template_version_id=None)
+        assert self.CHECK_NAME in str(exc_info.value)
+
+    def test_a_v2_row_with_null_provenance_is_accepted_at_v1_3_1(self, migration_db):
+        """The fix, at the same layer. This is the row a Céluma 1.3.1 V2 report
+        created from a live template legitimately produces."""
+        _alembic(HOTFIX_REVISION)
+
+        version_id = self._insert_v2_report_version(
+            migration_db, template_version_id=None
+        )
+
+        with migration_db.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT schema_version, template_version_id FROM report_version "
+                    "WHERE id = :id"
+                ),
+                {"id": version_id},
+            ).one()
+        assert row[0] == 2
+        assert row[1] is None
+
+    def test_the_column_foreign_key_and_index_all_survive(self, migration_db):
+        """§2 drops a CHECK, not the provenance mechanism."""
+        _alembic("head")
+        with migration_db.connect() as conn:
+            column = conn.execute(
+                text(
+                    "SELECT is_nullable FROM information_schema.columns "
+                    "WHERE table_name = 'report_version' "
+                    "AND column_name = 'template_version_id'"
+                )
+            ).scalar_one()
+            fk = conn.execute(
+                text(
+                    "SELECT 1 FROM pg_constraint WHERE conname = "
+                    "'report_version_template_version_id_fkey'"
+                )
+            ).scalar()
+            index = conn.execute(
+                text(
+                    "SELECT 1 FROM pg_indexes WHERE indexname = "
+                    "'ix_report_version_template_version_id'"
+                )
+            ).scalar()
+        assert column == "YES"
+        assert fk == 1
+        assert index == 1
+
+    def test_referential_integrity_is_unchanged(self, migration_db):
+        """A `template_version_id` may now be absent; it may still never be
+        invented. The foreign key is what guarantees that, and it stands."""
+        import sqlalchemy.exc
+
+        _alembic("head")
+        with pytest.raises(sqlalchemy.exc.IntegrityError):
+            self._insert_v2_report_version(
+                migration_db, template_version_id=uuid.uuid4()
+            )
+
+    def test_every_other_constraint_on_the_table_is_untouched(self, migration_db):
+        """The blast radius, stated as a set difference: exactly one CHECK
+        disappears between `v1_3_0` and head, and nothing else on the table
+        moves."""
+        _alembic(RELEASE_REVISION)
+        before = self._check_constraints(migration_db)
+
+        _alembic("head")
+        after = self._check_constraints(migration_db)
+
+        assert before - after == {self.CHECK_NAME}
+        assert after - before == set()
+        assert "ck_report_version_pdf_ready_requires_artifact" in after
+        assert "ck_report_version_pdf_generation_status_values" in after
+
+    def test_no_other_table_changes_across_the_hotfix(self, migration_db):
+        """The whole schema, not just `report_version`: §1 is DML and §2 is one
+        DROP CONSTRAINT, so the only difference between `v1_3_0` and head is
+        that CHECK."""
+        _alembic(RELEASE_REVISION)
+        before = _capture_schema(_MIGRATION_TEST_DB)
+
+        _alembic("head")
+        after = _capture_schema(_MIGRATION_TEST_DB)
+
+        differences = _diff_schemas(before, after)
+        assert len(differences) == 1, differences
+        assert self.CHECK_NAME in differences[0]
+
+    # -- historical provenance is preserved -----------------------------
+
+    def test_the_upgrade_performs_no_backfill_or_rewrite(self, migration_db):
+        """A pre-1.3.1 V2 row keeps the exact `template_version_id` it had.
+        Nothing is cleared to "normalise" rows to the new shape."""
+        _alembic(RELEASE_REVISION)
+        template_version_id = self._insert_template_version(migration_db)
+        version_id = self._insert_v2_report_version(
+            migration_db, template_version_id=template_version_id
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        with migration_db.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT schema_version, template_version_id FROM report_version "
+                    "WHERE id = :id"
+                ),
+                {"id": version_id},
+            ).one()
+        assert row[0] == 2
+        assert row[1] == template_version_id
+
+    def test_legacy_rows_are_untouched_in_both_directions(self, migration_db):
+        """A legacy row (`schema_version IS NULL`) was always exempt from the
+        CHECK and is unaffected by dropping it."""
+        _alembic(RELEASE_REVISION)
+        version_id = self._insert_v2_report_version(
+            migration_db, template_version_id=None, schema_version=None
+        )
+
+        _alembic(HOTFIX_REVISION)
+        _alembic(RELEASE_REVISION, command="downgrade")
+
+        with migration_db.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT schema_version, template_version_id FROM report_version "
+                    "WHERE id = :id"
+                ),
+                {"id": version_id},
+            ).one()
+        assert row == (None, None)
+
+    # -- idempotence ----------------------------------------------------
+
+    def test_the_upgrade_is_idempotent(self, migration_db):
+        """Production safety, matching §1: the DROP is `IF EXISTS`, so a
+        re-run against an already-upgraded database is a no-op."""
+        _alembic("head")
+        _alembic(RELEASE_REVISION, command="downgrade")
+        _alembic("head")
+
+        assert _current_revision(migration_db) == HEAD_REVISION
+        assert self.CHECK_NAME not in self._check_constraints(migration_db)
+
+    def test_downgrade_restores_the_check_on_a_compliant_database(self, migration_db):
+        """The ordinary rollback: no row violates the old CHECK, so the
+        downgrade restores it and the database is genuinely back at `v1_3_0`."""
+        _alembic("head")
+        template_version_id = self._insert_template_version(migration_db)
+        self._insert_v2_report_version(
+            migration_db, template_version_id=template_version_id
+        )
+
+        _alembic(RELEASE_REVISION, command="downgrade")
+
+        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert self.CHECK_NAME in self._check_constraints(migration_db)
+
+    def test_downgrade_then_re_upgrade_is_stable(self, migration_db):
+        _alembic("head")
+        _alembic(RELEASE_REVISION, command="downgrade")
+        _alembic("head")
+        assert self.CHECK_NAME not in self._check_constraints(migration_db)
+
+
+class TestTheDowngradePreconditionRefusesRatherThanFalsifying:
+    """The rollback limitation Block C deliberately accepted.
+
+    After §2, a V2 `report_version` may honestly hold
+    `template_version_id = NULL`. Restoring the `v1_3_0` CHECK over such a row
+    is impossible without either fabricating provenance (binding it to
+    whichever version happens to be ACTIVE) or destroying a clinical record
+    (deleting the report, or clearing `schema_version` and demoting a real V2
+    report to legacy, which would render it through the wrong renderer).
+
+    So the downgrade **refuses, before mutating anything**, and says which rows
+    are in the way. A downgrade is allowed to require operational preparation;
+    it is not allowed to silently falsify provenance.
+    """
+
+    CHECK_NAME = TestReportsV2TemplateVersionConstraint.CHECK_NAME
+    _insert_v2_report_version = staticmethod(
+        TestReportsV2TemplateVersionConstraint._insert_v2_report_version
+    )
+    _insert_template_version = staticmethod(
+        TestReportsV2TemplateVersionConstraint._insert_template_version
+    )
+    _check_constraints = staticmethod(
+        TestReportsV2TemplateVersionConstraint._check_constraints
+    )
+
+    @staticmethod
+    def _attempt_downgrade() -> subprocess.CompletedProcess:
+        url = make_url(settings.database_url).set(database=_MIGRATION_TEST_DB)
+        return subprocess.run(
+            ["alembic", "downgrade", RELEASE_REVISION],
+            cwd=str(BACKEND_ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "DATABASE_URL": url.render_as_string(hide_password=False),
+            },
+        )
+
+    @staticmethod
+    def _permissions_of(engine, role_code: str) -> set[str]:
+        return TestReviewerOnlyApprovalMigration._permissions_of(engine, role_code)
+
+    def test_the_downgrade_fails(self, migration_db):
+        _alembic("head")
+        self._insert_v2_report_version(migration_db, template_version_id=None)
+
+        result = self._attempt_downgrade()
+
+        assert result.returncode != 0
+
+    def test_the_failure_names_the_constraint_and_the_offending_rows(
+        self, migration_db
+    ):
+        """An operator has to be able to act on this without reading the
+        migration source."""
+        _alembic("head")
+        version_id = self._insert_v2_report_version(
+            migration_db, template_version_id=None
+        )
+
+        output = self._attempt_downgrade().stderr + self._attempt_downgrade().stdout
+
+        assert self.CHECK_NAME in output
+        assert str(version_id) in output
+        assert "Cannot downgrade v1_3_1 -> v1_3_0" in output
+
+    def test_nothing_is_mutated_by_the_refusal(self, migration_db):
+        """The precondition is checked before either half of the downgrade
+        runs, so a refusal leaves the database exactly at head: the CHECK is
+        still absent, §1's RBAC state is still the 1.3.1 one, and the report
+        row is untouched."""
+        _alembic("head")
+        version_id = self._insert_v2_report_version(
+            migration_db, template_version_id=None
+        )
+
+        self._attempt_downgrade()
+
+        assert _current_revision(migration_db) == HEAD_REVISION
+        assert self.CHECK_NAME not in self._check_constraints(migration_db)
+        assert "reports:approve" not in self._permissions_of(
+            migration_db, "pathologist"
+        )
+        with migration_db.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT schema_version, template_version_id FROM report_version "
+                    "WHERE id = :id"
+                ),
+                {"id": version_id},
+            ).one()
+        assert row == (2, None)
+
+    def test_the_downgrade_succeeds_once_the_precondition_is_met(self, migration_db):
+        """The documented remedy: give the row real provenance, or remove it.
+        Here the operator supplies a genuine `template_version_id`."""
+        _alembic("head")
+        version_id = self._insert_v2_report_version(
+            migration_db, template_version_id=None
+        )
+        template_version_id = self._insert_template_version(migration_db)
+        with migration_db.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE report_version SET template_version_id = :tv "
+                    "WHERE id = :id"
+                ),
+                {"tv": template_version_id, "id": version_id},
+            )
+
+        result = self._attempt_downgrade()
+
+        assert result.returncode == 0, result.stderr
+        assert _current_revision(migration_db) == RELEASE_REVISION
+        assert self.CHECK_NAME in self._check_constraints(migration_db)
+        # And §1 rolled back in the same run.
+        assert "reports:approve" in self._permissions_of(migration_db, "pathologist")
+
+    def test_an_empty_database_downgrades_cleanly(self, migration_db):
+        """The common case — a rollback performed before any 1.3.1 V2 report
+        exists — is not affected by the precondition at all."""
+        _alembic("head")
+
+        result = self._attempt_downgrade()
+
+        assert result.returncode == 0, result.stderr
+        assert self.CHECK_NAME in self._check_constraints(migration_db)
+
+
+class TestTheConsolidatedHotfixRevision:
+    """`v1_3_1` carries both 1.3.1 corrections. These assert the consolidation
+    itself — that one revision does both jobs, that the halves are
+    independent, and that the release chain is unchanged in substance."""
+
+    def test_there_is_exactly_one_revision_after_the_frozen_release(self):
+        """The reason Block C amended `v1_3_1` instead of adding `v1_3_2`."""
+        script = _script_directory()
+        after_release = [
+            revision.revision
+            for revision in script.walk_revisions()
+            if revision.down_revision == RELEASE_REVISION
+        ]
+        assert after_release == [HOTFIX_REVISION]
+        assert len(script.get_heads()) == 1
+        assert script.get_current_head() == HOTFIX_REVISION
+
+    def test_the_revision_still_sits_directly_on_the_frozen_release(self):
+        revision = _script_directory().get_revision(HOTFIX_REVISION)
+        assert revision.down_revision == RELEASE_REVISION
+
+    def test_the_frozen_release_migration_was_not_edited(self):
+        """Consolidation reached into `v1_3_1`, never into `v1_3_0`. The
+        obsolete CHECK is still *created* by the release migration and only
+        *dropped* by the hotfix, which is what keeps a 1.3.0 database
+        reproducible."""
+        source = RELEASE_MIGRATION_PATH.read_text(encoding="utf-8")
+        assert (
+            'op.create_check_constraint(\n        '
+            '"ck_report_version_v2_requires_template_version",' in source
+        ), "v1_3_0 must still CREATE the constraint that v1_3_1 drops"
+        hotfix_source = (
+            VERSIONS_DIR / "v1_3_1_reviewer_only_approval.py"
+        ).read_text(encoding="utf-8")
+        assert "DROP CONSTRAINT IF EXISTS" in hotfix_source, (
+            "the drop belongs to the hotfix revision, not the frozen release"
+        )
+
+    def test_one_upgrade_applies_both_halves(self, migration_db):
+        """A single `alembic upgrade head` from `v1_3_0` lands the complete
+        final 1.3.1 contract — RBAC data and schema together."""
+        _alembic(RELEASE_REVISION)
+        _alembic(HOTFIX_REVISION)
+
+        assert _current_revision(migration_db) == HOTFIX_REVISION
+        assert "reports:approve" not in (
+            TestReviewerOnlyApprovalMigration._permissions_of(
+                migration_db, "pathologist"
+            )
+        )
+        assert (
+            TestReportsV2TemplateVersionConstraint.CHECK_NAME
+            not in TestReportsV2TemplateVersionConstraint._check_constraints(
+                migration_db
+            )
+        )
+
+    def test_the_halves_touch_disjoint_objects(self, migration_db):
+        """§1 writes `role_permission` and no schema; §2 changes one CHECK and
+        no data. Neither can mask a failure of the other."""
+        _alembic(RELEASE_REVISION)
+        with migration_db.connect() as conn:
+            grants_before = conn.execute(
+                text("SELECT count(*) FROM role_permission")
+            ).scalar_one()
+
+        _alembic(HOTFIX_REVISION)
+
+        with migration_db.connect() as conn:
+            grants_after = conn.execute(
+                text("SELECT count(*) FROM role_permission")
+            ).scalar_one()
+        # Exactly one grant removed by §1, and §2 removed none.
+        assert grants_before - grants_after == 1
+
+    def test_the_revision_adds_and_removes_no_table(self, migration_db):
+        """1.3.1 is a hotfix: no new domain objects in either half."""
+        _alembic(RELEASE_REVISION)
+        before = set(inspect(migration_db).get_table_names())
+
+        _alembic(HOTFIX_REVISION)
+
+        assert set(inspect(migration_db).get_table_names()) == before

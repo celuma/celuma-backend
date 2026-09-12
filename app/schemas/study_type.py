@@ -119,7 +119,7 @@ class StudyTypeReportDefaultsResponse(BaseModel):
     report-editor-letterhead-selection-contract.md, "Initial V2 preview").
 
     All fields are None when nothing is resolvable (e.g. no default
-    template, no ACTIVE version, no letterhead) — the caller decides how to
+    template, no letterhead) — the caller decides how to
     react (mirrors today's `v2ConfigBlocked` behavior), this endpoint never
     raises for an unconfigured tenant.
 
@@ -134,6 +134,10 @@ class StudyTypeReportDefaultsResponse(BaseModel):
     Legacy. See deterministic-letterhead-resolution-contract.md.
     """
     template_id: Optional[str] = None
+    # Céluma 1.3.1 Block C (CEL-131-05): diagnostic/provenance only. Which
+    # `ReportTemplateVersion` is ACTIVE, if any — NOT a precondition for
+    # authoring a V2 report, and never again a blocking reason. The report
+    # editor must not read it; the template-administration screens may.
     active_template_version_id: Optional[str] = None
     letterhead_version_id: Optional[str] = None
     letterhead_name: Optional[str] = None
@@ -145,8 +149,14 @@ class StudyTypeReportDefaultsResponse(BaseModel):
     letterhead_resolved_resources: Optional[Dict[str, Any]] = None
     # None = V2 puede proceder. Si no:
     #   "NO_TEMPLATE"            — the study type has no template.
-    #   "NO_ACTIVE_TEMPLATE_VERSION" — the template has no active version.
     #   "NO_LETTERHEAD"          — no resolvable default letterhead.
     #   "LETTERHEAD_MISCONFIGURED" — datos inconsistentes; ver el mensaje.
+    #
+    # Céluma 1.3.1 Block C removed "NO_ACTIVE_TEMPLATE_VERSION": it blocked a
+    # tenant whose V2 configuration was in fact complete. A V2 report needs a
+    # clinical template and a resolvable letterhead; the administrative
+    # template-version lifecycle is not part of authoring one. The string is
+    # deliberately NOT reused for anything else — an old client that still
+    # recognises it will simply never see it again.
     v2_blocked_reason: Optional[str] = None
     v2_blocked_detail: Optional[str] = None

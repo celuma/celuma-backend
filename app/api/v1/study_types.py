@@ -373,10 +373,21 @@ def get_study_type_report_defaults(
     if blocked_reason is None:
         if template_id is None:
             blocked_reason = "NO_TEMPLATE"
-        elif active_template_version_id is None:
-            blocked_reason = "NO_ACTIVE_TEMPLATE_VERSION"
         elif resolved is None:
             blocked_reason = "NO_LETTERHEAD"
+    # Céluma 1.3.1 Block C (CEL-131-05): `NO_ACTIVE_TEMPLATE_VERSION` used to
+    # sit between these two and was the production regression. A V2 report
+    # needs a clinical template and a resolvable letterhead, and nothing else
+    # — its structure is frozen into its own `rendering_snapshot` at creation
+    # (`create_report`, `template_id` branch), so whether an administrative
+    # `ReportTemplateVersion` happens to be ACTIVE is irrelevant to authoring.
+    # A laboratory that saved its template before configuring its letterhead
+    # had no version row, could never get one without re-saving the template,
+    # and was blocked out of Reports V2 entirely.
+    #
+    # `active_template_version_id` below is still returned, as diagnostic and
+    # provenance information for the template-administration screens. It is
+    # NOT a precondition and the report editor must not treat it as one.
 
     resolved_resources = None
     if resolved is not None:

@@ -54,6 +54,7 @@ from app.services.notification_integrations import (
     notify_report_submitted,
 )
 from app.services.report_template_autoversion import snapshot_and_activate_template_version
+from app.services.report_template_hash import hash_clinical_template_block
 from app.services.usage import UsageService
 from app.services.report_authorization import (
     ReportAlreadySignedError,
@@ -432,38 +433,137 @@ def create_report(
     # writing anything to the database, so an invalid V2 request never
     # creates a partial Report row.
     # ------------------------------------------------------------------
+    # Céluma 1.3.1 Block C (CEL-131-05) — TWO selectors, one V2 path.
+    #
+    # `template_version_id` is the ORIGINAL selector: "build this report from
+    # exactly this historical published version". `template_id` is the
+    # CURRENT one: "build it from this clinical template as it stands now".
+    # The second exists because requiring the first made an ACTIVE
+    # `ReportTemplateVersion` a runtime prerequisite for authoring any V2
+    # report, and the final 1.3 architecture does not need one: a V2 report
+    # is reconstructed solely from the `rendering_snapshot` frozen into its
+    # own JSON body (see `_carry_forward_v2_metadata`), the clinical
+    # structure comes from `ReportTemplate.template_json`, and presentation
+    # comes from `resolve_effective_letterhead_version`.
+    #
+    # Both converge on the same freeze-and-validate code below, so there is
+    # ONE V2 creation path and no duplicated bootstrap. They differ in
+    # exactly two things: where `snapshot.template` is read from, and whether
+    # a `template_version_id` is recorded as provenance.
+    #
+    # `template_version_id` wins if both are sent: an explicit historical
+    # selection is more specific than a template-level one.
     template_version: ReportTemplateVersion | None = None
     validated_snapshot: ReportRenderingSnapshotV2 | None = None
     resolved_letterhead_version: ReportLetterheadVersion | None = None
-    if report_data.template_version_id is not None:
+    owning_template: ReportTemplate | None = None
+    clinical_structure: dict | None = None
+    if report_data.template_version_id is not None or report_data.template_id is not None:
         if not tenant.reports_v2_enabled:
             raise HTTPException(403, "V2 report creation is not enabled for this tenant")
 
-        template_version = session.get(ReportTemplateVersion, report_data.template_version_id)
-        if not template_version or str(template_version.tenant_id) != ctx.tenant_id:
-            raise HTTPException(404, "Template version not found")
-        if template_version.status == ReportTemplateVersionStatus.ARCHIVED:
-            raise HTTPException(
-                409, "Cannot create a report from an archived template version"
+        if report_data.template_version_id is not None:
+            template_version = session.get(
+                ReportTemplateVersion, report_data.template_version_id
             )
+            if not template_version or str(template_version.tenant_id) != ctx.tenant_id:
+                raise HTTPException(404, "Template version not found")
+            if template_version.status == ReportTemplateVersionStatus.ARCHIVED:
+                raise HTTPException(
+                    409, "Cannot create a report from an archived template version"
+                )
+            try:
+                stored_snapshot = ReportRenderingSnapshotV2.model_validate(
+                    template_version.configuration
+                )
+            except PydanticValidationError as exc:
+                logger.error(
+                    "Stored template version configuration failed re-validation",
+                    extra={
+                        "event": "report.create_v2_invalid_template_version_configuration",
+                        "template_version_id": str(template_version.id),
+                        "error": str(exc),
+                    },
+                )
+                raise HTTPException(
+                    500, "Template version configuration is invalid"
+                ) from exc
+            clinical_structure = stored_snapshot.template
+            owning_template = session.get(
+                ReportTemplate, template_version.report_template_id
+            )
+        else:
+            # Block C: the live clinical template IS the creation-time source
+            # of truth. No ACTIVE version is looked up, and none is created —
+            # the structure is frozen into this report's own snapshot below,
+            # which is what every later read and render uses.
+            owning_template = session.get(ReportTemplate, report_data.template_id)
+            if not owning_template or str(owning_template.tenant_id) != ctx.tenant_id:
+                raise HTTPException(404, "Template not found")
+            if not owning_template.is_active:
+                raise HTTPException(
+                    409,
+                    "Esta plantilla de reporte está desactivada, así que no "
+                    "puede usarse para crear reportes nuevos.",
+                )
+            # --------------------------------------------------------------
+            # Céluma 1.3.1 Block C, finding C-8 — optimistic concurrency.
+            #
+            # `template_json` is a MUTABLE column, and this is a second read of
+            # it: the editor read it at bootstrap and the author wrote clinical
+            # content against what they saw. If an administrator saved the
+            # template in between, freezing what is here now would produce a
+            # report whose content is keyed by the author's structure and whose
+            # `rendering_snapshot.template` describes a different one — and the
+            # V2 renderer resolves sections through the SNAPSHOT, so the
+            # author's text would be silently absent from the report and from
+            # the official PDF.
+            #
+            # The token is compared, never trusted as data: a mismatch refuses
+            # the request rather than substituting either structure. The
+            # author's work is still in their editor; a newer template is not a
+            # reason to rewrite their report without telling them.
+            #
+            # Placed here deliberately — after the tenant-scoped 404 and the
+            # lifecycle 409, before the letterhead resolution, the snapshot
+            # build, and every durable side effect (the `Report` row, the
+            # `ReportVersion`, the S3 object, storage accounting, the order
+            # event, the status transition). A conflict therefore leaves
+            # nothing behind. It is also not an information oracle: a caller
+            # who cannot read this template already got 404 above, so a 409
+            # only ever reaches someone authorized for this exact template.
+            #
+            # Schema validation guarantees the token is present for this
+            # selector (`ReportCreate._require_template_hash_for_the_template_id_selector`),
+            # so there is no "absent hash" branch to fall through here.
+            # See docs/celuma-1.3.1/block-c/template-mutation-race.md.
+            # --------------------------------------------------------------
+            current_template_hash = hash_clinical_template_block(
+                owning_template.template_json
+            )
+            if report_data.template_hash != current_template_hash:
+                logger.info(
+                    "V2 report creation refused: the clinical template changed "
+                    "while the report was being authored",
+                    extra={
+                        "event": "report.create_v2_stale_template",
+                        "template_id": str(owning_template.id),
+                        "tenant_id": ctx.tenant_id,
+                    },
+                )
+                raise HTTPException(
+                    409,
+                    "La plantilla de este reporte cambió mientras lo "
+                    "editabas. Vuelve a cargar el reporte para trabajar con la "
+                    "plantilla actualizada; de lo contrario quedaría guardado "
+                    "con una estructura distinta a la que usaste.",
+                )
+            clinical_structure = owning_template.template_json
+
         if report_data.report is None:
             raise HTTPException(
                 400, "V2 reports require report content to build the rendering snapshot"
             )
-        try:
-            validated_snapshot = ReportRenderingSnapshotV2.model_validate(
-                template_version.configuration
-            )
-        except PydanticValidationError as exc:
-            logger.error(
-                "Stored template version configuration failed re-validation",
-                extra={
-                    "event": "report.create_v2_invalid_template_version_configuration",
-                    "template_version_id": str(template_version.id),
-                    "error": str(exc),
-                },
-            )
-            raise HTTPException(500, "Template version configuration is invalid") from exc
 
         # ------------------------------------------------------------------
         # Post-Phase-2 remediation, R7; deterministic resolution + explicit
@@ -484,7 +584,7 @@ def create_report(
             resolved_letterhead = resolve_effective_letterhead_version(
                 session,
                 ctx.tenant_id,
-                template=session.get(ReportTemplate, template_version.report_template_id),
+                template=owning_template,
                 letterhead_version_id=report_data.letterhead_version_id,
             )
         except LetterheadNotFoundError as exc:
@@ -501,11 +601,34 @@ def create_report(
             )
 
         resolved_letterhead_version = resolved_letterhead.version
-        validated_snapshot = ReportRenderingSnapshotV2(
-            schema_version=2,
-            template=validated_snapshot.template,
-            presentation=resolved_letterhead.presentation,
-        )
+        # The definitive snapshot, built and validated server-side. A
+        # structure that cannot produce a valid snapshot fails HERE, naming
+        # the real missing invariant — it never degrades to legacy and never
+        # substitutes some other template's version.
+        try:
+            validated_snapshot = ReportRenderingSnapshotV2(
+                schema_version=2,
+                template=clinical_structure,
+                presentation=resolved_letterhead.presentation,
+            )
+        except PydanticValidationError as exc:
+            logger.error(
+                "V2 report creation failed: the resolved clinical structure is not a "
+                "valid rendering snapshot",
+                extra={
+                    "event": "report.create_v2_invalid_clinical_structure",
+                    "template_id": (
+                        str(owning_template.id) if owning_template is not None else None
+                    ),
+                    "error": str(exc),
+                },
+            )
+            raise HTTPException(
+                409,
+                "La estructura clínica de esta plantilla no es válida, así que "
+                "no puede congelarse en un reporte. Revisa la plantilla en "
+                "Plantillas de Reporte.",
+            ) from None
         logger.info(
             "V2 report letterhead resolved",
             extra={
@@ -513,6 +636,12 @@ def create_report(
                 "letterhead_id": resolved_letterhead.letterhead_id,
                 "letterhead_version_id": resolved_letterhead.letterhead_version_id,
                 "resolution_source": resolved_letterhead.source.value,
+                # Block C: NULL whenever the report was built from the live
+                # template. Recorded as-is; never inferred from whichever
+                # version happens to be ACTIVE.
+                "template_version_id": (
+                    str(template_version.id) if template_version is not None else None
+                ),
             },
         )
 
@@ -579,7 +708,11 @@ def create_report(
     # If a JSON report body is provided, upload to S3 and create initial version (v1)
     if report_data.report is not None:
         body = dict(report_data.report)
-        is_v2 = template_version is not None
+        # Céluma 1.3.1 Block C: the V2 marker is the server-built SNAPSHOT,
+        # not the presence of a `ReportTemplateVersion`. A report built from
+        # the live template is fully V2 and carries no version row; keying
+        # this off `template_version` would have silently made it legacy.
+        is_v2 = validated_snapshot is not None
         if is_v2:
             # Backend-authoritative: the client's `report_data.report` never
             # carries its own snapshot — only the validated, server-resolved
@@ -650,7 +783,14 @@ def create_report(
                 authored_by=report.created_by,
                 is_current=True,
                 schema_version=(2 if is_v2 else None),
-                template_version_id=(template_version.id if is_v2 else None),
+                # Block C: real provenance or nothing. NULL when no template
+                # version was read — permitted since the consolidated `v1_3_1`
+                # dropped `ck_report_version_v2_requires_template_version`.
+                # Never back-filled from the currently ACTIVE version: that
+                # would assert the report came from a snapshot it never saw.
+                template_version_id=(
+                    template_version.id if is_v2 and template_version else None
+                ),
                 generated_by_renderer_version=(
                     f"backend-snapshot-builder/{SNAPSHOT_BUILDER_VERSION}" if is_v2 else None
                 ),
@@ -1252,6 +1392,11 @@ def get_template(
         name=template.name,
         description=template.description,
         template_json=template.template_json,
+        # Céluma 1.3.1 Block C (C-8): computed from the very object serialized
+        # on the line above, so the token and the structure it describes cannot
+        # disagree. The editor echoes it back on create; `create_report` refuses
+        # with 409 if the template has moved since.
+        template_hash=hash_clinical_template_block(template.template_json),
         created_by=str(template.created_by) if template.created_by else None,
         is_active=template.is_active,
         created_at=template.created_at,
