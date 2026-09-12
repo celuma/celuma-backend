@@ -7,12 +7,16 @@ Create Date: 2026-09-11
 The single database revision for the Céluma 1.3.1 hotfix release. See
 docs/celuma-1.3.1/CELUMA-1.3.1-HOTFIX-PLAN.md.
 
-It carries TWO independent corrections, consolidated deliberately:
+It carries THREE independent corrections, consolidated deliberately:
 
   1. **Block A / CEL-131-01** — revoke `reports:approve` from `pathologist`
      (DML). §1 below.
   2. **Block C / CEL-131-05** — drop
      `ck_report_version_v2_requires_template_version` (DDL). §2 below.
+  3. **Block D / CEL-131-06 + CEL-131-04** — add `tenant.default_reviewer_id`
+     (DDL) and bring the three official system metadata base fields into
+     every existing `report_template.template_json`, present and visible
+     (DML). §3 below.
 
 ### Why one revision rather than two
 
@@ -124,11 +128,115 @@ migration may decide on an operator's behalf.
 A downgrade is therefore allowed to require operational preparation. It is
 not allowed to falsify provenance. See
 docs/celuma-1.3.1/block-c/block-c-summary.md for the rollback runbook.
+
+===========================================================================
+§3 — Block D (CEL-131-06 tenant default reviewer; CEL-131-04 report metadata)
+===========================================================================
+
+Two independent additions, both purely additive — no existing row, column or
+constraint from §1/§2 is touched.
+
+### §3a — `tenant.default_reviewer_id`
+
+A nullable FK to `app_user.id`, `ON DELETE SET NULL`, `use_alter=True` for
+the same reason `tenant.logo_storage_id` uses it: `tenant` and `app_user`
+reference each other (`app_user.tenant_id -> tenant.id`), so the FK is
+emitted separately rather than ordering the cycle. It is a CONFIGURATION
+reference only — see
+docs/celuma-1.3.1/block-d/default-reviewer-contract.md — and grants no role,
+permission or capability by itself.
+
+Downgrade: drops the FK and the column. This is a configuration pointer, not
+a clinical record, so an ordinary drop (no precondition) is the correct and
+sufficient downgrade — unlike §2, there is no clinical fact that could be
+destroyed.
+
+### §3b — the three official system metadata base fields
+
+CEL-131-04 establishes three system base fields in the report's existing,
+entirely frontend-defined `template_json.base` architecture (there is no
+backend schema for it — `ReportTemplateCreate.template_json` is
+`Dict[str, Any]`):
+
+    requesting_physician    pre-existing key, reused rather than duplicated
+    reception_date          new in 1.3.1
+    delivery_date           new in 1.3.1
+
+All three are **visible by default**, everywhere. That is the release
+owner's decision: these are official report content, not opt-in extras.
+New templates get them from `celuma-frontend/src/models/report.ts`
+`DEFAULT_BASE_FIELDS`; existing templates get them from this migration.
+
+Every EXISTING `report_template` row, across every tenant, ends this
+migration with all three keys present in `base`, `is_visible: true`, and
+listed in `base_order`. Three cases, per key per row:
+
+  * **absent** -> created from the canonical definition (visible, default
+    label, empty value);
+  * **present but not visible** -> ONLY `is_visible` is set to `true`; a
+    custom label, and every other key the document carries, is preserved
+    verbatim;
+  * **present and visible** -> untouched.
+
+Everything else on the row — every unrelated base field, every custom base
+field, every section, every setting — is preserved verbatim. `base_order`
+keeps the tenant's existing order; a key is appended only when it is not
+already listed, so no key is ever duplicated and no existing position moves.
+Re-running the migration is a no-op, because all three conditions above are
+already satisfied after the first run.
+
+**Why an existing hidden visibility is overridden rather than preserved.**
+A template carrying `requesting_physician` with `is_visible: false` may have
+got that value two ways: from the pre-1.3.1 framework default (the frontend
+merged the field in hidden, via `LEGACY_PREDEFINED_BASE_HIDDEN`), or from an
+administrator deliberately hiding it. Nothing in the document records which
+— there is no provenance marker to read, and the two states are
+byte-identical. The 1.3.1 product contract resolves the ambiguity in favour
+of visibility: an official system field the release owner has decided every
+report shows is made visible on upgrade, and a laboratory that wants it
+hidden can turn it off again in *Plantillas de Reporte* afterwards. This is
+a deliberate, documented override of a state that cannot be attributed, not
+an accident.
+
+A row is skipped entirely (left byte-for-byte untouched) if `template_json`
+is not a JSON object or its `base` is not a JSON object — the narrowest safe
+behaviour for a column with no backend-enforced shape, rather than writing a
+normalizer that guesses at a malformed document's intent.
+
+This targets ONLY the live `ReportTemplate.template_json` used to create
+FUTURE reports — never `ReportTemplateVersion.configuration` (administrative
+history, immutable by Block C's own contract) and never any
+`ReportVersion`'s already-persisted JSON body (existing reports, signed or
+not, are not rewritten; see block-d/report-metadata-contract.md "Existing
+report behaviour").
+
+### §3b downgrade
+
+Only the two keys this revision CREATED — `reception_date` and
+`delivery_date` — are removable, and only from a row where the key is still
+byte-identical to what the upgrade wrote (visible, default label,
+`value: ""`), i.e. only where nothing has touched it since. A row where an
+administrator has since changed the field's visibility, label or position is
+left exactly as it is: the downgrade cannot distinguish "deliberately
+customized" from "untouched", and unlike §2 this is template CONFIGURATION,
+not a clinical record, so the fail-safe is a non-destructive skip rather
+than refusing the whole migration.
+
+`requesting_physician` is **never removed, and its visibility is never
+restored.** The field predates 1.3.1, so deleting it would destroy
+configuration the tenant had before this release; and for the same
+provenance reason the upgrade documents above, the downgrade cannot know
+whether a given template's pre-upgrade state was hidden-by-framework or
+visible-by-choice. It therefore leaves the field visible. A rollback that
+must restore a specific laboratory's hidden physician field does so by
+editing the template, which is a one-click operation in the UI.
 """
+import json
 from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision: str = "v1_3_1"
@@ -146,6 +254,142 @@ V2_TEMPLATE_VERSION_CHECK = "ck_report_version_v2_requires_template_version"
 V2_TEMPLATE_VERSION_CHECK_SQL = (
     "schema_version IS DISTINCT FROM 2 OR template_version_id IS NOT NULL"
 )
+
+# §3a
+DEFAULT_REVIEWER_FK = "fk_tenant_default_reviewer_id_app_user"
+
+# §3b — the three official system metadata fields, in the order the frontend's
+# DEFAULT_BASE_FIELDS declares them (report.ts). All three are **visible**:
+# the release owner's decision is that these are official report content, not
+# opt-in extras, in new templates and existing ones alike.
+#
+# `requesting_physician` is in this list even though it predates 1.3.1: the
+# migration does not *create* the concept, but it does guarantee the key
+# exists and is visible, because older templates may either lack it entirely
+# or carry it in the pre-1.3.1 framework default of `is_visible: false`.
+SYSTEM_METADATA_FIELD_ORDER = [
+    "requesting_physician",
+    "reception_date",
+    "delivery_date",
+]
+SYSTEM_METADATA_FIELDS = {
+    "requesting_physician": {
+        "is_visible": True,
+        "label": "Médico solicitante",
+        "value": "",
+    },
+    "reception_date": {
+        "is_visible": True,
+        "label": "Fecha de recepción",
+        "value": "",
+    },
+    "delivery_date": {
+        "is_visible": True,
+        "label": "Fecha de entrega de resultados",
+        "value": "",
+    },
+}
+
+#: Keys created by this revision, i.e. the ones a downgrade may remove. The
+#: physician field is deliberately absent: it predates 1.3.1, so removing it
+#: on a rollback would delete a field the tenant had before this release.
+DOWNGRADE_REMOVABLE_FIELDS = ["reception_date", "delivery_date"]
+
+
+def _load_template_documents(bind):
+    """Every `report_template` row, parsed, skipping any document this
+    migration must not touch. Yields `(row_id, doc, base, base_order)`.
+
+    A row is skipped when `template_json` is not a JSON object or its `base`
+    is not a JSON object — the narrowest safe behaviour for a column with no
+    backend-enforced shape (`ReportTemplateCreate.template_json` is
+    `Dict[str, Any]`), rather than guessing at a malformed document's intent.
+    """
+    rows = bind.execute(
+        sa.text("SELECT id, template_json::text FROM public.report_template")
+    ).all()
+    for row_id, raw in rows:
+        if raw is None:
+            continue
+        try:
+            doc = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(doc, dict):
+            continue
+        base = doc.get("base")
+        if not isinstance(base, dict):
+            continue
+        base_order = doc.get("base_order")
+        if not isinstance(base_order, list):
+            base_order = list(base.keys())
+        yield row_id, doc, base, base_order
+
+
+def _write_template_document(bind, row_id, doc, base, base_order) -> None:
+    doc["base"] = base
+    doc["base_order"] = base_order
+    bind.execute(
+        sa.text(
+            "UPDATE public.report_template "
+            "SET template_json = CAST(:doc AS json) WHERE id = :id"
+        ),
+        {"doc": json.dumps(doc, ensure_ascii=False), "id": row_id},
+    )
+
+
+def _backfill_report_template_base_fields(bind) -> None:
+    """§3b upgrade: every existing `report_template.template_json` ends with
+    all three system metadata fields present, visible, and ordered. See the
+    module docstring §3b for the safety rules and for why an existing hidden
+    visibility is overridden rather than preserved."""
+    for row_id, doc, base, base_order in _load_template_documents(bind):
+        changed = False
+        for key in SYSTEM_METADATA_FIELD_ORDER:
+            existing = base.get(key)
+            if not isinstance(existing, dict):
+                # Absent (or stored as something that is not a field object):
+                # create it from the canonical definition.
+                base[key] = dict(SYSTEM_METADATA_FIELDS[key])
+                changed = True
+            elif existing.get("is_visible") is not True:
+                # Present but hidden (or missing the flag entirely). Only the
+                # visibility is touched — a custom label, and any other key the
+                # document carries, is preserved verbatim.
+                base[key] = {**existing, "is_visible": True}
+                changed = True
+            if key not in base_order:
+                base_order.append(key)
+                changed = True
+
+        if changed:
+            _write_template_document(bind, row_id, doc, base, base_order)
+
+
+def _revert_report_template_base_fields(bind) -> None:
+    """§3b downgrade: removes ONLY the two keys this revision created, and
+    only from a row where the key is still byte-identical to what the upgrade
+    wrote. A row an administrator has since customized is left exactly as it
+    is.
+
+    `requesting_physician` is never removed and its visibility is never
+    restored: the field predates 1.3.1, and the upgrade cannot record whether
+    a given template had it hidden by the old framework default or visible by
+    the tenant's own choice. Guessing either way would destroy a real
+    configuration, so the downgrade leaves it visible and says so — the same
+    principle §2's downgrade follows for provenance it cannot reconstruct.
+    """
+    for row_id, doc, base, base_order in _load_template_documents(bind):
+        changed = False
+        for key in DOWNGRADE_REMOVABLE_FIELDS:
+            if base.get(key) == SYSTEM_METADATA_FIELDS[key]:
+                del base[key]
+                changed = True
+                if key in base_order:
+                    base_order.remove(key)
+
+        if changed:
+            _write_template_document(bind, row_id, doc, base, base_order)
 
 
 def upgrade() -> None:
@@ -169,6 +413,23 @@ def upgrade() -> None:
         "ALTER TABLE public.report_version "
         f"DROP CONSTRAINT IF EXISTS {V2_TEMPLATE_VERSION_CHECK}"
     )
+
+    # -- §3a --------------------------------------------------------------
+    op.add_column(
+        "tenant",
+        sa.Column("default_reviewer_id", postgresql.UUID(as_uuid=True), nullable=True),
+    )
+    op.create_foreign_key(
+        DEFAULT_REVIEWER_FK,
+        "tenant",
+        "app_user",
+        ["default_reviewer_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
+
+    # -- §3b --------------------------------------------------------------
+    _backfill_report_template_base_fields(op.get_bind())
 
 
 def downgrade() -> None:
@@ -242,3 +503,14 @@ def downgrade() -> None:
         "report_version",
         V2_TEMPLATE_VERSION_CHECK_SQL,
     )
+
+    # -- §3b --------------------------------------------------------------
+    # No precondition: see the module docstring §3b downgrade. A customized
+    # row is left exactly as it is rather than refusing the whole migration.
+    _revert_report_template_base_fields(bind)
+
+    # -- §3a --------------------------------------------------------------
+    # A configuration pointer, not a clinical record — an ordinary drop is
+    # the correct and sufficient downgrade.
+    op.drop_constraint(DEFAULT_REVIEWER_FK, "tenant", type_="foreignkey")
+    op.drop_column("tenant", "default_reviewer_id")

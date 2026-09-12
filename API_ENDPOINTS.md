@@ -743,14 +743,17 @@ Headers: `Authorization: Bearer <token>`
 ```
 
 ### PATCH /api/v1/tenants/{tenant_id}
-**Update tenant details (Admin only)**
+**Update tenant details (requires `admin:manage_tenant`)**
 
 **Request Body:**
 ```json
 {
   "name": "Updated Laboratory Name",
   "legal_name": "Updated Legal Name Inc.",
-  "tax_id": "NEW123456789"
+  "tax_id": "NEW123456789",
+  "reports_v2_enabled": true,
+  "default_reviewer_id": "user-uuid",
+  "clear_default_reviewer": false
 }
 ```
 
@@ -760,14 +763,26 @@ Headers: `Authorization: Bearer <token>`
   "id": "tenant-uuid",
   "name": "Updated Laboratory Name",
   "legal_name": "Updated Legal Name Inc.",
-  "tax_id": "NEW123456789"
+  "tax_id": "NEW123456789",
+  "reports_v2_enabled": true,
+  "default_reviewer_id": "user-uuid",
+  "default_reviewer": { "id": "user-uuid", "full_name": "Dra. Revisora", "email": "rev@example.com" }
 }
 ```
 
 **Notes:**
 - All fields are optional; only provided fields are updated
-- Admin role required
+- `admin:manage_tenant` permission required
 - Can only update own tenant
+- **`default_reviewer_id` (Céluma 1.3.1, CEL-131-06):** the tenant-level
+  default reviewer — a fallback, never a role or permission grant. The
+  target user must exist, belong to this tenant, be active, and hold the
+  `reviewer` role, or this returns `400` (not found / wrong tenant) or `422`
+  (ineligible). `clear_default_reviewer: true` clears the setting and takes
+  precedence over `default_reviewer_id` in the same request; omitting both
+  leaves the current value untouched (`null` alone is indistinguishable from
+  "not submitted"). See
+  `docs/celuma-1.3.1/block-d/default-reviewer-contract.md`.
 
 ### POST /api/v1/tenants/{tenant_id}/logo
 **Upload tenant logo (Admin only)**

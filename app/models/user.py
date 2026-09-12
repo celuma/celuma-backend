@@ -28,7 +28,12 @@ class AppUser(BaseModel, TimestampMixin, TenantMixin, table=True):
     )
 
     # Basic relationships
-    tenant: "Tenant" = Relationship(back_populates="users")
+    # `foreign_keys` disambiguates from `Tenant.default_reviewer_id` — see
+    # the matching comment on `Tenant.users` in tenant.py.
+    tenant: "Tenant" = Relationship(
+        back_populates="users",
+        sa_relationship_kwargs={"foreign_keys": "AppUser.tenant_id"},
+    )
     branches: List["UserBranch"] = Relationship(back_populates="user")
     user_roles: List["UserRoleLink"] = Relationship(back_populates="user")
 

@@ -87,6 +87,11 @@ from app.services.report_publishing import (
     ReportPublishAlreadyInProgressError,
     ReportPublishConflictError,
 )
+from app.services.report_default_reviewer import resolve_fallback_reviewer_assignment
+from app.services.report_metadata import (
+    apply_authoritative_report_metadata,
+    embed_delivery_date_at_signing,
+)
 from app.schemas.report import (
     ReportCreate, 
     ReportPresentationUpdate,
@@ -738,6 +743,26 @@ def create_report(
             body["rendering_snapshot"].get("template") if is_v2 else report.template
         )
 
+        # Céluma 1.3.1 Block D: same backend-authoritative principle, applied
+        # to the system metadata base fields (requesting physician, reception
+        # date, delivery date). Applies to V2 and Legacy alike — these are
+        # ordinary base fields, not a V2-only concept. The effective template
+        # is resolved exactly as it is for the signature defaults directly
+        # above, and decides which of the three this report declares: a field
+        # it declares is guaranteed to exist (the client cannot suppress an
+        # official field by omitting the key), and one it does not declare is
+        # never injected. See report_metadata.py. Runs after the C-8
+        # template-hash guard above and after the Report row itself, like
+        # every other durable side effect in this function.
+        body = apply_authoritative_report_metadata(
+            session,
+            body,
+            order,
+            template=(
+                body["rendering_snapshot"].get("template") if is_v2 else report.template
+            ),
+        )
+
         try:
             s3 = S3Service()
             # Build S3 key
@@ -1143,6 +1168,30 @@ def create_report_new_version(
         carried_report_body,
         current_version=current_version,
         template=report.template,
+    )
+
+    # Céluma 1.3.1 Block D: same backend-authoritative overwrite as
+    # create_report, applied on every later content save too — a report
+    # reaching this point is DRAFT or IN_REVIEW (is_content_editable above),
+    # always pre-signing, so delivery_date is correctly forced back to
+    # "unavailable" here rather than trusting whatever the client carried
+    # forward.
+    #
+    # The effective template is the report's OWN frozen snapshot when
+    # `_carry_forward_v2_metadata` re-attached one (V2), else the Report row's
+    # stored template (Legacy) — never the live `ReportTemplate`, which may
+    # have been migrated or edited since this report was authored.
+    metadata_order = session.get(Order, report.order_id)
+    carried_snapshot = (carried_report_body or {}).get("rendering_snapshot")
+    carried_report_body = apply_authoritative_report_metadata(
+        session,
+        carried_report_body,
+        metadata_order,
+        template=(
+            carried_snapshot.get("template")
+            if isinstance(carried_snapshot, dict)
+            else report.template
+        ),
     )
 
     json_storage_id = None
@@ -2764,7 +2813,21 @@ def submit_report(
             )
         )
     ).all()
-    
+
+    if not reviewers:
+        # Céluma 1.3.1 Block D (CEL-131-06): this was already the one moment
+        # "no reviewer assigned" becomes consequential, so the tenant's
+        # configured default reviewer — if any, and only if still eligible
+        # right now — falls back to here rather than a second mechanism.
+        # Never runs when an explicit assignment already exists (the list
+        # above is non-empty in that case), and never fabricates authority:
+        # resolve_fallback_reviewer_assignment returns None for a stale or
+        # unconfigured default, leaving the existing 400 below untouched.
+        fallback = resolve_fallback_reviewer_assignment(session, report)
+        if fallback is not None:
+            session.add(fallback)
+            reviewers = [fallback]
+
     if not reviewers or len(reviewers) == 0:
         raise HTTPException(400, "Cannot submit report for review without reviewers assigned")
     
@@ -3363,6 +3426,12 @@ def sign_report(
     # signature URL in the persisted JSON — see report_publishing.py.
     try:
         embed_signature_metadata_if_required(session, report_id, current_version, user)
+        # Céluma 1.3.1 Block D: the report's delivery_date exists for the
+        # first time at this exact instant. A separate pass from the call
+        # above — that one returns early when no digital signature image is
+        # required, but delivery_date must be set regardless. See
+        # report_metadata.py.
+        embed_delivery_date_at_signing(session, report_id, current_version, user)
         # H-0c Blocker B (§4). This endpoint used to publish whatever PDF
         # happened to be READY — necessarily a PDF generated BEFORE signing,
         # since it refuses to run without one. The result was an immutable,
@@ -3551,6 +3620,10 @@ def sign_and_publish_report(
 
     try:
         embed_signature_metadata_if_required(session, report_id, version, user)
+        # Céluma 1.3.1 Block D: see the equivalent comment in sign_report
+        # above — delivery_date must be embedded before PDF generation,
+        # regardless of whether a digital signature image is required.
+        embed_delivery_date_at_signing(session, report_id, version, user)
         pdf_service = ReportPdfGenerationService(session)
         version = pdf_service.generate(report, version, user.id, force=True)
     except (ReportPdfAlreadyInProgressError, ReportPdfImmutableError) as exc:

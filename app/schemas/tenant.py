@@ -14,6 +14,14 @@ class TenantResponse(BaseModel):
     legal_name: Optional[str] = None
     reports_v2_enabled: bool = False
 
+class DefaultReviewerRef(BaseModel):
+    """Céluma 1.3.1 Block D (CEL-131-06): display-only reference to the
+    tenant's configured default reviewer. Never implies reviewer authority
+    by itself — see docs/celuma-1.3.1/block-d/default-reviewer-contract.md."""
+    id: str
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+
 class TenantDetailResponse(BaseModel):
     """Schema for detailed tenant response"""
     id: str
@@ -21,6 +29,8 @@ class TenantDetailResponse(BaseModel):
     legal_name: Optional[str] = None
     tax_id: Optional[str] = None
     reports_v2_enabled: bool = False
+    default_reviewer_id: Optional[str] = None
+    default_reviewer: Optional[DefaultReviewerRef] = None
 
 class BranchCreate(BaseModel):
     """Schema for creating a branch"""

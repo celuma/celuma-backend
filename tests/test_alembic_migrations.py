@@ -4196,9 +4196,13 @@ class TestReportsV2TemplateVersionConstraint:
         assert "ck_report_version_pdf_generation_status_values" in after
 
     def test_no_other_table_changes_across_the_hotfix(self, migration_db):
-        """The whole schema, not just `report_version`: §1 is DML and §2 is one
-        DROP CONSTRAINT, so the only difference between `v1_3_0` and head is
-        that CHECK."""
+        """The whole schema: §1 is DML, §2 is one DROP CONSTRAINT, and Block D
+        §3a (CEL-131-06) deliberately adds one column and its FK to `tenant`.
+        §3b (CEL-131-04) is DML against `report_template.template_json` — a
+        JSON document's contents, not a schema object — so it contributes no
+        line here. Three differences, exactly: replace this expected set if a
+        later block deliberately adds schema, per the Block C handoff; do not
+        delete the guard."""
         _alembic(RELEASE_REVISION)
         before = _capture_schema(_MIGRATION_TEST_DB)
 
@@ -4206,8 +4210,11 @@ class TestReportsV2TemplateVersionConstraint:
         after = _capture_schema(_MIGRATION_TEST_DB)
 
         differences = _diff_schemas(before, after)
-        assert len(differences) == 1, differences
-        assert self.CHECK_NAME in differences[0]
+        assert set(differences) == {
+            f"report_version.constraints: only before squash: {self.CHECK_NAME}",
+            "tenant.columns: only after squash: default_reviewer_id",
+            "tenant.constraints: only after squash: fk_tenant_default_reviewer_id_app_user",
+        }, differences
 
     # -- historical provenance is preserved -----------------------------
 
@@ -4420,9 +4427,12 @@ class TestTheDowngradePreconditionRefusesRatherThanFalsifying:
 
 
 class TestTheConsolidatedHotfixRevision:
-    """`v1_3_1` carries both 1.3.1 corrections. These assert the consolidation
-    itself — that one revision does both jobs, that the halves are
-    independent, and that the release chain is unchanged in substance."""
+    """`v1_3_1` carries all three 1.3.1 corrections (§1 Block A, §2 Block C,
+    §3 Block D). These assert the consolidation itself — that one revision
+    does every job, that §1/§2 stay independent of each other, and that the
+    release chain is unchanged in substance. §3 gets its own dedicated
+    coverage in `TestDefaultReviewerMigration` and
+    `TestReportTemplateBaseFieldBackfill` below."""
 
     def test_there_is_exactly_one_revision_after_the_frozen_release(self):
         """The reason Block C amended `v1_3_1` instead of adding `v1_3_2`."""
@@ -4502,3 +4512,745 @@ class TestTheConsolidatedHotfixRevision:
         _alembic(HOTFIX_REVISION)
 
         assert set(inspect(migration_db).get_table_names()) == before
+
+
+class TestDefaultReviewerMigration:
+    """Céluma 1.3.1 Block D (CEL-131-06) — **§3a** of revision `v1_3_1`.
+
+    `tenant.default_reviewer_id`: a nullable FK to `app_user.id`,
+    `ON DELETE SET NULL`. A CONFIGURATION reference only — never a role, a
+    permission, or a grant of clinical authority. See
+    docs/celuma-1.3.1/block-d/default-reviewer-contract.md.
+
+    These assert the column's shape and its delete behaviour at the database
+    layer. Eligibility (tenant, active, the `reviewer` role) is an
+    application-layer rule (`app/services/report_default_reviewer.py`,
+    `app/api/v1/tenants.py`) and is tested at that layer, not here — a
+    migration test has no RBAC to exercise.
+    """
+
+    @staticmethod
+    def _is_nullable(engine) -> str | None:
+        with engine.connect() as conn:
+            return conn.execute(
+                text(
+                    "SELECT is_nullable FROM information_schema.columns "
+                    "WHERE table_name = 'tenant' AND column_name = 'default_reviewer_id'"
+                )
+            ).scalar_one_or_none()
+
+    def test_the_column_does_not_exist_at_the_frozen_release(self, migration_db):
+        _alembic(RELEASE_REVISION)
+        assert self._is_nullable(migration_db) is None
+
+    def test_the_column_exists_and_is_nullable_at_head(self, migration_db):
+        _alembic("head")
+        assert self._is_nullable(migration_db) == "YES"
+
+    def test_deleting_the_referenced_user_clears_the_setting_rather_than_blocking(
+        self, migration_db
+    ):
+        """`ON DELETE SET NULL`: removing a user who happens to be a tenant's
+        configured default must never cascade and must never refuse the
+        deletion."""
+        _alembic("head")
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            user_id = _seed_app_user(conn, tenant_id, email="reviewer@example.com")
+            conn.execute(
+                text(
+                    "UPDATE tenant SET default_reviewer_id = :uid WHERE id = :tid"
+                ),
+                {"uid": user_id, "tid": tenant_id},
+            )
+
+        with migration_db.begin() as conn:
+            conn.execute(text("DELETE FROM app_user WHERE id = :id"), {"id": user_id})
+
+        with migration_db.connect() as conn:
+            value = conn.execute(
+                text("SELECT default_reviewer_id FROM tenant WHERE id = :id"),
+                {"id": tenant_id},
+            ).scalar_one()
+        assert value is None
+
+    def test_downgrade_drops_the_column(self, migration_db):
+        _alembic("head")
+        _alembic(RELEASE_REVISION, command="downgrade")
+        assert self._is_nullable(migration_db) is None
+
+
+class TestReportTemplateBaseFieldBackfill:
+    """Céluma 1.3.1 Block D (CEL-131-04; labelled CEL-131-07 in some Block D
+    handoff notes — see block-d-summary.md for the ticket-id discrepancy) —
+    **§3b** of revision `v1_3_1`.
+
+    Backfills `reception_date` and `delivery_date` into every existing
+    `report_template.template_json`, so that every existing template ends the
+    migration with all three official system metadata fields present,
+    **visible**, and ordered:
+
+        requesting_physician    pre-existing key — created if absent, and
+                                 migrated from the pre-1.3.1 hidden framework
+                                 default to visible
+        reception_date          new in 1.3.1
+        delivery_date           new in 1.3.1
+
+    Visible by release-owner decision: these are official report content, not
+    opt-in extras. Only the two keys this revision CREATES are removable on a
+    downgrade; the physician field is never removed and its visibility is
+    never restored, because its pre-upgrade state is unattributable.
+    """
+
+    @staticmethod
+    def _insert_template(engine, template_json: dict) -> uuid.UUID:
+        template_id = uuid.uuid4()
+        with engine.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            conn.execute(
+                text(
+                    "INSERT INTO report_template "
+                    "(id, tenant_id, name, template_json, is_active, created_at) "
+                    "VALUES (:id, :tenant_id, 'Plantilla', CAST(:doc AS json), "
+                    "true, now())"
+                ),
+                {
+                    "id": template_id,
+                    "tenant_id": tenant_id,
+                    "doc": json.dumps(template_json),
+                },
+            )
+        return template_id
+
+    @staticmethod
+    def _template_json(engine, template_id: uuid.UUID) -> dict:
+        with engine.connect() as conn:
+            raw = conn.execute(
+                text(
+                    "SELECT template_json::text FROM report_template WHERE id = :id"
+                ),
+                {"id": template_id},
+            ).scalar_one()
+        return json.loads(raw)
+
+    PHYSICIAN_DEFAULT = {
+        "is_visible": True,
+        "label": "Médico solicitante",
+        "value": "",
+    }
+    RECEPTION_DEFAULT = {
+        "is_visible": True,
+        "label": "Fecha de recepción",
+        "value": "",
+    }
+    DELIVERY_DEFAULT = {
+        "is_visible": True,
+        "label": "Fecha de entrega de resultados",
+        "value": "",
+    }
+
+    # -- 1. standard existing template receives all three, visible ----------
+
+    def test_a_standard_existing_template_receives_all_three_fields_visible(
+        self, migration_db
+    ):
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {
+                    "order_code": {
+                        "is_visible": True, "label": "Código de orden", "value": "",
+                    },
+                    "patient": {"is_visible": True, "label": "Paciente", "value": ""},
+                },
+                "sections": {},
+                "base_order": ["order_code", "patient"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        doc = self._template_json(migration_db, template_id)
+        assert doc["base"]["requesting_physician"] == self.PHYSICIAN_DEFAULT
+        assert doc["base"]["reception_date"] == self.RECEPTION_DEFAULT
+        assert doc["base"]["delivery_date"] == self.DELIVERY_DEFAULT
+
+    # -- 1a. the pre-1.3.1 hidden physician field becomes visible ------------
+
+    def test_a_hidden_requesting_physician_is_migrated_to_visible(
+        self, migration_db
+    ):
+        """The release-owner decision: these are official report content. A
+        template carrying the pre-1.3.1 framework default (`is_visible:
+        false`, merged in hidden by `LEGACY_PREDEFINED_BASE_HIDDEN`) is
+        migrated to visible — see the migration docstring on why an
+        unattributable hidden state resolves in favour of the product
+        contract."""
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {
+                    "requesting_physician": {
+                        "is_visible": False,
+                        "label": "Médico solicitante",
+                        "value": "",
+                    },
+                },
+                "sections": {},
+                "base_order": ["requesting_physician"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        doc = self._template_json(migration_db, template_id)
+        assert doc["base"]["requesting_physician"]["is_visible"] is True
+        assert doc["base_order"].count("requesting_physician") == 1
+
+    def test_only_visibility_is_changed_on_an_existing_field(self, migration_db):
+        """A custom label — and any other key the document carries — survives
+        the visibility flip untouched."""
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {
+                    "requesting_physician": {
+                        "is_visible": False,
+                        "label": "Médico que refiere",
+                        "value": "",
+                        "custom_marker": "keep me",
+                    },
+                },
+                "sections": {},
+                "base_order": ["requesting_physician"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        doc = self._template_json(migration_db, template_id)
+        assert doc["base"]["requesting_physician"] == {
+            "is_visible": True,
+            "label": "Médico que refiere",
+            "value": "",
+            "custom_marker": "keep me",
+        }
+
+    # -- 2. every previous base field is preserved ---------------------------
+
+    def test_every_previous_base_field_is_preserved(self, migration_db):
+        _alembic(RELEASE_REVISION)
+        original_base = {
+            "order_code": {"is_visible": True, "label": "Código de orden", "value": ""},
+            "diagnosis": {
+                "is_visible": True,
+                "label": "Diagnóstico",
+                "type": "text",
+                "value": "",
+                "is_custom": True,
+            },
+        }
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": dict(original_base),
+                "sections": {},
+                "base_order": ["order_code", "diagnosis"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        doc = self._template_json(migration_db, template_id)
+        for key, value in original_base.items():
+            assert doc["base"][key] == value
+
+    # -- 3. base_order preserved except for deterministic insertion ---------
+
+    def test_base_order_is_preserved_with_new_fields_appended(self, migration_db):
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {
+                    "order_code": {
+                        "is_visible": True, "label": "Código de orden", "value": "",
+                    },
+                },
+                "sections": {},
+                "base_order": ["order_code"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        doc = self._template_json(migration_db, template_id)
+        assert doc["base_order"] == [
+            "order_code",
+            "requesting_physician",
+            "reception_date",
+            "delivery_date",
+        ]
+
+    def test_no_key_is_ever_duplicated_in_base_or_base_order(self, migration_db):
+        """Every key appears exactly once, in `base` by construction and in
+        `base_order` because a key already listed is never appended again."""
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {
+                    "requesting_physician": {
+                        "is_visible": False, "label": "Médico solicitante", "value": "",
+                    },
+                    "reception_date": {
+                        "is_visible": True, "label": "Fecha de recepción", "value": "",
+                    },
+                },
+                "sections": {},
+                "base_order": ["reception_date", "requesting_physician"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        doc = self._template_json(migration_db, template_id)
+        order = doc["base_order"]
+        assert len(order) == len(set(order))
+        for key in ("requesting_physician", "reception_date", "delivery_date"):
+            assert order.count(key) == 1
+        # The tenant's existing relative order is preserved; only the genuinely
+        # missing key is appended.
+        assert order == ["reception_date", "requesting_physician", "delivery_date"]
+
+    # -- 4. a template with one field already is not duplicated -------------
+
+    def test_a_template_already_containing_one_field_is_not_duplicated(
+        self, migration_db
+    ):
+        _alembic(RELEASE_REVISION)
+        customized_reception = {
+            "is_visible": True,
+            "label": "Fecha de recepción (personalizada)",
+            "value": "",
+        }
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {"reception_date": customized_reception},
+                "sections": {},
+                "base_order": ["reception_date"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        doc = self._template_json(migration_db, template_id)
+        # Already visible, so not touched at all — custom label intact.
+        assert doc["base"]["reception_date"] == customized_reception
+        assert doc["base_order"].count("reception_date") == 1
+        assert doc["base"]["delivery_date"] == self.DELIVERY_DEFAULT
+        assert doc["base"]["requesting_physician"] == self.PHYSICIAN_DEFAULT
+
+    # -- 5. a template already containing all three, visible, is stable -----
+
+    def test_a_template_already_containing_all_three_visible_is_stable(
+        self, migration_db
+    ):
+        _alembic(RELEASE_REVISION)
+        base = {
+            "order_code": {"is_visible": True, "label": "Código de orden", "value": ""},
+            "requesting_physician": {
+                "is_visible": True, "label": "Médico solicitante", "value": "",
+            },
+            "reception_date": {
+                "is_visible": True, "label": "Fecha de recepción", "value": "",
+            },
+            "delivery_date": {
+                "is_visible": True, "label": "Fecha de entrega", "value": "",
+            },
+        }
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": dict(base),
+                "sections": {},
+                "base_order": list(base.keys()),
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        doc = self._template_json(migration_db, template_id)
+        assert doc["base"] == base
+        assert doc["base_order"] == list(base.keys())
+
+    # -- 6/7. field-specific config and custom base fields are untouched ----
+    # (covered by test_a_template_already_containing_one_new_field_is_not_duplicated
+    # and test_every_previous_base_field_is_preserved above)
+
+    # -- 8. custom sections remain untouched ---------------------------------
+
+    def test_custom_sections_are_untouched(self, migration_db):
+        _alembic(RELEASE_REVISION)
+        sections = {
+            "images": {
+                "is_visible": True, "label": "Imágenes", "type": "images", "content": [],
+            }
+        }
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {},
+                "sections": dict(sections),
+                "base_order": [],
+                "section_order": ["images"],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        doc = self._template_json(migration_db, template_id)
+        assert doc["sections"] == sections
+
+    # -- 9. multiple tenants migrated independently --------------------------
+
+    def test_multiple_tenants_are_migrated_independently(self, migration_db):
+        _alembic(RELEASE_REVISION)
+        t1 = self._insert_template(
+            migration_db,
+            {
+                "base": {"order_code": {"is_visible": True, "label": "A", "value": ""}},
+                "sections": {},
+                "base_order": ["order_code"],
+                "section_order": [],
+            },
+        )
+        t2 = self._insert_template(
+            migration_db,
+            {
+                "base": {"patient": {"is_visible": True, "label": "B", "value": ""}},
+                "sections": {},
+                "base_order": ["patient"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        for template_id in (t1, t2):
+            doc = self._template_json(migration_db, template_id)
+            for key in ("requesting_physician", "reception_date", "delivery_date"):
+                assert doc["base"][key]["is_visible"] is True
+
+    # -- 10. zero-template tenant upgrades cleanly ---------------------------
+
+    def test_zero_template_tenant_upgrades_cleanly(self, migration_db):
+        _alembic(RELEASE_REVISION)
+        with migration_db.begin() as conn:
+            _seed_tenant(conn)
+
+        _alembic(HOTFIX_REVISION)  # must not raise
+
+        assert _current_revision(migration_db) == HOTFIX_REVISION
+
+    # -- malformed template_json is left untouched, not normalized ----------
+
+    def test_a_malformed_template_json_is_left_untouched(self, migration_db):
+        """The narrowest safe behaviour for a column with no backend-enforced
+        shape (`ReportTemplateCreate.template_json: Dict[str, Any]`): skip,
+        never guess at a document's intent."""
+        _alembic(RELEASE_REVISION)
+        template_id = uuid.uuid4()
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            conn.execute(
+                text(
+                    "INSERT INTO report_template "
+                    "(id, tenant_id, name, template_json, is_active, created_at) "
+                    "VALUES (:id, :tenant_id, 'Plantilla', '[]', true, now())"
+                ),
+                {"id": template_id, "tenant_id": tenant_id},
+            )
+
+        _alembic(HOTFIX_REVISION)  # must not raise
+
+        with migration_db.connect() as conn:
+            raw = conn.execute(
+                text(
+                    "SELECT template_json::text FROM report_template WHERE id = :id"
+                ),
+                {"id": template_id},
+            ).scalar_one()
+        assert raw == "[]"
+
+    # -- 11/12. historical template-version / report rows are not touched ---
+
+    def test_report_template_version_configuration_is_byte_identical(
+        self, migration_db
+    ):
+        """§3b migrates the LIVE template only. `ReportTemplateVersion` is
+        administrative history — immutable by Block C's own contract — so a
+        published version's frozen `configuration` must come through the
+        migration unchanged, still without the new fields."""
+        template_id = uuid.uuid4()
+        version_id = uuid.uuid4()
+        configuration = {
+            "schema_version": 2,
+            "template": {
+                "base": {
+                    "order_code": {
+                        "is_visible": True, "label": "Código de orden", "value": "",
+                    },
+                },
+                "sections": {},
+                "base_order": ["order_code"],
+                "section_order": [],
+            },
+        }
+        _alembic(RELEASE_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            conn.execute(
+                text(
+                    "INSERT INTO report_template "
+                    "(id, tenant_id, name, template_json, is_active, created_at) "
+                    "VALUES (:id, :tenant_id, 'Plantilla', CAST(:doc AS json), "
+                    "true, now())"
+                ),
+                {
+                    "id": template_id,
+                    "tenant_id": tenant_id,
+                    "doc": json.dumps(
+                        {
+                            "base": {},
+                            "sections": {},
+                            "base_order": [],
+                            "section_order": [],
+                        }
+                    ),
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO report_template_version "
+                    "(id, tenant_id, report_template_id, version_number, "
+                    " schema_version, configuration, status, published_at, "
+                    " created_at) "
+                    "VALUES (:id, :tenant_id, :template_id, 1, 2, "
+                    "        CAST(:config AS json), 'ACTIVE', now(), now())"
+                ),
+                {
+                    "id": version_id,
+                    "tenant_id": tenant_id,
+                    "template_id": template_id,
+                    "config": json.dumps(configuration),
+                },
+            )
+
+        _alembic(HOTFIX_REVISION)
+
+        with migration_db.connect() as conn:
+            stored = json.loads(
+                conn.execute(
+                    text(
+                        "SELECT configuration::text FROM report_template_version "
+                        "WHERE id = :id"
+                    ),
+                    {"id": version_id},
+                ).scalar_one()
+            )
+        assert stored == configuration
+        assert "reception_date" not in stored["template"]["base"]
+        # ...while the LIVE template alongside it did get the fields.
+        live = self._template_json(migration_db, template_id)
+        assert live["base"]["reception_date"]["is_visible"] is True
+
+    def test_report_and_report_version_rows_are_not_touched_by_this_migration(
+        self, migration_db
+    ):
+        """§3b targets ONLY the live `report_template`. This migration never
+        writes to `report` or `report_version`."""
+        _alembic(RELEASE_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            branch_id = _seed_branch(conn, tenant_id)
+            patient_id = _seed_patient(conn, tenant_id, branch_id)
+            order_id = _seed_order(conn, tenant_id, branch_id, patient_id)
+            report_id = _seed_report(conn, tenant_id, branch_id, order_id)
+
+        _alembic(HOTFIX_REVISION)
+
+        with migration_db.connect() as conn:
+            row = conn.execute(
+                text("SELECT status FROM report WHERE id = :id"), {"id": report_id}
+            ).one()
+        assert row[0] == "DRAFT"
+
+    # -- 13/14. downgrade precondition and upgrade/downgrade determinism ----
+
+    def test_downgrade_removes_only_the_pristine_default_fields(self, migration_db):
+        """A row nobody touched since the upgrade loses the two keys; a row
+        an administrator customized keeps them — the downgrade cannot tell
+        "deliberately changed" from "nothing happened" apart, and a template
+        field is configuration, not a clinical record, so the fail-safe here
+        is a non-destructive skip rather than refusing the whole migration
+        (contrast with §2's downgrade, which DOES refuse, over schema_version
+        provenance — a clinical fact)."""
+        _alembic(RELEASE_REVISION)
+        template_pristine = self._insert_template(
+            migration_db,
+            {
+                "base": {"order_code": {"is_visible": True, "label": "x", "value": ""}},
+                "sections": {},
+                "base_order": ["order_code"],
+                "section_order": [],
+            },
+        )
+        template_customized = self._insert_template(
+            migration_db,
+            {
+                "base": {"order_code": {"is_visible": True, "label": "y", "value": ""}},
+                "sections": {},
+                "base_order": ["order_code"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        with migration_db.begin() as conn:
+            doc = json.loads(
+                conn.execute(
+                    text(
+                        "SELECT template_json::text FROM report_template "
+                        "WHERE id = :id"
+                    ),
+                    {"id": template_customized},
+                ).scalar_one()
+            )
+            # An administrator hides the field again after the upgrade.
+            doc["base"]["reception_date"]["is_visible"] = False
+            conn.execute(
+                text(
+                    "UPDATE report_template "
+                    "SET template_json = CAST(:doc AS json) WHERE id = :id"
+                ),
+                {"doc": json.dumps(doc), "id": template_customized},
+            )
+
+        _alembic(RELEASE_REVISION, command="downgrade")
+
+        pristine_doc = self._template_json(migration_db, template_pristine)
+        customized_doc = self._template_json(migration_db, template_customized)
+        assert "reception_date" not in pristine_doc["base"]
+        assert "delivery_date" not in pristine_doc["base"]
+        assert "reception_date" not in pristine_doc.get("base_order", [])
+        # The customized field survives...
+        assert customized_doc["base"]["reception_date"]["is_visible"] is False
+        # ...but the untouched sibling on the SAME row is still removed.
+        assert "delivery_date" not in customized_doc["base"]
+
+    def test_downgrade_never_removes_the_pre_existing_physician_field(
+        self, migration_db
+    ):
+        """`requesting_physician` predates 1.3.1: removing it on a rollback
+        would delete configuration the tenant had before this release, and
+        its pre-upgrade visibility is unattributable, so the downgrade leaves
+        the field in place and visible. Documented, not accidental — see the
+        migration's §3b downgrade docstring."""
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {
+                    "requesting_physician": {
+                        "is_visible": False, "label": "Médico solicitante", "value": "",
+                    },
+                },
+                "sections": {},
+                "base_order": ["requesting_physician"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+        _alembic(RELEASE_REVISION, command="downgrade")
+
+        doc = self._template_json(migration_db, template_id)
+        assert "requesting_physician" in doc["base"]
+        assert doc["base"]["requesting_physician"]["is_visible"] is True
+        assert doc["base_order"] == ["requesting_physician"]
+
+    def test_the_backfill_is_idempotent(self, migration_db):
+        """Re-running the whole revision changes nothing: every field is
+        already present and visible, so the loop finds nothing to do."""
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {
+                    "order_code": {"is_visible": True, "label": "x", "value": ""},
+                    "requesting_physician": {
+                        "is_visible": False, "label": "Médico solicitante", "value": "",
+                    },
+                },
+                "sections": {},
+                "base_order": ["order_code", "requesting_physician"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+        after_first = self._template_json(migration_db, template_id)
+
+        # `alembic upgrade` would no-op at head, so re-run the §3b routine
+        # itself — the property under test is the routine's idempotence, not
+        # alembic's version bookkeeping. Loaded by path, the same way
+        # `_capture_schema` loads the snapshot script: `alembic/versions` is
+        # not an importable package.
+        spec = importlib.util.spec_from_file_location(
+            "_celuma_hotfix_revision",
+            VERSIONS_DIR / "v1_3_1_reviewer_only_approval.py",
+        )
+        revision_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(revision_module)
+
+        with migration_db.begin() as conn:
+            revision_module._backfill_report_template_base_fields(conn)
+
+        assert self._template_json(migration_db, template_id) == after_first
+
+    def test_upgrade_downgrade_reupgrade_is_deterministic_for_a_pristine_row(
+        self, migration_db
+    ):
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {"order_code": {"is_visible": True, "label": "x", "value": ""}},
+                "sections": {},
+                "base_order": ["order_code"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+        first = self._template_json(migration_db, template_id)
+
+        _alembic(RELEASE_REVISION, command="downgrade")
+        _alembic(HOTFIX_REVISION)
+        second = self._template_json(migration_db, template_id)
+
+        assert first == second

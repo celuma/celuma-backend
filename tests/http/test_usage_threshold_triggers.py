@@ -159,7 +159,7 @@ class TestStorageTriggerCoverage:
     def test_every_wrapper_call_site_is_accounted_for(self):
         """The inventory itself, as a number.
 
-        Fourteen production storage flows, matching
+        Fifteen production storage flows, matching
         `usage-threshold-trigger-matrix.md` §Storage. If this count changes,
         the matrix needs a row added or removed — which is the point of
         asserting it.
@@ -170,6 +170,12 @@ class TestStorageTriggerCoverage:
         if_required`, it rewrites the report JSON in place and so records a
         size *delta* on an existing StorageObject rather than a new object's
         full size.
+
+        Céluma 1.3.1 Block D added the fifteenth:
+        `app/services/report_metadata.py::embed_delivery_date_at_signing`,
+        which rewrites the report JSON in place at sign-and-publish time
+        (embedding the delivery date) — the same in-place-rewrite shape as
+        the fourteenth, at the adjacent moment in the lifecycle.
         """
         call_sites = []
         for relative, path in self._production_modules():
@@ -183,13 +189,14 @@ class TestStorageTriggerCoverage:
                     and node.func.id == "record_storage_delta_with_thresholds"
                 ):
                     call_sites.append(f"{relative}:{node.lineno}")
-        assert len(call_sites) == 14, sorted(call_sites)
+        assert len(call_sites) == 15, sorted(call_sites)
         assert {site.split(":")[0] for site in call_sites} == {
             "app/api/v1/laboratory.py",
             "app/api/v1/report_letterheads.py",
             "app/api/v1/reports.py",
             "app/api/v1/tenants.py",
             "app/api/v1/users.py",
+            "app/services/report_metadata.py",
             "app/services/report_pdf_generation.py",
             "app/services/report_presentation.py",
             "app/services/report_publishing.py",

@@ -211,6 +211,11 @@ def _patch_s3(monkeypatch):
     # import. Unlike `report_publishing` above, tests DO reach this line —
     # the presentation tests require a real stored body to mutate.
     monkeypatch.setattr("app.services.report_presentation.S3Service", FakeS3Service)
+    # Céluma 1.3.1 Block D: `embed_delivery_date_at_signing` reads and
+    # rewrites the stored report JSON in place at sign time, with its own
+    # S3Service import — the same pattern as `report_presentation` above.
+    # Tests DO reach this line on every successful sign-and-publish.
+    monkeypatch.setattr("app.services.report_metadata.S3Service", FakeS3Service)
 
 
 # ---------------------------------------------------------------------------
