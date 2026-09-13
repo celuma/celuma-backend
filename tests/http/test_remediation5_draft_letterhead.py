@@ -439,7 +439,12 @@ class TestTheAuthorHasNoLetterheadPath:
 
 class TestPresentationFreezesAtApproval:
     """1.3.1 A5: the freeze point moved from submission to APPROVAL, because
-    the reviewer needs the IN_REVIEW window to do this work at all."""
+    the reviewer needs their window to do this work at all.
+
+    Amended by the manual-validation remediation (R1, CEL-131-02): that window
+    is DRAFT **and** IN_REVIEW, not IN_REVIEW alone. The freeze point —
+    APPROVAL — is unchanged, which is what the rest of this class asserts.
+    """
 
     def _force_status(self, session, v2_world, status):
         report = session.get(Report, v2_world["report_id"])
@@ -447,9 +452,19 @@ class TestPresentationFreezesAtApproval:
         session.add(report)
         session.commit()
 
-    def test_draft_is_not_the_reviewers_window(self, client, session, v2_world):
-        """Before submission there is nothing to review; the reviewer's
-        authority starts when the report reaches them."""
+    def test_draft_IS_the_reviewers_window_too(self, client, session, v2_world):
+        """Céluma 1.3.1 manual-validation remediation (R1, CEL-131-02).
+
+        This was `test_draft_is_not_the_reviewers_window` and asserted 409, on
+        the reasoning that "before submission there is nothing to review".
+        Manual validation rejected that: the letterhead is reviewer-owned from
+        the moment the report exists, and waiting for a submission the reviewer
+        has no part in bought nothing. The assertion is inverted in place so
+        the change of contract is visible in the diff.
+
+        The freeze point is untouched — `test_approved_freezes_it` and
+        `test_published_freezes_it` below still hold.
+        """
         review = ReportReview(
             tenant_id=v2_world["tenant"].id,
             branch_id=v2_world["branch"].id,
@@ -460,7 +475,7 @@ class TestPresentationFreezesAtApproval:
         session.commit()
 
         resp = _change_letterhead(client, v2_world, v2_world["other_version"].id)
-        assert resp.status_code == 409, resp.text
+        assert resp.status_code == 200, resp.text
 
     def test_approved_freezes_it(self, client, session, in_review):
         self._force_status(session, in_review, ReportStatus.APPROVED)

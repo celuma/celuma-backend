@@ -281,14 +281,29 @@ def authorize_signing(
 # Reviewer presentation settings (A4/A5)
 # ---------------------------------------------------------------------------
 
-#: The ONLY report state in which a reviewer may change presentation settings.
+#: The report states in which the ASSIGNED REVIEWER may change presentation
+#: settings.
 #:
-#: Deliberately not DRAFT: in DRAFT the pathologist owns the document and
-#: changes these through the normal content path (`POST /{id}/new_version`,
-#: `reports:edit`). Deliberately not APPROVED: an approved report's
-#: presentation is frozen, and the 1.3.1 route back is Block B's reopen, not a
-#: silent mutation of an approved document.
-PRESENTATION_EDITABLE_STATUSES = (ReportStatus.IN_REVIEW,)
+#: Céluma 1.3.1 manual-validation remediation (R1, CEL-131-02): DRAFT was
+#: added here. Block A admitted only IN_REVIEW, reasoning that "in DRAFT the
+#: pathologist owns the document". Real use showed that is the wrong split:
+#: the letterhead and the two signature toggles are reviewer-owned in EVERY
+#: state (Block A's own §7 says so), and refusing them until submission just
+#: forced the reviewer to wait for a round trip they had no part in. The
+#: release owner's decision is that an authorized assigned reviewer configures
+#: presentation in DRAFT and IN_REVIEW alike.
+#:
+#: What did NOT change, and must not: this tuple governs
+#: `authorize_presentation_change` ONLY. Approval
+#: (`APPROVAL_EDITABLE_STATUSES`) and signing (`APPROVED`) keep their own
+#: states, so nothing here lets a report be approved or signed from DRAFT —
+#: see `authorize_approval` and `authorize_signing`, which read neither this
+#: tuple nor each other's.
+#:
+#: Still deliberately not APPROVED: an approved report's presentation is
+#: frozen, and the 1.3.1 route back is Block B's reopen, not a silent mutation
+#: of an approved document. PUBLISHED/RETRACTED likewise.
+PRESENTATION_EDITABLE_STATUSES = (ReportStatus.DRAFT, ReportStatus.IN_REVIEW)
 
 
 def authorize_presentation_change(
@@ -315,7 +330,8 @@ def authorize_presentation_change(
     if report.status not in PRESENTATION_EDITABLE_STATUSES:
         raise ReportStateError(
             "Report presentation settings can only be changed while the "
-            f"report is in review (current status: {report.status})."
+            "report is a draft or in review (current status: "
+            f"{report.status})."
         )
     return review
 

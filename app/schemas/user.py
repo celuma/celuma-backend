@@ -92,6 +92,19 @@ class ReviewerItem(BaseModel):
     email: str
     has_signature: bool
     avatar_url: Optional[str] = None
+    # Céluma 1.3.1 manual-validation remediation (R6): the reviewer picker
+    # renders a `@handle` under each person's display name and had no username
+    # to render it from — this schema did not expose one, so the frontend
+    # hardcoded `username: null` and the UI fell through to the app's existing
+    # fallback, the local part of the email address. For reviewers whose
+    # address is built from their name ("laishamelina@gmail.com") the handle
+    # then looked like the NAME rather than the username, which is what manual
+    # validation reported.
+    #
+    # Read-only projection of `AppUser.username`; nothing about persistence
+    # changes. Nullable because the column is (`app_user.username` is
+    # `nullable=True`), and the frontend keeps the fallback for that case.
+    username: Optional[str] = None
 
 
 class ReviewersListResponse(BaseModel):

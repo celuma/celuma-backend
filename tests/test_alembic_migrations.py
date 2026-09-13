@@ -4645,7 +4645,11 @@ class TestReportTemplateBaseFieldBackfill:
     }
     DELIVERY_DEFAULT = {
         "is_visible": True,
-        "label": "Fecha de entrega de resultados",
+        # Manual-validation remediation R3: the released label. An earlier cut
+        # of this still-mutable revision wrote "Fecha de entrega de
+        # resultados"; the label repair converges environments stamped with
+        # that cut onto this one. See TestSystemMetadataLabelRepair below.
+        "label": "Fecha de entrega",
         "value": "",
     }
 
@@ -5254,3 +5258,342 @@ class TestReportTemplateBaseFieldBackfill:
         second = self._template_json(migration_db, template_id)
 
         assert first == second
+
+    # ------------------------------------------------------------------
+    # Manual-validation remediation, R3 (CEL-131-04) — the label repair
+    # ------------------------------------------------------------------
+    #
+    # Manual testing found the template configuration screen showing
+    # administrators the literal text `reception_date` / `delivery_date`. The
+    # first cut of §3b guaranteed the key's PRESENCE and VISIBILITY but said
+    # nothing about its LABEL, so a row that already carried the key with a
+    # missing or raw-key label kept it forever: a re-run found the key present
+    # and visible and moved on.
+    #
+    # These assert the repair AND, just as importantly, that it stops at
+    # machine-written labels and never reaches a real customization.
+
+    def test_a_raw_key_label_is_replaced_by_the_official_spanish_one(
+        self, migration_db
+    ):
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {
+                    "reception_date": {
+                        "is_visible": True, "label": "reception_date", "value": "",
+                    },
+                    "delivery_date": {
+                        "is_visible": True, "label": "delivery_date", "value": "",
+                    },
+                },
+                "sections": {},
+                "base_order": ["reception_date", "delivery_date"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        base = self._template_json(migration_db, template_id)["base"]
+        assert base["reception_date"]["label"] == "Fecha de recepción"
+        assert base["delivery_date"]["label"] == "Fecha de entrega"
+
+    def test_a_missing_or_blank_label_is_replaced(self, migration_db):
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {
+                    # no `label` key at all
+                    "reception_date": {"is_visible": True, "value": ""},
+                    # present but whitespace
+                    "delivery_date": {
+                        "is_visible": True, "label": "   ", "value": "",
+                    },
+                },
+                "sections": {},
+                "base_order": ["reception_date", "delivery_date"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        base = self._template_json(migration_db, template_id)["base"]
+        assert base["reception_date"]["label"] == "Fecha de recepción"
+        assert base["delivery_date"]["label"] == "Fecha de entrega"
+
+    def test_the_superseded_pre_release_delivery_label_converges(
+        self, migration_db
+    ):
+        """An environment stamped with an earlier cut of this still-mutable
+        revision carries "Fecha de entrega de resultados". 1.3.1 has not
+        shipped, so that string was written by this migration and not by a
+        human, and the repair converges it onto the released label."""
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {
+                    "delivery_date": {
+                        "is_visible": True,
+                        "label": "Fecha de entrega de resultados",
+                        "value": "",
+                    },
+                },
+                "sections": {},
+                "base_order": ["delivery_date"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        base = self._template_json(migration_db, template_id)["base"]
+        assert base["delivery_date"]["label"] == "Fecha de entrega"
+
+    def test_a_genuinely_customized_label_is_preserved_verbatim(
+        self, migration_db
+    ):
+        """The repair must never reach a label a person chose. Anything that
+        is not blank, not the raw key, and not a string this revision itself
+        wrote is left exactly as it is — including for the pre-existing
+        physician field."""
+        _alembic(RELEASE_REVISION)
+        custom = {
+            "requesting_physician": {
+                "is_visible": True, "label": "Médico tratante", "value": "",
+            },
+            "reception_date": {
+                "is_visible": True, "label": "Ingreso al laboratorio", "value": "",
+            },
+            "delivery_date": {
+                "is_visible": True, "label": "Entrega al paciente", "value": "",
+            },
+        }
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": dict(custom),
+                "sections": {},
+                "base_order": list(custom.keys()),
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        base = self._template_json(migration_db, template_id)["base"]
+        for key, field in custom.items():
+            assert base[key] == field
+
+    def test_a_hidden_field_with_a_raw_key_label_gets_both_repairs(
+        self, migration_db
+    ):
+        """Visibility and label are independent repairs on the same field;
+        a row needing both must come out with both, in one pass."""
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {
+                    "reception_date": {
+                        "is_visible": False, "label": "reception_date", "value": "x",
+                    },
+                },
+                "sections": {},
+                "base_order": ["reception_date"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        field = self._template_json(migration_db, template_id)["base"][
+            "reception_date"
+        ]
+        assert field["is_visible"] is True
+        assert field["label"] == "Fecha de recepción"
+        # Every other key the document carried is preserved verbatim.
+        assert field["value"] == "x"
+
+    def test_the_label_repair_does_not_duplicate_keys_or_base_order_entries(
+        self, migration_db
+    ):
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {
+                    "reception_date": {
+                        "is_visible": True, "label": "reception_date", "value": "",
+                    },
+                },
+                "sections": {},
+                "base_order": ["reception_date"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+
+        doc = self._template_json(migration_db, template_id)
+        assert doc["base_order"].count("reception_date") == 1
+        assert doc["base_order"].count("delivery_date") == 1
+        assert doc["base_order"].count("requesting_physician") == 1
+        assert len(doc["base_order"]) == len(set(doc["base_order"]))
+
+    def test_the_label_repair_is_idempotent(self, migration_db):
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {
+                    "delivery_date": {
+                        "is_visible": True,
+                        "label": "Fecha de entrega de resultados",
+                        "value": "",
+                    },
+                },
+                "sections": {},
+                "base_order": ["delivery_date"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+        after_first = self._template_json(migration_db, template_id)
+
+        # Re-run the §3b routine itself rather than `alembic upgrade`, which
+        # no-ops at head — the property under test is the repair's own
+        # idempotence. Same loading idiom as
+        # `test_the_backfill_is_idempotent_when_re_run` above.
+        spec = importlib.util.spec_from_file_location(
+            "_celuma_hotfix_revision_label_repair",
+            VERSIONS_DIR / "v1_3_1_reviewer_only_approval.py",
+        )
+        revision_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(revision_module)
+
+        with migration_db.begin() as conn:
+            revision_module._backfill_report_template_base_fields(conn)
+
+        assert self._template_json(migration_db, template_id) == after_first
+
+    def test_a_row_carrying_the_superseded_label_is_still_downgradable(
+        self, migration_db
+    ):
+        """The downgrade removes what THIS revision wrote. A row whose label
+        the repair rewrote is still "untouched by a human", so it must still
+        be removable — otherwise upgrading twice would strand the field."""
+        _alembic(RELEASE_REVISION)
+        template_id = self._insert_template(
+            migration_db,
+            {
+                "base": {
+                    "delivery_date": {
+                        "is_visible": True,
+                        "label": "Fecha de entrega de resultados",
+                        "value": "",
+                    },
+                },
+                "sections": {},
+                "base_order": ["delivery_date"],
+                "section_order": [],
+            },
+        )
+
+        _alembic(HOTFIX_REVISION)
+        _alembic(RELEASE_REVISION, command="downgrade")
+
+        doc = self._template_json(migration_db, template_id)
+        assert "delivery_date" not in doc["base"]
+        assert "delivery_date" not in doc.get("base_order", [])
+
+    def test_the_label_repair_never_touches_report_template_version_history(
+        self, migration_db
+    ):
+        """The repair widened what §3b writes. Re-assert the invariant it
+        could plausibly have broken: administrative history stays byte-identical
+        even when the LIVE row next to it needs a label repaired."""
+        template_id = uuid.uuid4()
+        version_id = uuid.uuid4()
+        configuration = {
+            "schema_version": 2,
+            "template": {
+                "base": {
+                    "delivery_date": {
+                        "is_visible": True, "label": "delivery_date", "value": "",
+                    },
+                },
+                "sections": {},
+                "base_order": ["delivery_date"],
+                "section_order": [],
+            },
+        }
+        _alembic(RELEASE_REVISION)
+        with migration_db.begin() as conn:
+            tenant_id = _seed_tenant(conn)
+            conn.execute(
+                text(
+                    "INSERT INTO report_template "
+                    "(id, tenant_id, name, template_json, is_active, created_at) "
+                    "VALUES (:id, :tenant_id, 'Plantilla', CAST(:doc AS json), "
+                    "true, now())"
+                ),
+                {
+                    "id": template_id,
+                    "tenant_id": tenant_id,
+                    "doc": json.dumps(
+                        {
+                            "base": {
+                                "delivery_date": {
+                                    "is_visible": True,
+                                    "label": "delivery_date",
+                                    "value": "",
+                                },
+                            },
+                            "sections": {},
+                            "base_order": ["delivery_date"],
+                            "section_order": [],
+                        }
+                    ),
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO report_template_version "
+                    "(id, tenant_id, report_template_id, version_number, "
+                    " schema_version, configuration, status, published_at, "
+                    " created_at) "
+                    "VALUES (:id, :tenant_id, :template_id, 1, 2, "
+                    "        CAST(:config AS json), 'ACTIVE', now(), now())"
+                ),
+                {
+                    "id": version_id,
+                    "tenant_id": tenant_id,
+                    "template_id": template_id,
+                    "config": json.dumps(configuration),
+                },
+            )
+
+        _alembic(HOTFIX_REVISION)
+
+        with migration_db.connect() as conn:
+            stored = json.loads(
+                conn.execute(
+                    text(
+                        "SELECT configuration::text FROM report_template_version "
+                        "WHERE id = :id"
+                    ),
+                    {"id": version_id},
+                ).scalar_one()
+            )
+        # History keeps the raw key label — it is a frozen record, not a
+        # live configuration.
+        assert stored == configuration
+        # ...while the live row alongside it was repaired.
+        live = self._template_json(migration_db, template_id)
+        assert live["base"]["delivery_date"]["label"] == "Fecha de entrega"

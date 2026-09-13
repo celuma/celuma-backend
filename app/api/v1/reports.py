@@ -3204,10 +3204,12 @@ def reopen_report(
     #   * `published_at` is necessarily NULL here (a published report is
     #     refused above) and is never written by this route.
     #   * The presentation settings and the frozen letterhead stay on the
-    #     current version. Reopening returns the report to DRAFT; it does not
-    #     re-open the presentation window, which remains IN_REVIEW-only and
-    #     reviewer-only (Block A). The correction path is
-    #     reopen → edit/resubmit → reviewer adjusts presentation → approve.
+    #     current version. Reopening returns the report to DRAFT, where the
+    #     assigned reviewer may adjust presentation directly (remediation R1
+    #     added DRAFT to `PRESENTATION_EDITABLE_STATUSES`; Block B was written
+    #     when that window was IN_REVIEW-only). The correction path is
+    #     reopen → author edits / reviewer adjusts presentation → resubmit →
+    #     approve.
 
     _create_audit_log(
         session=session,
@@ -3224,6 +3226,61 @@ def reopen_report(
             "changelog": data.changelog,
         },
     )
+
+    # Céluma 1.3.1 manual-validation remediation (R2, CEL-131-03): the
+    # user-facing timeline event.
+    #
+    # Block B recorded the reopen in `audit_log` only, and documented the
+    # resulting gap: `OrderEvent.event_type` is a native Postgres enum
+    # (`public.eventtype`) with no `REPORT_REOPENED` member, and adding one
+    # means `ALTER TYPE … ADD VALUE`, which Postgres cannot reverse — there is
+    # no DROP VALUE, so the label would outlive any downgrade. Manual
+    # validation showed the gap is not acceptable to the workflow: every other
+    # report transition appears in the order timeline and this one silently
+    # did not.
+    #
+    # The release owner's decision is to reuse the enum's existing generic
+    # member rather than change the enum. `STATUS_CHANGED` is declared in
+    # `EventType` as "Legacy/generic" and is written by no other code path, so
+    # it carries no historical rows whose rendering could change. What makes
+    # the event unambiguous is the metadata, not the type: `action` names the
+    # transition and `from_status`/`to_status` carry it, so the timeline (and
+    # any future consumer) identifies a reopen structurally instead of by
+    # parsing the description.
+    #
+    # Exactly one row, inside the same transaction as the status change and
+    # the audit record, so a failed or unauthorized reopen — every one of
+    # which raises before this point — writes neither.
+    from app.models.events import OrderEvent
+    from app.models.enums import EventType
+
+    reopen_event = OrderEvent(
+        tenant_id=report.tenant_id,
+        branch_id=report.branch_id,
+        order_id=report.order_id,
+        event_type=EventType.STATUS_CHANGED,
+        # Unlike the REPORT_* events, whose text the UI builds from the type,
+        # a generic type cannot be rendered from the type alone — so this one
+        # carries its own human-readable text as the last-resort fallback for
+        # any consumer that does not know the `action` key.
+        description="Reporte reabierto",
+        event_metadata={
+            "action": "REPORT_REOPENED",
+            "report_id": str(report.id),
+            "report_title": report.title,
+            # `ReportStatus` is a `(str, Enum)`, whose `str()` renders as
+            # "ReportStatus.DRAFT" on Python 3.12. The timeline stores the
+            # bare value, matching what `audit_log` records for the same
+            # transition.
+            "from_status": getattr(old_status, "value", old_status),
+            "to_status": getattr(report.status, "value", report.status),
+            "reopened_version_no": current_version.version_no,
+            "reopened_by": str(user.id),
+            "reopened_by_name": user.full_name or user.username,
+        },
+        created_by=user.id,
+    )
+    session.add(reopen_event)
 
     session.commit()
     session.refresh(report)
@@ -3259,8 +3316,8 @@ def update_report_presentation(
     """Céluma 1.3.1 Block A / A4-A5 — the reviewer-only presentation route.
 
     Changes ONLY the signature-section toggle, the digital-signature toggle,
-    and the selected letterhead, and only while the report is IN_REVIEW, and
-    only for the assigned reviewer.
+    and the selected letterhead, and only while the report is DRAFT or
+    IN_REVIEW, and only for the assigned reviewer.
 
     Why this endpoint exists at all: these three settings change the final
     clinical document, so they are reviewer decisions — but they live inside
@@ -3271,12 +3328,20 @@ def update_report_presentation(
     the mechanism that keeps the capability and the content boundary
     separate. See `app/services/report_presentation.py`.
 
-    Lifecycle (A5):
-      * DRAFT     — not here. The author owns the document and changes these
-                    through the normal content path.
-      * IN_REVIEW — the reviewer's window. This route.
+    Lifecycle (A5, amended by the manual-validation remediation R1):
+      * DRAFT     — the assigned reviewer's window too. Block A excluded it;
+                    real use showed presentation is reviewer-owned from the
+                    moment the report exists, not only after submission.
+      * IN_REVIEW — the reviewer's window. Unchanged.
       * APPROVED  — frozen. 409. The 1.3.1 route back is Block B's reopen,
                     never a silent mutation of an approved document.
+
+    Admitting DRAFT changes nothing about approval or signing: those read
+    their own lifecycle tuples in `report_authorization.py`, and neither
+    accepts DRAFT. The author boundary is likewise untouched — a content-path
+    save still cannot write these fields (`enforce_author_presentation_boundary`
+    carries the persisted values forward), so what a reviewer configures in
+    DRAFT survives the author's next save instead of being overwritten by it.
     """
     report = session.get(Report, report_id)
     if not report:

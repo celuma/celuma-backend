@@ -176,7 +176,39 @@ listed in `base_order`. Three cases, per key per row:
   * **present but not visible** -> ONLY `is_visible` is set to `true`; a
     custom label, and every other key the document carries, is preserved
     verbatim;
-  * **present and visible** -> untouched.
+  * **present and visible** -> untouched, EXCEPT for the label repair below.
+
+**Label repair (added by the manual-validation remediation, R3).** The
+first cut of this section guaranteed the key's PRESENCE and VISIBILITY but
+said nothing about its LABEL, so a row that already carried
+`reception_date` with no label — or with the raw implementation key as its
+label — kept it, and the template configuration screen showed an
+administrator the literal text `reception_date`. A raw snake_case key is
+never a label a human chose. So, for these three keys only, a stored label
+is replaced by the official Spanish one when it is:
+
+    missing, null, or blank after stripping
+    exactly the raw key       ("reception_date", "delivery_date", …)
+    exactly a label THIS unreleased revision itself wrote earlier
+                              (see SUPERSEDED_FIELD_LABELS)
+
+and is preserved verbatim in every other case — which is what makes an
+administrator's genuine customization safe. `requesting_physician` is
+included in the rule but is effectively untouched by it in practice: it
+predates 1.3.1 and every template that has it also has the label the
+framework gave it.
+
+The third clause exists only because 1.3.1 has not shipped. This revision
+is still mutable, and an earlier cut of it wrote `delivery_date` with the
+label "Fecha de entrega de resultados"; the released contract is "Fecha de
+entrega". Development and staging databases already stamped `v1_3_1` would
+otherwise keep the superseded wording forever, because a re-run finds the
+key present and visible. Treating exactly that string as "written by this
+revision, not by a human" converges every environment on the released
+label. It is NOT a general "overwrite labels we dislike" rule: the match is
+exact, and the list is closed to strings this revision is known to have
+authored. After 1.3.1 ships, `v1_3_1` freezes and nothing is ever added to
+that list again — a later label change would be a new revision's job.
 
 Everything else on the row — every unrelated base field, every custom base
 field, every section, every setting — is preserved verbatim. `base_order`
@@ -215,7 +247,9 @@ report behaviour").
 Only the two keys this revision CREATED — `reception_date` and
 `delivery_date` — are removable, and only from a row where the key is still
 byte-identical to what the upgrade wrote (visible, default label,
-`value: ""`), i.e. only where nothing has touched it since. A row where an
+`value: ""`) — or to what an earlier, superseded cut of this same unreleased
+revision wrote, for the same reason the label repair exists — i.e. only
+where nothing a human did has touched it since. A row where an
 administrator has since changed the field's visibility, label or position is
 left exactly as it is: the downgrade cannot distinguish "deliberately
 customized" from "untouched", and unlike §2 this is template CONFIGURATION,
@@ -285,15 +319,58 @@ SYSTEM_METADATA_FIELDS = {
     },
     "delivery_date": {
         "is_visible": True,
-        "label": "Fecha de entrega de resultados",
+        "label": "Fecha de entrega",
         "value": "",
     },
 }
+
+#: Labels an EARLIER CUT OF THIS SAME UNRELEASED REVISION wrote, and which the
+#: label repair therefore treats as machine-written rather than as an
+#: administrator's choice. See the module docstring §3b "Label repair".
+#:
+#: This list is closed. It exists only because `v1_3_1` stays mutable until
+#: 1.3.1 ships, so environments stamped with an earlier cut would otherwise
+#: keep a superseded label forever. Nothing may be added here after release.
+SUPERSEDED_FIELD_LABELS = {
+    "delivery_date": {"Fecha de entrega de resultados"},
+}
+
+
+def _is_machine_written_label(key: str, label) -> bool:
+    """Whether `label` is one this migration may replace with the official
+    Spanish one, as opposed to a human's customization.
+
+    True for: absent/null, blank, the raw implementation key itself (never
+    something a person typed as a label), and any label recorded in
+    `SUPERSEDED_FIELD_LABELS`. False — preserve verbatim — for everything
+    else, including a label that merely differs from the canonical one.
+    """
+    if not isinstance(label, str):
+        return label is None
+    stripped = label.strip()
+    if not stripped:
+        return True
+    if stripped == key:
+        return True
+    return stripped in SUPERSEDED_FIELD_LABELS.get(key, frozenset())
+
 
 #: Keys created by this revision, i.e. the ones a downgrade may remove. The
 #: physician field is deliberately absent: it predates 1.3.1, so removing it
 #: on a rollback would delete a field the tenant had before this release.
 DOWNGRADE_REMOVABLE_FIELDS = ["reception_date", "delivery_date"]
+
+
+def _is_untouched_since_upgrade(key: str, stored) -> bool:
+    """Whether `stored` is still exactly what some cut of THIS revision wrote
+    for `key` — the precondition for the downgrade removing it."""
+    canonical = SYSTEM_METADATA_FIELDS[key]
+    if stored == canonical:
+        return True
+    for superseded in SUPERSEDED_FIELD_LABELS.get(key, frozenset()):
+        if stored == {**canonical, "label": superseded}:
+            return True
+    return False
 
 
 def _load_template_documents(bind):
@@ -352,12 +429,19 @@ def _backfill_report_template_base_fields(bind) -> None:
                 # create it from the canonical definition.
                 base[key] = dict(SYSTEM_METADATA_FIELDS[key])
                 changed = True
-            elif existing.get("is_visible") is not True:
-                # Present but hidden (or missing the flag entirely). Only the
-                # visibility is touched — a custom label, and any other key the
-                # document carries, is preserved verbatim.
-                base[key] = {**existing, "is_visible": True}
-                changed = True
+            else:
+                # Present. Two independent repairs, either of which may apply:
+                # visibility (the original §3b rule) and the label (added by
+                # the R3 remediation — see the module docstring). Everything
+                # else the document carries is preserved verbatim.
+                repaired = dict(existing)
+                if repaired.get("is_visible") is not True:
+                    repaired["is_visible"] = True
+                if _is_machine_written_label(key, repaired.get("label")):
+                    repaired["label"] = SYSTEM_METADATA_FIELDS[key]["label"]
+                if repaired != existing:
+                    base[key] = repaired
+                    changed = True
             if key not in base_order:
                 base_order.append(key)
                 changed = True
@@ -382,7 +466,7 @@ def _revert_report_template_base_fields(bind) -> None:
     for row_id, doc, base, base_order in _load_template_documents(bind):
         changed = False
         for key in DOWNGRADE_REMOVABLE_FIELDS:
-            if base.get(key) == SYSTEM_METADATA_FIELDS[key]:
+            if _is_untouched_since_upgrade(key, base.get(key)):
                 del base[key]
                 changed = True
                 if key in base_order:

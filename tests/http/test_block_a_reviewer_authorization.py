@@ -822,11 +822,22 @@ class TestPresentationSettings:
         assert resp.status_code == 409, resp.text
         before.assert_intact()
 
-    def test_a_draft_report_is_not_the_reviewers_window(
+    def test_a_draft_report_IS_the_reviewers_window_too(
         self, client, session, with_body
     ):
-        """In DRAFT the author owns the document; the reviewer's narrow route
-        does not apply."""
+        """Céluma 1.3.1 manual-validation remediation (R1, CEL-131-02).
+
+        This test used to be `test_a_draft_report_is_not_the_reviewers_window`
+        and asserted 409, on Block A's reasoning that "in DRAFT the author
+        owns the document". Manual validation rejected that split: the author
+        owns clinical CONTENT in DRAFT, but the letterhead and the signature
+        toggles are reviewer-owned in every state — Block A's own §7 says so —
+        and making the reviewer wait for submission bought nothing.
+
+        The assertion is inverted rather than deleted so the change of
+        contract is visible in the diff, exactly as Block A inverted Block 0's
+        repro cases.
+        """
         report = session.get(Report, with_body["report"].id)
         report.status = ReportStatus.DRAFT
         session.add(report)
@@ -839,10 +850,23 @@ class TestPresentationSettings:
 
         resp = client.patch(
             self.ENDPOINT.format(report.id),
-            json={"show_signature_section": True},
+            json={"show_signature_section": True, "require_digital_signature": True},
             headers=auth_headers(reviewer),
         )
-        assert resp.status_code == 409, resp.text
+        assert resp.status_code == 200, resp.text
+
+        body = _read_body(session, with_body["version"])
+        assert body["signatureMetadata"]["show_signature_section"] is True
+        assert body["signatureMetadata"]["require_digital_signature"] is True
+        # The clinical content is untouched: widening the STATE must not have
+        # widened the mutation surface.
+        assert body["sections"] == [
+            {"key": "micro", "text": "original clinical text"}
+        ]
+        # And the report is still a DRAFT — presentation editing is not a
+        # lifecycle transition.
+        session.expire_all()
+        assert session.get(Report, report.id).status == ReportStatus.DRAFT
 
     def test_reviewer_still_cannot_use_the_content_path(
         self, client, session, with_body

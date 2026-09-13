@@ -39,7 +39,7 @@ BASE_TEMPLATE = {
         "is_visible": True, "label": "Médico solicitante", "value": "",
     },
     "delivery_date": {
-        "is_visible": True, "label": "Fecha de entrega de resultados", "value": "",
+        "is_visible": True, "label": "Fecha de entrega", "value": "",
     },
 }
 

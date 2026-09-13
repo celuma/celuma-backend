@@ -170,6 +170,8 @@ def list_reviewers(
                 id=uid,
                 full_name=u.full_name,
                 email=u.email,
+                # R6: the picker's `@handle`. See `ReviewerItem`.
+                username=u.username,
                 has_signature=u.signature_storage_id is not None,
                 avatar_url=u.avatar_url,
             )
