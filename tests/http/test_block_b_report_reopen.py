@@ -528,18 +528,36 @@ class TestReopenEffects:
         assert len(rows) == 1
         assert rows[0].actor_user_id == admin.id
 
-    def test_the_previous_review_decision_is_preserved(self, client, session, lab):
-        """Historical evidence that the report WAS reviewed and approved is
-        not erased. The reviewer's row keeps its decision and `decision_at`;
-        the next submission is what starts a new review cycle."""
-        decided_at = session.get(ReportReview, lab["review"].id).decision_at
+    def test_the_previous_review_decision_is_RESET_but_the_assignment_is_kept(
+        self, client, session, lab
+    ):
+        """Céluma 1.3.1 manual-validation remediation (R9, CEL-131-03).
 
+        This was `test_the_previous_review_decision_is_preserved` and asserted
+        that the reviewer's row keeps `APPROVED` and its `decision_at`, on
+        Block B's reasoning that the next submission resets it anyway and that
+        clearing it would erase historical evidence.
+
+        Manual validation rejected both halves. The window is not harmless —
+        between the reopen and the next submission the reviewer is rendered
+        with the green APPROVED check, stating that the report holds an
+        approval it no longer has. And no evidence is erased: `report_review`
+        only ever held the LATEST decision per reviewer, so the durable record
+        was always the `REPORT.APPROVE` audit row and the `REPORT_APPROVED`
+        timeline event — both untouched, and both asserted immediately below
+        and in `test_r9_reopen_resets_review_decision.py`.
+
+        The assertion is inverted in place so the change of contract is
+        visible in the diff. What has NOT changed is the assignment: the same
+        row, for the same reviewer, survives."""
         assert _reopen(client, lab["report"], lab["reviewer"]).status_code == 200
 
         session.expire_all()
         review = session.get(ReportReview, lab["review"].id)
-        assert review.status == ReviewStatus.APPROVED
-        assert review.decision_at == decided_at
+        assert review is not None, "the assignment must survive the reopen"
+        assert review.reviewer_user_id == lab["reviewer"].id
+        assert review.status == ReviewStatus.PENDING
+        assert review.decision_at is None
 
     def test_the_approval_audit_row_is_not_rewritten(self, client, session, lab):
         session.add(

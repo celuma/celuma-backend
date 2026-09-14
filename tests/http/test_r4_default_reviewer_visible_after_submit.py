@@ -20,6 +20,16 @@ assignment comes back through the endpoints the UI actually reads — which is
 where "visible after reload" lives, and the exact gap between "the row exists"
 and "the workflow shows it". This module closes that: every assertion here
 goes through an HTTP read, never through the ORM.
+
+**Scope note — R8 moved the primary materialization point.** A later
+remediation changed the product contract: a valid tenant default reviewer is
+now assigned at ORDER CREATION, and submission keeps the same helper as an
+idempotent safety net. Every order here is built with the ORM factory rather
+than through `POST /laboratory/orders/`, so it deliberately reaches submission
+with no reviewer — which makes this module the SAFETY-NET coverage, still
+exactly the path an order created before the release, or created while no
+default was configured, takes today. The primary path is covered by
+`test_r8_default_reviewer_at_order_creation.py`.
 """
 import pytest
 from sqlmodel import Session, select
@@ -88,8 +98,12 @@ def lab(session: Session):
 
 class TestTheAssignmentIsVisibleThroughTheEndpointsTheUiReads:
     def test_the_order_has_no_reviewer_before_submission(self, client, lab):
-        """The premise. If this ever stops holding, every assertion below is
-        passing for the wrong reason."""
+        """The premise of the SAFETY-NET scenario. If this ever stops holding,
+        every assertion below is passing for the wrong reason.
+
+        It holds because this module's orders are ORM-built. An order created
+        through `POST /laboratory/orders/` while a valid default is configured
+        gets its reviewer immediately (R8) and never reaches this state."""
         resp = client.get(
             ORDER_FULL.format(lab["order"].id), headers=auth_headers(lab["author"])
         )

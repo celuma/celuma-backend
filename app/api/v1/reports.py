@@ -87,7 +87,7 @@ from app.services.report_publishing import (
     ReportPublishAlreadyInProgressError,
     ReportPublishConflictError,
 )
-from app.services.report_default_reviewer import resolve_fallback_reviewer_assignment
+from app.services.report_default_reviewer import ensure_default_reviewer_assignment
 from app.services.report_metadata import (
     apply_authoritative_report_metadata,
     embed_delivery_date_at_signing,
@@ -1249,17 +1249,10 @@ def create_report_new_version(
     )
     session.add(new_version)
     
-    # Reset all review statuses to pending when new version is created
-    reviews = session.exec(
-        select(ReportReview).where(ReportReview.order_id == report.order_id)
-    ).all()
-    
-    reviewer_count = 0
-    for review in reviews:
-        review.status = ReviewStatus.PENDING
-        review.decision_at = None
-        session.add(review)
-        reviewer_count += 1
+    # Reset all review statuses to pending when new version is created.
+    # R9 extracted this into `_reset_order_reviews_to_pending`, which is this
+    # exact operation named; the reopen transition now shares it.
+    reviewer_count = _reset_order_reviews_to_pending(session, report.order_id)
     
     # Create timeline event for new version
     from app.models.events import OrderEvent
@@ -2815,23 +2808,40 @@ def submit_report(
     ).all()
 
     if not reviewers:
-        # Céluma 1.3.1 Block D (CEL-131-06): this was already the one moment
-        # "no reviewer assigned" becomes consequential, so the tenant's
-        # configured default reviewer — if any, and only if still eligible
-        # right now — falls back to here rather than a second mechanism.
-        # Never runs when an explicit assignment already exists (the list
-        # above is non-empty in that case), and never fabricates authority:
-        # resolve_fallback_reviewer_assignment returns None for a stale or
-        # unconfigured default, leaving the existing 400 below untouched.
-        fallback = resolve_fallback_reviewer_assignment(session, report)
+        # Céluma 1.3.1 Block D (CEL-131-06), amended by the manual-validation
+        # remediation (R8): the tenant's configured default reviewer is now
+        # materialized at ORDER CREATION, so by the time a normal report
+        # reaches submission the order already has this assignment and the
+        # guard above short-circuits.
+        #
+        # This call is the SAFETY NET, not the primary path, and it is the
+        # same helper — there is one implementation of "materialize the
+        # default", not two. It still matters for: orders created before this
+        # release; orders created while no default was configured; a default
+        # configured after the order already existed; and any other legitimate
+        # order that reaches submission with no reviewer.
+        #
+        # `ensure_default_reviewer_assignment` re-checks emptiness itself, so
+        # it is idempotent and cannot duplicate the order-creation row. It
+        # never fabricates authority either: a stale or unconfigured default
+        # returns None and the pre-existing 400 below stands.
+        fallback = ensure_default_reviewer_assignment(
+            session,
+            tenant_id=report.tenant_id,
+            order_id=report.order_id,
+            report_id=report.id,
+        )
         if fallback is not None:
-            session.add(fallback)
             reviewers = [fallback]
 
     if not reviewers or len(reviewers) == 0:
         raise HTTPException(400, "Cannot submit report for review without reviewers assigned")
     
-    # Reset all reviews to PENDING when re-submitting (allows re-review after changes)
+    # Reset all reviews to PENDING when re-submitting (allows re-review after
+    # changes). Deliberately NOT `_reset_order_reviews_to_pending`: that helper
+    # re-queries the table, while this list may hold the safety-net row created
+    # moments ago and not yet flushed. Same semantics, applied to the list this
+    # route already resolved.
     for reviewer in reviewers:
         reviewer.status = ReviewStatus.PENDING
         reviewer.decision_at = None
@@ -3140,6 +3150,43 @@ def request_changes(
     )
 
 
+def _reset_order_reviews_to_pending(session: Session, order_id) -> int:
+    """Return every reviewer of an order to PENDING and clear their decision.
+    Returns how many rows were reset.
+
+    This is the workflow's canonical "a new review cycle starts now" step. It
+    already existed, inline and identical, in two places — `submit_report` and
+    `create_report_new_version` — and this is that same operation, named, so a
+    third caller reuses it instead of reimplementing a state transition.
+
+    The semantics are deliberately narrow and are what make it safe to call on
+    a reopen:
+
+    * the ASSIGNMENT is untouched — no row is created and none is deleted, so
+      who reviews this order does not change;
+    * only the *current operational decision* is cleared. `REJECTED` is not
+      used: the previous cycle was not rejected, it is simply no longer
+      current;
+    * the historical evidence of the previous decision lives in `audit_log`
+      (`REPORT.APPROVE`) and in the order timeline (`REPORT_APPROVED`), which
+      this never touches. `report_review` only ever held the LATEST decision
+      per reviewer — that predates 1.3.1 and is why the durable record is kept
+      elsewhere.
+
+    Every row for the order is reset rather than just the one belonging to
+    whoever acted, because a reopened report has to be reconsidered by every
+    reviewer participating in its cycle.
+    """
+    reviews = session.exec(
+        select(ReportReview).where(ReportReview.order_id == order_id)
+    ).all()
+    for review in reviews:
+        review.status = ReviewStatus.PENDING
+        review.decision_at = None
+        session.add(review)
+    return len(reviews)
+
+
 @router.post("/{report_id}/reopen", response_model=ReportActionResponse)
 def reopen_report(
     report_id: str,
@@ -3191,12 +3238,15 @@ def reopen_report(
     # current lifecycle code; the full disposition table is in
     # docs/celuma-1.3.1/block-b/lifecycle-contract.md §4. In short:
     #
-    #   * `ReportReview` rows keep the previous decision and its
-    #     `decision_at`. They are historical evidence that this report WAS
-    #     reviewed, and `submit_report` already resets every reviewer of the
-    #     order to PENDING on the next submission — which is exactly the
-    #     "new review cycle" this transition needs, and exactly what the
-    #     existing IN_REVIEW → DRAFT path (request-changes) relies on.
+    #   * `ReportReview` rows keep their ASSIGNMENT and lose their stale
+    #     DECISION — see `_reset_order_reviews_to_pending` immediately below.
+    #     Block B originally preserved the decision too, reasoning that
+    #     `submit_report` resets it on the next submission anyway. Manual
+    #     validation found the gap that leaves: between the reopen and that
+    #     next submission the reviewer is still rendered with the green
+    #     APPROVED check, which states that the report currently carries an
+    #     approval it no longer has. The approval is reversed the moment the
+    #     report is reopened, so the decision is cleared at the same moment.
     #   * PDF generation state on the version is left alone. It is the record
     #     of an artifact that really was produced, and `sign-and-publish`
     #     regenerates with `force=True`, so a stale PDF can never be the one
@@ -3211,6 +3261,13 @@ def reopen_report(
     #     reopen → author edits / reviewer adjusts presentation → resubmit →
     #     approve.
 
+    # Céluma 1.3.1 manual-validation remediation (R9): the reopened report is
+    # no longer approved, so no reviewer may still be recorded as having
+    # approved it. Reuses the workflow's canonical reset rather than a second
+    # implementation, and runs BEFORE the audit record so the count it reports
+    # is the one that was actually applied.
+    reviews_reset = _reset_order_reviews_to_pending(session, report.order_id)
+
     _create_audit_log(
         session=session,
         tenant_id=ctx.tenant_id,
@@ -3224,6 +3281,11 @@ def reopen_report(
             "status": report.status,
             "reopened_version_no": current_version.version_no,
             "changelog": data.changelog,
+            # R9: how many reviewer decisions this reopen invalidated. The
+            # decisions themselves stay in the trail as their own
+            # REPORT.APPROVE rows — this only records that they stopped being
+            # current, and when.
+            "reviews_reset_to_pending": reviews_reset,
         },
     )
 

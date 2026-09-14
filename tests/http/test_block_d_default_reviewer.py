@@ -329,8 +329,12 @@ class TestFallbackAtSubmission:
         """Backend-side, not only through the configuration endpoint's own
         validation: even a row that somehow pointed cross-tenant is refused
         by the resolver itself."""
+        # R8 renamed this helper: `resolve_fallback_reviewer_assignment` became
+        # `ensure_default_reviewer_assignment`, one canonical implementation now
+        # shared by order creation and the submit safety net. The tenant check
+        # it performs is unchanged, which is what this asserts.
         from app.services.report_default_reviewer import (
-            resolve_fallback_reviewer_assignment,
+            ensure_default_reviewer_assignment,
         )
 
         tenant = create_tenant(session)
@@ -345,7 +349,15 @@ class TestFallbackAtSubmission:
         session.add(tenant)
         session.commit()
 
-        assert resolve_fallback_reviewer_assignment(session, report) is None
+        assert (
+            ensure_default_reviewer_assignment(
+                session,
+                tenant_id=report.tenant_id,
+                order_id=report.order_id,
+                report_id=report.id,
+            )
+            is None
+        )
 
 
 # ---------------------------------------------------------------------------

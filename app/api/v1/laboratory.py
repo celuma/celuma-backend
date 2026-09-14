@@ -17,6 +17,9 @@ from app.models.events import OrderEvent
 from app.models.enums import EventType, SampleState, AssignmentItemType, ReviewStatus
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
+from app.services.report_default_reviewer import (
+    ensure_default_reviewer_assignment,
+)
 from app.services.usage import UsageService
 from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from datetime import datetime
@@ -407,7 +410,9 @@ def create_order(
     
     session.add(order)
     session.flush()  # Get order.id before creating invoice
-    
+
+    _materialize_default_reviewer(session, order)
+
     # Create invoice automatically
     from app.api.v1.billing import create_invoice_for_order
     try:
@@ -1384,6 +1389,8 @@ def create_order_with_samples(
     )
     session.add(order)
     session.flush()  # get order.id for samples
+
+    _materialize_default_reviewer(session, order)
 
     # Create samples
     created_samples: list[Sample] = []
@@ -2568,6 +2575,57 @@ def _sync_assignments(
         session.add(assignment)
     
     return added, removed
+
+
+def _materialize_default_reviewer(session: Session, order) -> None:
+    """Assign the tenant's configured default reviewer to a brand-new order.
+
+    Céluma 1.3.1 manual-validation remediation (R8, CEL-131-06). The default
+    reviewer used to materialize only at submission, which meant an order read
+    "Sin revisores asignados" for its whole authoring phase and — since R1 let
+    an ASSIGNED reviewer configure a DRAFT report's presentation — a laboratory
+    whose reviewer is the tenant default could not use that at all. The product
+    contract now materializes at order creation; `submit_report` keeps the same
+    helper as an idempotent safety net.
+
+    All of the logic lives in `ensure_default_reviewer_assignment`: explicit
+    assignments win, an ineligible default is skipped, and the call is
+    idempotent, so this wrapper adds nothing but the failure policy.
+
+    **That failure policy is the point of the wrapper.** Assigning a default
+    reviewer is a convenience, not part of what makes an order valid, so it
+    must never be the reason a laboratory cannot register a case. The helper
+    already returns `None` rather than raising for every *expected* rejection
+    (no default, stale default, order already has one); this contains the
+    unexpected — the same treatment, for the same reason, that the automatic
+    invoice beside it already gets.
+    """
+    try:
+        review = ensure_default_reviewer_assignment(
+            session,
+            tenant_id=order.tenant_id,
+            order_id=order.id,
+        )
+    except Exception as e:  # noqa: BLE001 - deliberately contained; see above
+        logger.warning(
+            f"Failed to assign the default reviewer to order {order.order_code}: {e}",
+            extra={
+                "event": "default_reviewer.auto_assign_failed",
+                "order_id": str(order.id),
+                "error": str(e),
+            },
+        )
+        return
+
+    if review is not None:
+        logger.info(
+            f"Default reviewer assigned to order {order.order_code}",
+            extra={
+                "event": "default_reviewer.auto_assigned",
+                "order_id": str(order.id),
+                "reviewer_user_id": str(review.reviewer_user_id),
+            },
+        )
 
 
 def _sync_report_reviewers(
