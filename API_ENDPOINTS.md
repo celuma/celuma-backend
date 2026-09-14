@@ -28,7 +28,6 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
   - `GET /health`
   - `GET /api/v1/health`
   - `POST /api/v1/auth/login`
-  - `POST /api/v1/auth/register`
   - `POST /api/v1/auth/register/unified`
   - `POST /api/v1/auth/password-reset/request`
   - `POST /api/v1/auth/password-reset/verify`
@@ -41,37 +40,25 @@ The API is designed with JSON request bodies for all POST endpoints, providing:
 Authorization: Bearer <jwt_token>
 ```
 
-### POST /api/v1/auth/register
-**Register a new user**
+### POST /api/v1/auth/register — **REMOVED (Céluma 1.3.1, CEL-131-11)**
 
-**Request Body:**
-```json
-{
-  "email": "user@example.com",
-  "username": "johndoe",
-  "password": "securepassword123",
-  "full_name": "John Doe",
-  "role": "admin",
-  "tenant_id": "tenant-uuid-here"
-}
-```
+This route no longer exists; the path returns **404**.
 
-**Response:**
-```json
-{
-  "id": "user-uuid",
-    "email": "user@example.com",
-    "username": "johndoe",
-    "full_name": "John Doe",
-    "role": "admin",
-    "branch_ids": []
-  }
-```
+It was unauthenticated and accepted `tenant_id` and `role` from the request
+body, so any caller who knew a tenant UUID could create themselves an account
+in that laboratory with any role — including `superuser`, which holds the
+entire permission catalogue. It had no frontend caller and no test.
 
-**Notes:**
-- `username` field is **optional** - users can register with or without a username
-- If `username` is provided, it must be unique within the tenant
-- `email` is always required and must be unique within the tenant
+Use instead:
+
+- **`POST /api/v1/auth/register/unified`** (below) to onboard a new laboratory:
+  tenant + default branch + admin user, created atomically.
+- **`POST /api/v1/users/`** or the invitation flow to add staff to an existing
+  laboratory. Both are authenticated and require `admin:manage_users`.
+
+Note that role assignment carries its own rules from 1.3.1 onward — in
+particular nobody may grant themselves the clinical `reviewer` role. See
+`ROLES_Y_PERMISOS.md` §Contrato clínico del revisor.
 
 ### POST /api/v1/auth/register/unified
 **Unified registration: create tenant, branch and admin user**
@@ -756,14 +743,17 @@ Headers: `Authorization: Bearer <token>`
 ```
 
 ### PATCH /api/v1/tenants/{tenant_id}
-**Update tenant details (Admin only)**
+**Update tenant details (requires `admin:manage_tenant`)**
 
 **Request Body:**
 ```json
 {
   "name": "Updated Laboratory Name",
   "legal_name": "Updated Legal Name Inc.",
-  "tax_id": "NEW123456789"
+  "tax_id": "NEW123456789",
+  "reports_v2_enabled": true,
+  "default_reviewer_id": "user-uuid",
+  "clear_default_reviewer": false
 }
 ```
 
@@ -773,14 +763,26 @@ Headers: `Authorization: Bearer <token>`
   "id": "tenant-uuid",
   "name": "Updated Laboratory Name",
   "legal_name": "Updated Legal Name Inc.",
-  "tax_id": "NEW123456789"
+  "tax_id": "NEW123456789",
+  "reports_v2_enabled": true,
+  "default_reviewer_id": "user-uuid",
+  "default_reviewer": { "id": "user-uuid", "full_name": "Dra. Revisora", "email": "rev@example.com" }
 }
 ```
 
 **Notes:**
 - All fields are optional; only provided fields are updated
-- Admin role required
+- `admin:manage_tenant` permission required
 - Can only update own tenant
+- **`default_reviewer_id` (Céluma 1.3.1, CEL-131-06):** the tenant-level
+  default reviewer — a fallback, never a role or permission grant. The
+  target user must exist, belong to this tenant, be active, and hold the
+  `reviewer` role, or this returns `400` (not found / wrong tenant) or `422`
+  (ineligible). `clear_default_reviewer: true` clears the setting and takes
+  precedence over `default_reviewer_id` in the same request; omitting both
+  leaves the current value untouched (`null` alone is indistinguishable from
+  "not submitted"). See
+  `docs/celuma-1.3.1/block-d/default-reviewer-contract.md`.
 
 ### POST /api/v1/tenants/{tenant_id}/logo
 **Upload tenant logo (Admin only)**
@@ -1855,9 +1857,19 @@ Path param:
 ```
 
 **Behavior:**
+- **Only `DRAFT` and `IN_REVIEW` accept a new version** (Céluma 1.3.1, finding
+  B-3). `APPROVED` is refused with `409` and a message pointing at
+  `POST /{report_id}/reopen`: an approved report must be reopened — and
+  reviewed and approved again — before its clinical content can change,
+  otherwise the approval would attest to text that no longer exists.
+  `PUBLISHED` and `RETRACTED` remain refused with `409`, unchanged.
+- Requires `reports:edit`, checked before the lifecycle state, so a caller
+  without it is refused `403` whatever the report's status.
 - Increments `version_no` from the current version.
 - Marks previous `is_current` as false; new version becomes `is_current=true`.
 - If `report` is included, uploads JSON to S3 and links it to the version.
+- Signature settings are carried forward and a `letterhead_version_id` is
+  refused `403` — both are reviewer-only (see `PATCH /{report_id}/presentation`).
 
 **Response:**
 ```json
@@ -2073,6 +2085,43 @@ Path param:
 - Transitions report from IN_REVIEW back to DRAFT status
 - Comment is required to explain what changes are needed
 - Creates an audit log entry with the comment
+
+### POST /api/v1/reports/{report_id}/reopen
+**Reopen an approved, unsigned report (APPROVED → DRAFT)** — Céluma 1.3.1, CEL-131-03
+
+**Request Body:**
+```json
+{
+  "changelog": "Membrete equivocado; se corrige antes de firmar"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "report-uuid",
+  "status": "DRAFT",
+  "message": "Reporte reabierto. Vuelve a borrador y debe enviarse a revisión y aprobarse de nuevo antes de poder firmarse."
+}
+```
+
+**Notes:**
+- Authorized for the **assigned reviewer** (reviewer role + `reports:approve` +
+  a `ReportReview` row for the order) and for administrators through
+  `reports:manage_templates` (`admin`, `superuser`). That administrative
+  capability grants reopening **only**: it never confers approval, signing or
+  the presentation settings.
+- Only a report in `APPROVED` status can be reopened (`400` otherwise).
+- **A signed report is never reopened** (`409`). The guard is signature
+  evidence on the report's versions (`signed_at` / `signed_by`) plus
+  `published_at`, not `status` alone. Amending a signed report belongs to the
+  future amendment workflow.
+- The report returns to `DRAFT` and must travel submit → review → approval
+  again before it can be signed. Reopening does not re-open the reviewer
+  presentation window, which stays `IN_REVIEW`-only.
+- Reviewer assignments and their previous decisions are **preserved**;
+  `POST /{report_id}/submit` resets them to PENDING on the next submission.
+- Creates an audit log entry (`REPORT.REOPEN`). `changelog` is optional.
 
 ### POST /api/v1/reports/{report_id}/sign
 **Sign and publish a report (APPROVED → PUBLISHED) - Pathologist only**

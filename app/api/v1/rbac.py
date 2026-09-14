@@ -23,6 +23,7 @@ from app.core.rbac import (
     count_active_users_with_role,
     ROLE_SUPERUSER,
     ROLE_ADMIN,
+    ROLE_REVIEWER,
 )
 from app.models.permission import Permission
 from app.models.role import Role
@@ -181,6 +182,7 @@ def set_user_roles(
     Rules enforced:
     - Actor must have admin:manage_users.
     - Only superuser may assign or remove the superuser role.
+    - Nobody may grant themselves the clinical `reviewer` role (1.3.1 A7).
     - Cannot remove all roles from a user (at least one required).
     """
     target = session.get(AppUser, user_id)
@@ -202,6 +204,40 @@ def set_user_roles(
 
     if (superuser_being_added or superuser_being_removed) and ROLE_SUPERUSER not in actor_roles:
         raise HTTPException(403, "Only a superuser can assign or remove the superuser role")
+
+    # Céluma 1.3.1 Block A / A7 — reviewer self-escalation (Block 0 finding
+    # F-5). This endpoint requires only `admin:manage_users`, so before 1.3.1
+    # an administrator could add `reviewer` to their OWN roles and thereby
+    # acquire approval and signing authority over clinical reports. That
+    # defeats the entire reviewer boundary CEL-131-01 exists to establish:
+    # the point of the double lock is that administrative privilege is not a
+    # route to clinical authority, and self-granting the role is exactly such
+    # a route.
+    #
+    # Scoped deliberately to SELF-assignment of `reviewer`:
+    #   * granting `reviewer` to ANOTHER eligible user stays allowed — the
+    #     product contract has administrators manage who reviews, and
+    #     `PUT /laboratory/orders/{id}/reviewers` already depends on it;
+    #   * holding `admin` + `reviewer` together stays legal — roles are
+    #     additive and a small laboratory may legitimately need one person in
+    #     both roles. What must not happen is one person *creating* that
+    #     combination for themselves, unilaterally and unwitnessed;
+    #   * removing `reviewer` from yourself stays allowed — dropping
+    #     privilege is not escalation.
+    #
+    # The result is a two-person rule: someone else with `admin:manage_users`
+    # must grant it, which leaves an actor in the audit trail who is not the
+    # beneficiary.
+    reviewer_being_self_added = (
+        str(target.id) == str(actor.id)
+        and ROLE_REVIEWER in (requested_roles - target_current_roles)
+    )
+    if reviewer_being_self_added:
+        raise HTTPException(
+            403,
+            f"You cannot grant yourself the '{ROLE_REVIEWER}' role. "
+            "Another administrator must assign it.",
+        )
 
     # Prevent stranding the tenant without any administrator
     losing_admin = ROLE_ADMIN in target_current_roles and ROLE_ADMIN not in requested_roles

@@ -29,7 +29,14 @@ from app.models.enums import ReportStatus
 from app.models.report import Report, ReportVersion
 
 from .conftest import make_pdf_bytes
-from .factories import auth_headers, create_branch, create_order, create_tenant, create_user
+from .factories import (
+    assign_reviewer,
+    auth_headers,
+    create_branch,
+    create_order,
+    create_tenant,
+    create_user,
+)
 
 
 def _report_with_official_pdf(client, session, tenant, branch, order, stub_pdf_render, editor):
@@ -183,6 +190,8 @@ class TestSignAndPublishResponseContract:
         signer = create_user(
             session, tenant, email="signer@t1.example", roles=(ROLE_SUPERUSER, ROLE_REVIEWER)
         )
+        # 1.3.1 Block A: signing now requires assignment, not just the role.
+        assign_reviewer(session, order, signer)
 
         report = Report(
             tenant_id=tenant.id,
@@ -231,6 +240,8 @@ class TestSignAndPublishResponseContract:
         signer = create_user(
             session, tenant, email="signer2@t1.example", roles=(ROLE_SUPERUSER, ROLE_REVIEWER)
         )
+        # 1.3.1 Block A: signing now requires assignment, not just the role.
+        assign_reviewer(session, order, signer)
 
         report = Report(
             tenant_id=tenant.id,

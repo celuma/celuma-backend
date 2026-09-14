@@ -9,7 +9,6 @@ revision and activates it, but never asks for that explicitly.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from datetime import datetime
@@ -26,13 +25,15 @@ from app.services.letterhead_resolution import (
     LetterheadResolutionError,
     resolve_effective_letterhead_version,
 )
+from app.services.report_template_hash import hash_clinical_template_block
 
 logger = logging.getLogger(__name__)
 
 
-def _hash_template_block(template_block: Optional[Dict[str, Any]]) -> str:
-    canonical = json.dumps(template_block or {}, sort_keys=True, default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+# Céluma 1.3.1 Block C (C-8): `_hash_template_block` moved to
+# `app/services/report_template_hash.py` so report creation can use the SAME
+# definition of "the clinical structure changed" as this service. There must be
+# exactly one implementation — see that module's docstring.
 
 
 def snapshot_and_activate_template_version(
@@ -59,10 +60,10 @@ def snapshot_and_activate_template_version(
         )
     ).first()
 
-    new_hash = _hash_template_block(template.template_json)
+    new_hash = hash_clinical_template_block(template.template_json)
     if active_version is not None:
         existing_block = (active_version.configuration or {}).get("template")
-        if _hash_template_block(existing_block) == new_hash:
+        if hash_clinical_template_block(existing_block) == new_hash:
             return active_version
 
     # Third remediation: resolution is deterministic and reports its source.

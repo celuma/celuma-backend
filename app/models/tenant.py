@@ -57,10 +57,47 @@ class Tenant(BaseModel, TimestampMixin, table=True):
     # Does not affect rendering of existing reports (schema_version-based,
     # see report-schema-versioning.md) and is not read anywhere in this block.
     reports_v2_enabled: bool = Field(default=False)
+    # Céluma 1.3.1 Block D (CEL-131-06): a tenant-scoped CONFIGURATION
+    # reference only — never a role, a permission, or clinical authority.
+    # `submit_report` falls back to this user, with live eligibility
+    # revalidated at that moment, only when the order has no explicit
+    # ReportReview at all; an explicit assignment is never overwritten. See
+    # docs/celuma-1.3.1/block-d/default-reviewer-contract.md.
+    #
+    # `use_alter` for the same reason as `logo_storage_id` above: tenant and
+    # app_user reference each other (app_user.tenant_id -> tenant.id), so the
+    # FK is emitted separately rather than ordering the cycle. ON DELETE SET
+    # NULL: deleting the user must only clear the tenant's preference, never
+    # cascade or block the deletion.
+    default_reviewer_id: Optional[UUID] = Field(
+        default=None,
+        sa_column=Column(
+            "default_reviewer_id",
+            PGUUID(as_uuid=True),
+            ForeignKey(
+                "app_user.id",
+                name="fk_tenant_default_reviewer_id_app_user",
+                use_alter=True,
+                ondelete="SET NULL",
+            ),
+            nullable=True,
+        ),
+    )
 
     # Basic relationships only - will add more as we fix the models
     branches: List["Branch"] = Relationship(back_populates="tenant")
-    users: List["AppUser"] = Relationship(back_populates="tenant")
+    # `foreign_keys` disambiguates from `default_reviewer_id` above: after
+    # Block D there are two FK paths between `tenant` and `app_user`
+    # (`app_user.tenant_id -> tenant.id`, the membership this relationship
+    # means, and `tenant.default_reviewer_id -> app_user.id`, a one-off
+    # configuration pointer with no relationship of its own — it is read via
+    # `session.get(AppUser, tenant.default_reviewer_id)`, matching this
+    # codebase's convention for FKs that would otherwise create relationship
+    # ambiguity, e.g. `Order.report_id`/`Order.invoice_id`).
+    users: List["AppUser"] = Relationship(
+        back_populates="tenant",
+        sa_relationship_kwargs={"foreign_keys": "AppUser.tenant_id"},
+    )
 
 class Branch(BaseModel, TimestampMixin, table=True):
     """Branch model for tenant locations"""

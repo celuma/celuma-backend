@@ -6,7 +6,14 @@ from app.models.enums import ReportStatus
 from app.models.report import Report, ReportVersion
 
 from .conftest import make_pdf_bytes
-from .factories import auth_headers, create_branch, create_order, create_tenant, create_user
+from .factories import (
+    assign_reviewer,
+    auth_headers,
+    create_branch,
+    create_order,
+    create_tenant,
+    create_user,
+)
 
 
 def _create_report(session: Session, tenant, branch, order, status=ReportStatus.APPROVED):
@@ -104,6 +111,8 @@ class TestOfficialDownload:
         # user with reports:edit generates the PDF first.
         editor = create_user(session, tenant, email="editor@t1.example")
         reviewer = create_user(session, tenant, email="rev@t1.example", roles=(ROLE_REVIEWER,))
+        # 1.3.1 Block A: signing now requires assignment, not just the role.
+        assign_reviewer(session, order, reviewer)
         report, _ = _create_report(session, tenant, branch, order)
 
         stub_pdf_render.succeed(make_pdf_bytes(1))

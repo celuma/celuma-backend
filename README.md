@@ -253,7 +253,6 @@ make clean                # Clean up Docker images and containers
 - **Health**: `GET /api/v1/health`
 - **Authentication**: 
   - `POST /api/v1/auth/login` - Flexible login with username or email
-  - `POST /api/v1/auth/register` - User registration with optional username
   - `POST /api/v1/auth/register/unified` - Unified registration (tenant + branch + admin)
   - `GET /api/v1/auth/me` - Get current user profile
   - `PUT /api/v1/auth/me` - Update profile and password
@@ -365,7 +364,7 @@ make clean                # Clean up Docker images and containers
 - **JWT Tokens**: Secure stateless authentication with configurable expiration
   
 #### Global Authentication Policy
-- All endpoints require `Authorization: Bearer <token>` except: `GET /`, `GET /health`, `GET /api/v1/health`, `POST /api/v1/auth/login`, `POST /api/v1/auth/register`, `POST /api/v1/auth/register/unified`.
+- All endpoints require `Authorization: Bearer <token>` except: `GET /`, `GET /health`, `GET /api/v1/health`, `POST /api/v1/auth/login`, `POST /api/v1/auth/register/unified`.
 
 ## 🚀 Deployment
 

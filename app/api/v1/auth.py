@@ -20,7 +20,6 @@ from app.services.usage_thresholds import UsageThresholdService
 from datetime import timedelta
 import secrets
 from app.schemas.auth import (
-    UserRegister,
     UserLogin,
     UserResponse,
     LoginResponse,
@@ -54,64 +53,34 @@ def split_full_name(full_name: str) -> tuple[str, str]:
     if len(parts) == 1:
         return parts[0], ""
     return parts[0], parts[1]
-
-@router.post("/register", response_model=UserResponse)
-def register(user_data: UserRegister, session: Session = Depends(get_session)):
-    """Register a new user"""
-    logger.info(
-        "Register request received",
-        extra={
-            "event": "auth.register",
-            "email": user_data.email,
-            "username": user_data.username,
-            "tenant_id": str(user_data.tenant_id),
-        },
-    )
-    # Check if email already exists for this tenant
-    if session.exec(select(AppUser).where(AppUser.email == user_data.email, AppUser.tenant_id == user_data.tenant_id)).first():
-        logger.warning("Email already registered for tenant", extra={"event": "auth.register.conflict_email", "email": user_data.email, "tenant_id": str(user_data.tenant_id)})
-        raise HTTPException(400, "Email already registered for this tenant")
-    
-    # Check if username already exists for this tenant (if provided)
-    if user_data.username:
-        if session.exec(select(AppUser).where(AppUser.username == user_data.username, AppUser.tenant_id == user_data.tenant_id)).first():
-            logger.warning("Username already registered for tenant", extra={"event": "auth.register.conflict_username", "username": user_data.username, "tenant_id": str(user_data.tenant_id)})
-            raise HTTPException(400, "Username already registered for this tenant")
-    
-    first_name, last_name = split_full_name(user_data.full_name)
-    u = AppUser(
-        email=user_data.email,
-        username=user_data.username,
-        full_name=user_data.full_name,
-        first_name=first_name,
-        last_name=last_name,
-        tenant_id=user_data.tenant_id,
-        hashed_password=hash_password(user_data.password),
-    )
-    session.add(u)
-    session.flush()
-    # Assign the requested role (validated against catalog)
-    try:
-        assign_role_by_code(u.id, user_data.role, session)
-    except ValueError:
-        raise HTTPException(400, f"Unknown role: {user_data.role}")
-    # Céluma 1.3 Phase 4, Block G: self-registration creates an active user
-    # with a role, which is a seat like any other. No actor — the request is
-    # unauthenticated — so the notification is attributed to no one.
-    UsageThresholdService.evaluate_users(
-        session, u.tenant_id, source="user_self_registered"
-    )
-    session.commit()
-    session.refresh(u)
-    logger.info("User registered successfully", extra={"event": "auth.register.success", "user_id": str(u.id), "email": u.email, "tenant_id": str(u.tenant_id)})
-    return UserResponse(
-        id=str(u.id),
-        email=u.email,
-        username=u.username,
-        full_name=u.full_name,
-        roles=get_user_roles(u.id, session),
-        branch_ids=[],
-    )
+# ---------------------------------------------------------------------------
+# Céluma 1.3.1 Block A — CEL-131-11 (P0, privilege escalation)
+# ---------------------------------------------------------------------------
+#
+# `POST /api/v1/auth/register` was REMOVED here.
+#
+# It was unauthenticated and took both `tenant_id` and `role` straight from the
+# request body, then called `assign_role_by_code` with whatever was supplied.
+# Anyone who knew (or guessed) a tenant UUID could mint themselves a
+# `reviewer` — defeating the clinical boundary the rest of Block A builds — or,
+# far worse, a `superuser`, which holds the entire permission catalogue and
+# means total compromise of that laboratory.
+#
+# Removed rather than gated, following the precedent set for the equally
+# unsafe `POST /api/v1/tenants/` (see
+# tests/http/test_block_f_tenant_creation_contract.py): deciding who may
+# self-register, into which tenant, with which role, is a product decision
+# about onboarding, not a security patch — and inventing that answer inside a
+# hotfix would be the wrong place to make it.
+#
+# It had no caller and no test. Real onboarding goes through
+# `POST /api/v1/auth/register/unified`, which creates tenant + default branch +
+# admin atomically; staff are added by an administrator through
+# `POST /api/v1/users/` or the invitation flow, both of which are
+# authenticated and permission-checked.
+#
+# The absence is the assertion: the path now answers 404. See
+# tests/http/test_cel_131_11_legacy_registration.py.
 
 def current_user(request: Request, token=Depends(scheme), session: Session = Depends(get_session)):
     request_id = getattr(request.state, "request_id", "unknown")[:8]

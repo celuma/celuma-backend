@@ -77,7 +77,14 @@ def v2_world(client, session):
     tenant = create_tenant(session, reports_v2_enabled=True)
     branch = create_branch(session, tenant)
     order = create_order(session, tenant, branch)
-    user = create_user(session, tenant, email="admin@t1.example")
+    # 1.3.1 Block A: this fixture's user acts as the report's reviewer in
+    # `TestLetterheadFreezeAtReview` (it assigns itself a `ReportReview` and
+    # calls request-changes). `superuser` holds `reports:approve` but not the
+    # `reviewer` role, and the role is now required — so the role is explicit
+    # here rather than implied by the permission.
+    user = create_user(
+        session, tenant, email="admin@t1.example", roles=("superuser", "reviewer")
+    )
     headers = auth_headers(user)
 
     template = _create_template(session, tenant)
@@ -137,65 +144,111 @@ def _get(client, w):
     return resp.json()
 
 
-class TestDraftLetterheadChange:
+def _enter_review(client, session, w):
+    """Move the report to IN_REVIEW with `w["user"]` as its assigned reviewer.
+
+    Céluma 1.3.1 Block A: this is now the precondition for every letterhead
+    change below. The fixture user holds `("superuser", "reviewer")`, so it
+    satisfies the role and capability halves; the `ReportReview` row is the
+    assignment half.
+    """
+    from sqlmodel import select
+
+    from app.models.enums import ReviewStatus
+
+    # Idempotent: after `request-changes` the existing row is REJECTED, and a
+    # partial unique index forbids a second PENDING row for the same
+    # (tenant, order, reviewer). Re-arm the existing assignment instead.
+    existing = session.exec(
+        select(ReportReview).where(
+            ReportReview.order_id == w["order"].id,
+            ReportReview.reviewer_user_id == w["user"].id,
+        )
+    ).first()
+    if existing is None:
+        existing = ReportReview(
+            tenant_id=w["tenant"].id,
+            branch_id=w["branch"].id,
+            order_id=w["order"].id,
+            reviewer_user_id=w["user"].id,
+        )
+    existing.status = ReviewStatus.PENDING
+    existing.decision_at = None
+    session.add(existing)
+    session.commit()
+    resp = client.post(
+        f"/api/v1/reports/{w['report_id']}/submit", json={}, headers=w["headers"]
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def _change_letterhead(client, w, letterhead_version_id):
+    """The reviewer's letterhead change — the narrow presentation route."""
+    return client.patch(
+        f"/api/v1/reports/{w['report_id']}/presentation",
+        json={"letterhead_version_id": str(letterhead_version_id)},
+        headers=w["headers"],
+    )
+
+
+@pytest.fixture
+def in_review(client, session, v2_world):
+    """`v2_world`, submitted, with the fixture user as assigned reviewer."""
+    _enter_review(client, session, v2_world)
+    return v2_world
+
+
+class TestReviewerLetterheadChange:
+    """Céluma 1.3.1 Block A SUPERSEDED remediation 5's boundary.
+
+    Remediation 5 made the letterhead editable while DRAFT and frozen at
+    submission, on the premise that it belongs to whoever is writing the
+    report. The 1.3.1 product contract is that it belongs to the assigned
+    REVIEWER — the letterhead decides what the final clinical document looks
+    like — so the window moved to IN_REVIEW and the actor moved to the
+    reviewer.
+
+    Everything remediation 5 guaranteed ABOUT a change is unchanged and still
+    pinned here: what changes is `ReportVersion.letterhead_version_id` and
+    `rendering_snapshot.presentation`; what never changes is the clinical
+    template, `template_version_id`, base fields, sections, values and images.
+    """
+
     def test_new_report_resolves_default_letterhead(self, client, v2_world):
+        """Creation still resolves the tenant default server-side. Nobody
+        picks a letterhead at creation time — not even the reviewer."""
         detail = _get(client, v2_world)
         assert detail["schema_version"] == 2
         assert detail["letterhead_version_id"] == str(v2_world["default_version"].id)
 
-    def test_persisted_draft_can_change_letterhead(self, client, v2_world):
-        """The heart of Observation A: an ALREADY-SAVED DRAFT changes
-        letterhead. Previously, `_carry_forward_v2_metadata` always
-        reimposed the original letterhead and the request was silently
-        ignored."""
-        resp = _save_draft(
-            client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)
-        )
+    def test_the_assigned_reviewer_can_change_it(self, client, in_review):
+        resp = _change_letterhead(client, in_review, in_review["other_version"].id)
         assert resp.status_code == 200, resp.text
-        assert resp.json()["letterhead_version_id"] == str(v2_world["other_version"].id)
+        assert resp.json()["letterhead_version_id"] == str(
+            in_review["other_version"].id
+        )
 
-        detail = _get(client, v2_world)
-        assert detail["letterhead_version_id"] == str(v2_world["other_version"].id)
+        detail = _get(client, in_review)
+        assert detail["letterhead_version_id"] == str(in_review["other_version"].id)
         presentation = detail["report"]["rendering_snapshot"]["presentation"]
         assert presentation["header"]["institution_name"] == "Laboratorio Nefropatología"
 
-    def test_reopened_draft_can_change_letterhead(self, client, v2_world):
-        """Reopen (reread via /full) then change: the same path the user
-        takes in the UI."""
-        full = client.get(
-            f"/api/v1/reports/{v2_world['report_id']}/full", headers=v2_world["headers"]
-        )
-        assert full.status_code == 200, full.text
-        assert full.json()["report"]["status"] == ReportStatus.DRAFT
-
-        resp = _save_draft(
-            client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)
-        )
-        assert resp.status_code == 200, resp.text
-        assert _get(client, v2_world)["letterhead_version_id"] == str(
-            v2_world["other_version"].id
-        )
-
-    def test_can_change_letterhead_several_times(self, client, v2_world):
+    def test_can_change_letterhead_several_times(self, client, in_review):
         for expected in (
-            v2_world["other_version"].id,
-            v2_world["default_version"].id,
-            v2_world["other_version"].id,
+            in_review["other_version"].id,
+            in_review["default_version"].id,
+            in_review["other_version"].id,
         ):
-            resp = _save_draft(client, v2_world, letterhead_version_id=str(expected))
+            resp = _change_letterhead(client, in_review, expected)
             assert resp.status_code == 200, resp.text
-            assert _get(client, v2_world)["letterhead_version_id"] == str(expected)
+            assert _get(client, in_review)["letterhead_version_id"] == str(expected)
 
-    def test_change_preserves_clinical_content(self, client, v2_world):
+    def test_change_preserves_clinical_content(self, client, session, v2_world):
         content = _content("Carcinoma ductal infiltrante")
         assert _save_draft(client, v2_world, content=content).status_code == 200
+        _enter_review(client, session, v2_world)
 
-        resp = _save_draft(
-            client,
-            v2_world,
-            content=content,
-            letterhead_version_id=str(v2_world["other_version"].id),
-        )
+        resp = _change_letterhead(client, v2_world, v2_world["other_version"].id)
         assert resp.status_code == 200, resp.text
 
         detail = _get(client, v2_world)
@@ -203,35 +256,29 @@ class TestDraftLetterheadChange:
             detail["report"]["base"]["diagnosis"]["value"] == "Carcinoma ductal infiltrante"
         )
 
-    def test_change_preserves_images(self, client, v2_world):
+    def test_change_preserves_images(self, client, session, v2_world):
         images = [{"id": "img-1", "url": "https://example.test/a.png", "caption": "H&E 40x"}]
         content = _content("Benigno", images=images)
         assert _save_draft(client, v2_world, content=content).status_code == 200
+        _enter_review(client, session, v2_world)
 
-        resp = _save_draft(
-            client,
-            v2_world,
-            content=content,
-            letterhead_version_id=str(v2_world["other_version"].id),
-        )
+        resp = _change_letterhead(client, v2_world, v2_world["other_version"].id)
         assert resp.status_code == 200, resp.text
 
         detail = _get(client, v2_world)
         assert detail["report"]["sections"]["galeria"]["content"] == images
 
-    def test_change_replaces_only_presentation(self, client, v2_world):
-        """Central invariant of §3.3: the snapshot `template` block and
-        `template_version_id` remain intact."""
-        before = _get(client, v2_world)
+    def test_change_replaces_only_presentation(self, client, in_review):
+        """Central invariant of §3.3, carried over verbatim: the snapshot
+        `template` block and `template_version_id` remain intact."""
+        before = _get(client, in_review)
         template_before = before["report"]["rendering_snapshot"]["template"]
         template_version_before = before["template_version_id"]
 
-        resp = _save_draft(
-            client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)
-        )
+        resp = _change_letterhead(client, in_review, in_review["other_version"].id)
         assert resp.status_code == 200, resp.text
 
-        after = _get(client, v2_world)
+        after = _get(client, in_review)
         assert after["report"]["rendering_snapshot"]["template"] == template_before
         assert after["template_version_id"] == template_version_before
         assert (
@@ -239,107 +286,185 @@ class TestDraftLetterheadChange:
             != before["report"]["rendering_snapshot"]["presentation"]
         )
 
-    def test_change_resolves_both_logos(self, client, session, v2_world):
+    def test_change_resolves_both_logos(self, client, session, in_review):
         """§3.4.5: after the change, `resolved_resources` is recomputed from
         the NEW letterhead — header and footer."""
         from .factories import create_storage_object
 
         header_logo = create_storage_object(
-            session, key="logos/header-neph.png", tenant=v2_world["tenant"]
+            session, key="logos/header-neph.png", tenant=in_review["tenant"]
         )
         footer_logo = create_storage_object(
-            session, key="logos/footer-neph.png", tenant=v2_world["tenant"]
+            session, key="logos/footer-neph.png", tenant=in_review["tenant"]
         )
         presentation = _alt_presentation()
         presentation["header"]["logo_storage_id"] = str(header_logo.id)
         presentation["footer"] = dict(presentation["footer"])
         presentation["footer"]["logo_storage_id"] = str(footer_logo.id)
 
-        logo_lh = create_letterhead(session, v2_world["tenant"], name="Membrete con logos")
+        logo_lh = create_letterhead(session, in_review["tenant"], name="Membrete con logos")
         logo_version = create_letterhead_version(
-            session, v2_world["tenant"], logo_lh, status="ACTIVE", configuration=presentation
+            session, in_review["tenant"], logo_lh, status="ACTIVE", configuration=presentation
         )
 
-        resp = _save_draft(client, v2_world, letterhead_version_id=str(logo_version.id))
+        resp = _change_letterhead(client, in_review, logo_version.id)
         assert resp.status_code == 200, resp.text
 
-        detail = _get(client, v2_world)
+        detail = _get(client, in_review)
         resources = detail["resolved_resources"]
         assert resources is not None
         assert "header-neph.png" in resources["header_logo_url"]
         assert "footer-neph.png" in resources["footer_logo_url"]
 
-    def test_content_only_save_keeps_letterhead(self, client, v2_world):
-        """C9/R regression: a save without `letterhead_version_id` remains
-        pure carry-forward."""
-        assert _save_draft(client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)).status_code == 200
+    def test_content_only_save_keeps_letterhead(self, client, session, v2_world):
+        """C9/R regression: a content save remains pure carry-forward — now
+        doubly so, since the content path can no longer change the letterhead
+        at all."""
+        _enter_review(client, session, v2_world)
+        assert _change_letterhead(
+            client, v2_world, v2_world["other_version"].id
+        ).status_code == 200
+
+        report = session.get(Report, v2_world["report_id"])
+        report.status = ReportStatus.DRAFT
+        session.add(report)
+        session.commit()
+
         assert _save_draft(client, v2_world).status_code == 200
         assert _get(client, v2_world)["letterhead_version_id"] == str(
             v2_world["other_version"].id
         )
 
-    def test_change_is_audited(self, client, session, v2_world):
+    def test_change_is_audited(self, client, session, in_review):
         from sqlmodel import select
 
         from app.models.audit import AuditLog
 
-        assert _save_draft(
-            client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)
+        assert _change_letterhead(
+            client, in_review, in_review["other_version"].id
         ).status_code == 200
 
         entries = session.exec(
-            select(AuditLog).where(AuditLog.action == "REPORT.CHANGE_LETTERHEAD")
+            select(AuditLog).where(AuditLog.action == "REPORT.PRESENTATION_UPDATE")
         ).all()
         assert len(entries) == 1
         assert entries[0].new_values["letterhead_version_id"] == str(
-            v2_world["other_version"].id
+            in_review["other_version"].id
         )
 
 
-class TestDraftLetterheadValidation:
-    def test_cross_tenant_letterhead_is_rejected(self, client, session, v2_world):
+class TestReviewerLetterheadValidation:
+    """The validation chain is unchanged — a reviewer may not select a
+    letterhead an author could not have."""
+
+    def test_cross_tenant_letterhead_is_rejected(self, client, session, in_review):
         other_tenant = create_tenant(session, name="Otro laboratorio", reports_v2_enabled=True)
         foreign_lh = create_letterhead(session, other_tenant, name="Ajeno")
         foreign_version = create_letterhead_version(
             session, other_tenant, foreign_lh, status="ACTIVE"
         )
 
-        resp = _save_draft(client, v2_world, letterhead_version_id=str(foreign_version.id))
+        resp = _change_letterhead(client, in_review, foreign_version.id)
+        # 404, never 403: a foreign id is never confirmed to exist.
         assert resp.status_code == 404, resp.text
-        assert _get(client, v2_world)["letterhead_version_id"] == str(
-            v2_world["default_version"].id
+        assert _get(client, in_review)["letterhead_version_id"] == str(
+            in_review["default_version"].id
         )
 
-    def test_archived_letterhead_version_is_rejected(self, client, session, v2_world):
-        archived_lh = create_letterhead(session, v2_world["tenant"], name="Archivado")
+    def test_archived_letterhead_version_is_rejected(self, client, session, in_review):
+        archived_lh = create_letterhead(session, in_review["tenant"], name="Archivado")
         archived_version = create_letterhead_version(
-            session, v2_world["tenant"], archived_lh, status="ARCHIVED"
+            session, in_review["tenant"], archived_lh, status="ARCHIVED"
         )
 
-        resp = _save_draft(client, v2_world, letterhead_version_id=str(archived_version.id))
+        resp = _change_letterhead(client, in_review, archived_version.id)
         assert resp.status_code == 409, resp.text
 
-    def test_inactive_letterhead_is_rejected(self, client, session, v2_world):
-        inactive_lh = create_letterhead(session, v2_world["tenant"], name="Desactivado")
+    def test_inactive_letterhead_is_rejected(self, client, session, in_review):
+        inactive_lh = create_letterhead(session, in_review["tenant"], name="Desactivado")
         inactive_version = create_letterhead_version(
-            session, v2_world["tenant"], inactive_lh, status="ACTIVE"
+            session, in_review["tenant"], inactive_lh, status="ACTIVE"
         )
         inactive_lh.is_active = False
         session.add(inactive_lh)
         session.commit()
 
-        resp = _save_draft(client, v2_world, letterhead_version_id=str(inactive_version.id))
+        resp = _change_letterhead(client, in_review, inactive_version.id)
         assert resp.status_code == 409, resp.text
 
-    def test_unknown_letterhead_version_is_rejected(self, client, v2_world):
+    def test_unknown_letterhead_version_is_rejected(self, client, in_review):
         import uuid
 
-        resp = _save_draft(client, v2_world, letterhead_version_id=str(uuid.uuid4()))
+        resp = _change_letterhead(client, in_review, uuid.uuid4())
         assert resp.status_code == 404, resp.text
 
 
-class TestLetterheadFreezeAtReview:
-    def _submit(self, client, session, v2_world):
+class TestTheAuthorHasNoLetterheadPath:
+    """The other half of the moved boundary: the content path no longer
+    changes the letterhead in ANY state, so the author cannot reach it.
+
+    Rejected rather than ignored — a letterhead is chosen explicitly, so
+    silently keeping the old one would leave the caller believing the change
+    landed.
+    """
+
+    def test_a_draft_save_cannot_change_it(self, client, v2_world):
+        resp = _save_draft(
+            client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)
+        )
+        assert resp.status_code == 403, resp.text
+        assert "revisor" in resp.json()["detail"].lower()
+        assert _get(client, v2_world)["letterhead_version_id"] == str(
+            v2_world["default_version"].id
+        )
+
+    def test_an_in_review_content_save_cannot_change_it_either(
+        self, client, session, v2_world
+    ):
+        _enter_review(client, session, v2_world)
+        resp = _save_draft(
+            client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)
+        )
+        assert resp.status_code == 403, resp.text
+
+    def test_echoing_the_same_letterhead_is_not_a_change(self, client, v2_world):
+        """A content save that resends the letterhead it already has is not a
+        change and must not be rejected — otherwise the editor could not
+        resend its own envelope."""
+        resp = _save_draft(
+            client, v2_world, letterhead_version_id=str(v2_world["default_version"].id)
+        )
+        assert resp.status_code == 200, resp.text
+
+
+class TestPresentationFreezesAtApproval:
+    """1.3.1 A5: the freeze point moved from submission to APPROVAL, because
+    the reviewer needs their window to do this work at all.
+
+    Amended by the manual-validation remediation (R1, CEL-131-02): that window
+    is DRAFT **and** IN_REVIEW, not IN_REVIEW alone. The freeze point —
+    APPROVAL — is unchanged, which is what the rest of this class asserts.
+    """
+
+    def _force_status(self, session, v2_world, status):
+        report = session.get(Report, v2_world["report_id"])
+        report.status = status
+        session.add(report)
+        session.commit()
+
+    def test_draft_IS_the_reviewers_window_too(self, client, session, v2_world):
+        """Céluma 1.3.1 manual-validation remediation (R1, CEL-131-02).
+
+        This was `test_draft_is_not_the_reviewers_window` and asserted 409, on
+        the reasoning that "before submission there is nothing to review".
+        Manual validation rejected that: the letterhead is reviewer-owned from
+        the moment the report exists, and waiting for a submission the reviewer
+        has no part in bought nothing. The assertion is inverted in place so
+        the change of contract is visible in the diff.
+
+        The freeze point is untouched — `test_approved_freezes_it` and
+        `test_published_freezes_it` below still hold.
+        """
         review = ReportReview(
             tenant_id=v2_world["tenant"].id,
             branch_id=v2_world["branch"].id,
@@ -348,62 +473,27 @@ class TestLetterheadFreezeAtReview:
         )
         session.add(review)
         session.commit()
-        resp = client.post(
-            f"/api/v1/reports/{v2_world['report_id']}/submit",
-            json={},
-            headers=v2_world["headers"],
-        )
+
+        resp = _change_letterhead(client, v2_world, v2_world["other_version"].id)
         assert resp.status_code == 200, resp.text
 
-    def _force_status(self, session, v2_world, status):
-        report = session.get(Report, v2_world["report_id"])
-        report.status = status
-        session.add(report)
-        session.commit()
-
-    def test_in_review_blocks_letterhead_change(self, client, session, v2_world):
-        self._submit(client, session, v2_world)
-        resp = _save_draft(
-            client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)
-        )
-        assert resp.status_code == 409, resp.text
-        assert "revisión" in resp.json()["detail"]
-        assert _get(client, v2_world)["letterhead_version_id"] == str(
-            v2_world["default_version"].id
-        )
-
-    def test_approved_blocks_letterhead_change(self, client, session, v2_world):
-        self._force_status(session, v2_world, ReportStatus.APPROVED)
-        resp = _save_draft(
-            client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)
-        )
+    def test_approved_freezes_it(self, client, session, in_review):
+        self._force_status(session, in_review, ReportStatus.APPROVED)
+        resp = _change_letterhead(client, in_review, in_review["other_version"].id)
         assert resp.status_code == 409, resp.text
 
-    def test_published_blocks_letterhead_change(self, client, session, v2_world):
-        self._force_status(session, v2_world, ReportStatus.PUBLISHED)
-        resp = _save_draft(
-            client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)
-        )
-        # PUBLISHED was already protected by _IMMUTABLE_REPORT_STATUSES (B9);
-        # what matters is that it is NOT a 200 or a 500.
+    def test_published_freezes_it(self, client, session, in_review):
+        self._force_status(session, in_review, ReportStatus.PUBLISHED)
+        resp = _change_letterhead(client, in_review, in_review["other_version"].id)
         assert resp.status_code == 409, resp.text
 
-    def test_non_draft_echoing_same_letterhead_is_not_an_error(self, client, session, v2_world):
-        """A content save in IN_REVIEW that resends the SAME letterhead is
-        not a change and must not be rejected — otherwise the read-only UI
-        could not resend its own envelope."""
-        self._submit(client, session, v2_world)
-        resp = _save_draft(
-            client, v2_world, letterhead_version_id=str(v2_world["default_version"].id)
-        )
-        assert resp.status_code == 200, resp.text
-
-    def test_returned_to_draft_can_change_letterhead_again(self, client, session, v2_world):
-        """§3.6: `request-changes` returns the report to DRAFT on the SAME
-        editable version (does not create a new one), so the letterhead
-        becomes changeable again. Decision documented in
-        letterhead-freeze-at-review-contract.md."""
-        self._submit(client, session, v2_world)
+    def test_returned_to_draft_then_resubmitted_is_changeable_again(
+        self, client, session, v2_world
+    ):
+        """§3.6 carried forward to the new owner: `request-changes` returns the
+        report to DRAFT on the SAME editable version, so after a resubmission
+        the reviewer can change the letterhead again."""
+        _enter_review(client, session, v2_world)
         resp = client.post(
             f"/api/v1/reports/{v2_world['report_id']}/request-changes",
             json={"comment": "Ajusta el diagnóstico"},
@@ -412,27 +502,25 @@ class TestLetterheadFreezeAtReview:
         assert resp.status_code == 200, resp.text
         assert resp.json()["status"] == ReportStatus.DRAFT
 
-        resp = _save_draft(
-            client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)
-        )
+        _enter_review(client, session, v2_world)
+        resp = _change_letterhead(client, v2_world, v2_world["other_version"].id)
         assert resp.status_code == 200, resp.text
         assert _get(client, v2_world)["letterhead_version_id"] == str(
             v2_world["other_version"].id
         )
 
-    def test_submit_succeeds_with_valid_letterhead(self, client, session, v2_world):
-        assert _save_draft(
-            client, v2_world, letterhead_version_id=str(v2_world["other_version"].id)
-        ).status_code == 200
-        self._submit(client, session, v2_world)
+    def test_submit_succeeds_with_the_resolved_letterhead(self, client, session, v2_world):
+        _enter_review(client, session, v2_world)
         assert _get(client, v2_world)["status"] == ReportStatus.IN_REVIEW
 
 
 class TestLegacyUnaffected:
-    def test_legacy_report_ignores_letterhead_version_id(self, client, session):
-        """§14: the Legacy branch does not change. A report without a V2
-        snapshot has no `presentation` to replace; the request is ignored
-        without error."""
+    def test_legacy_report_also_refuses_a_letterhead_change(self, client, session):
+        """§14 updated. A Legacy report has no `presentation` to replace, so
+        remediation 5 ignored the field silently. 1.3.1 refuses it instead:
+        the rule is about WHO may change a letterhead, and that does not vary
+        by schema version. No real client sends it — the selector is not
+        rendered for authors — so this only closes a direct-call path."""
         tenant = create_tenant(session)  # reports_v2_enabled=False
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
@@ -462,6 +550,38 @@ class TestLegacyUnaffected:
                 "order_id": str(order.id),
                 "report": _content("Actualizado"),
                 "letterhead_version_id": str(version.id),
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 403, resp.text
+
+    def test_a_legacy_content_save_without_a_letterhead_still_works(self, client, session):
+        tenant = create_tenant(session)
+        branch = create_branch(session, tenant)
+        order = create_order(session, tenant, branch)
+        user = create_user(session, tenant, email="legacy2@t1.example")
+        headers = auth_headers(user)
+
+        created = client.post(
+            "/api/v1/reports/",
+            json={
+                "tenant_id": str(tenant.id),
+                "branch_id": str(branch.id),
+                "order_id": str(order.id),
+                "report": _content(),
+            },
+            headers=headers,
+        )
+        assert created.status_code == 200, created.text
+        report_id = created.json()["id"]
+
+        resp = client.post(
+            f"/api/v1/reports/{report_id}/new_version",
+            json={
+                "tenant_id": str(tenant.id),
+                "branch_id": str(branch.id),
+                "order_id": str(order.id),
+                "report": _content("Actualizado"),
             },
             headers=headers,
         )

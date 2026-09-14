@@ -170,6 +170,8 @@ def list_reviewers(
                 id=uid,
                 full_name=u.full_name,
                 email=u.email,
+                # R6: the picker's `@handle`. See `ReviewerItem`.
+                username=u.username,
                 has_signature=u.signature_storage_id is not None,
                 avatar_url=u.avatar_url,
             )
@@ -270,6 +272,25 @@ def update_user(
         raise HTTPException(404, "User not found")
     if str(target_user.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "User does not belong to your tenant")
+
+    # Céluma 1.3.1 Block A / A7 — the SECOND reviewer self-escalation route.
+    # `PUT /rbac/users/{id}/roles` is the obvious one, but this endpoint also
+    # replaces roles (`replace_user_roles` below) under the same
+    # `admin:manage_users` guard, so closing only the other one would leave
+    # the boundary open here. Same rule, same reasoning: granting `reviewer`
+    # to someone else stays allowed, holding admin+reviewer stays legal, and
+    # dropping your own reviewer role stays allowed — only self-granting is
+    # refused, which makes it a two-person rule.
+    if (
+        user_data.role == ROLE_REVIEWER
+        and str(target_user.id) == str(user.id)
+        and ROLE_REVIEWER not in set(get_user_roles(target_user.id, session))
+    ):
+        raise HTTPException(
+            403,
+            f"You cannot grant yourself the '{ROLE_REVIEWER}' role. "
+            "Another administrator must assign it.",
+        )
 
     # Safety: prevent stranding the tenant without an admin
     if user_data.role is not None or user_data.is_active is not None:
