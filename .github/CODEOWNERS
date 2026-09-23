@@ -1,0 +1,10 @@
+# Default backend ownership
+* @Raismaav
+
+# Clinical authorization, persistence, release automation, and migrations
+/app/api/ @Raismaav
+/app/core/ @Raismaav
+/app/models/ @Raismaav
+/alembic/ @Raismaav
+/.github/workflows/ @Raismaav
+/Dockerfile @Raismaav
