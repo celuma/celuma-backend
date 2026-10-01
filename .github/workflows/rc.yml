@@ -115,7 +115,7 @@ jobs:
 
       - name: Set up QEMU (multi-arch emulation)
         uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
