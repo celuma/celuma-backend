@@ -50,7 +50,7 @@ imageio==2.34.2
 # indirectly influenced by an authenticated user. Defence in depth on a
 # four-call-site surface.
 playwright==1.49.1
-pypdf==6.16.1
+pypdf==6.19.0
 
 # Test-only dependencies (pytest, pytest-cov, httpx) live in
 # requirements-dev.txt so they never reach the production image.
