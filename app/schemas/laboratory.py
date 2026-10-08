@@ -215,6 +215,12 @@ class UserMentionListResponse(BaseModel):
     users: List[UserMentionItem]
 
 
+class AssignableUsersListResponse(BaseModel):
+    """Active tenant users, paginated by their stable UUID identity."""
+    users: List[UserMentionItem]
+    next_after: Optional[str] = None
+
+
 class SampleCreate(BaseModel):
     """Schema for creating a sample"""
     tenant_id: str
