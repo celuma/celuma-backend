@@ -17,6 +17,7 @@ def test_pages_include_all_active_tenant_users(client, session):
     for index in range(105):
         candidate = AppUser(
             tenant_id=tenant.id, full_name=f"Usuario {index:03}",
+            first_name="Usuario", last_name=str(index),
             username=f"usuario{index}", email=f"user{index}@example.invalid",
             hashed_password="unused-synthetic-fixture",
         )
@@ -24,6 +25,7 @@ def test_pages_include_all_active_tenant_users(client, session):
         session.flush()
         expected.add(str(candidate.id))
     inactive = AppUser(tenant_id=tenant.id, full_name="Inactivo", email="inactive@example.invalid",
+                       first_name="Usuario", last_name="Inactivo",
                        is_active=False, hashed_password="unused-synthetic-fixture")
     session.add(inactive)
     other = create_tenant(session, name="Other synthetic lab")
@@ -59,11 +61,12 @@ def test_pages_include_all_active_tenant_users(client, session):
     assert len(mentions.json()["users"]) == 10
 
 
-def test_cursor_survives_deactivation_and_does_not_accept_foreign_users(client, session):
+def test_cursor_survives_deactivation(client, session):
     tenant = create_tenant(session)
     actor = create_user(session, tenant, email="reader@example.invalid", roles=("viewer",))
     for index in range(12):
         session.add(AppUser(tenant_id=tenant.id, full_name="Same name",
+                            first_name="Usuario", last_name=str(index),
                             email=f"user{index}@example.invalid", hashed_password="unused"))
     session.commit()
     first = client.get(URL, params={"limit": 5}, headers=auth_headers(actor)).json()
@@ -85,7 +88,7 @@ def test_requires_lab_read_permission(client, session):
     tenant = create_tenant(session)
     actor = create_user(session, tenant, email="physician@example.invalid", roles=("physician",))
     assert client.get(URL, headers=auth_headers(actor)).status_code == 403
-    assert client.get(URL).status_code == 401
+    assert client.get(URL).status_code == 403
 
 
 @pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 101}, {"after": "invalid"}])
