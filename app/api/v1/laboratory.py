@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from typing import Dict, Optional, List, Set
 from uuid import UUID
 from sqlmodel import select, Session, and_, func
@@ -35,6 +35,7 @@ from app.schemas.laboratory import (
     MentionedUser,
     UserMentionItem,
     UserMentionListResponse,
+    AssignableUsersListResponse,
     SampleCreate,
     SampleResponse,
     SampleStateUpdate,
@@ -794,6 +795,39 @@ def create_order_comment(
         mentions=[str(u.user_id) for u in mentioned_users],
         mentioned_users=mentioned_users,
         metadata=comment.comment_metadata,
+    )
+
+
+@router.get("/users/assignable", response_model=AssignableUsersListResponse)
+def list_assignable_users(
+    after: Optional[UUID] = None,
+    limit: int = Query(default=100, ge=1, le=100),
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Page active tenant users for assignee pickers without the mention cap."""
+    _require(user.id, "lab:read", session)
+    query = select(AppUser).where(
+        AppUser.tenant_id == UUID(ctx.tenant_id),
+        AppUser.is_active == True,  # noqa: E712
+    )
+    if after is not None:
+        query = query.where(AppUser.id > after)
+    rows = session.exec(query.order_by(AppUser.id).limit(limit + 1)).all()
+    users = rows[:limit]
+    return AssignableUsersListResponse(
+        users=[
+            UserMentionItem(
+                id=str(u.id),
+                name=u.full_name or u.email,
+                username=u.username,
+                email=u.email,
+                avatar_url=u.avatar_url,
+            )
+            for u in users
+        ],
+        next_after=str(users[-1].id) if len(rows) > limit else None,
     )
 
 
