@@ -4282,11 +4282,16 @@ class TestReportsV2TemplateVersionConstraint:
         JSON document's contents, not a schema object — so it contributes no
         line here. Three differences, exactly: replace this expected set if a
         later block deliberately adds schema, per the Block C handoff; do not
-        delete the guard."""
+        delete the guard.
+
+        Upgrades to HOTFIX_REVISION, not "head": since Céluma 1.4 head is
+        `v1_4_0`, whose own schema is asserted by
+        `TestListSearchAndIndexesMigration` (same retarget as
+        `TestSchemaEquivalence`)."""
         _alembic(RELEASE_REVISION)
         before = _capture_schema(_MIGRATION_TEST_DB)
 
-        _alembic("head")
+        _alembic(HOTFIX_REVISION)
         after = _capture_schema(_MIGRATION_TEST_DB)
 
         differences = _diff_schemas(before, after)
