@@ -1,22 +1,30 @@
-"""v1.4.0 - Céluma 1.4 release migration (in development)
+"""v1.4.0 - List search extension and list indexes (Céluma 1.4 release migration, in development)
 
-Revision ID: celuma_1_4_0
+Revision ID: v1_4_0
 Revises: v1_3_1
 Create Date: 2026-10-14
 
 The database revision for the Céluma 1.4 release, following the standing
-contract of one Alembic revision per shipped product release. Later 1.4 areas
-that need schema changes extend THIS revision (as Block C extended `v1_3_1`)
-until 1.4 ships; it becomes frozen on release, not before.
+contract of one Alembic revision per shipped product release
+(`v1_0_0` … `v1_3_0`, `v1_3_1`). Later 1.4 areas that need schema changes
+extend THIS revision (as Block C extended `v1_3_1`) until 1.4 ships; it
+becomes frozen on release, not before.
 
-### Why the revision id is not `v1_4_0`
+### The identifier `v1_4_0` had two earlier, retired meanings
 
-`v1_4_0` … `v1_13_0` are retired development identifiers of Céluma 1.3
-(`tests/test_alembic_migrations.py::SUPERSEDED_REVISIONS`): executable code
-may not reference them, so that no database can ever be stamped with a
-revision that once meant something else. `celuma_1_4_0` names the same
-product release without reusing a retired id. The choice is a release-contract
-decision under review together with this revision.
+During Céluma 1.3 development `v1_4_0` named two short-lived revisions on the
+`celuma-1.3` branch, both folded into `v1_3_0` and deleted:
+`v1_4_0_report_template_version.py` (Phase 2 Block B, 2026-07-29 → 08-03) and
+`v1_4_0_notifications_core.py` (Phase 3 Block B, 2026-08-06 → 08-10). Neither
+was ever on a first-parent state of `main` or in a release tag, and CI only
+migrated staging from `main`/tags, so no CI-deployed database carried them;
+production went `v1_2_0` → `v1_3_0` → `v1_3_1` (1.3.1 release record). The
+frozen `v1_3_0` docstring and the backend README already reserved `v1_4_0` for
+Céluma 1.4, and Rafael decided (2026-10-14) to use it as planned. The
+migration tests now allow `v1_4_0` only as this revision, in this file, on
+`v1_3_1`; every other retired id stays forbidden. A database that reports
+`v1_4_0` *before* the 1.4 release window would carry a retired meaning — see
+the pre-upgrade check in `celuma-engineering/runbooks/migrations.md`.
 
 `v1_3_0` and `v1_3_1` are frozen and are NOT edited by this revision.
 
@@ -41,11 +49,11 @@ does not fall back to a weaker search.
 on `tenant_id`, and `sample.order_id`, `order.patient_id`, `report.order_id`
 and `report_version.report_id` had none either. Every list therefore scanned
 the whole shared table — every laboratory's rows — so a small laboratory's
-list got slower as other laboratories grew. Measured with the synthetic
-benchmark (`scripts/list_performance/`) on a shared database of 18 tenants /
-185k samples, the small tenant's first page went from 23 ms to 9.5 ms
-(samples) and 34 ms to 9.9 ms (orders) with these indexes, and stopped
-depending on the other tenants' volume.
+list got slower as other laboratories grew. On the synthetic shared database
+of the list benchmark (`scripts/list_performance/`, 18 tenants / 185k samples)
+these indexes made a small tenant's first page independent of the other
+tenants' volume; the measurements are in
+`celuma-engineering/specs/lists/performance-baseline.md`.
 
 Plain `CREATE INDEX` is used, not `CONCURRENTLY`: the release runbook applies
 migrations in a drained window (`celuma-engineering/runbooks/migrations.md`),
@@ -58,7 +66,7 @@ from typing import Sequence, Union
 from alembic import op
 
 
-revision: str = "celuma_1_4_0"
+revision: str = "v1_4_0"
 down_revision: Union[str, Sequence[str], None] = "v1_3_1"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

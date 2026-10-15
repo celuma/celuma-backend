@@ -21,6 +21,8 @@ from fastapi import HTTPException
 from sqlalchemy import func
 from sqlmodel import select
 
+from app.services.list_search import SearchQueryError, parse_search_query
+
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
 
@@ -77,6 +79,19 @@ def uuid_filter(values: Optional[list[str]], name: str) -> list[str]:
         except ValueError:
             raise HTTPException(422, f"Invalid {name} filter value: {value}")
     return out
+
+
+def search_text(q: Optional[str]) -> Optional[str]:
+    """`q`, validated against the search limits; over a limit it is a 422.
+
+    The query is rejected rather than shortened: dropping a term from an AND
+    query would return a wider result as if the whole query had been applied.
+    """
+    try:
+        parse_search_query(q)
+    except SearchQueryError as exc:
+        raise HTTPException(422, str(exc))
+    return q
 
 
 def sort_field(value: Optional[str], allowed: Sequence[str]) -> str:

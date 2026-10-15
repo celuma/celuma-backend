@@ -61,6 +61,7 @@ from app.services.list_pagination import (
     enum_filter,
     page_request,
     run_list,
+    search_text,
     sort_field,
     uuid_filter,
 )
@@ -281,7 +282,7 @@ def list_reports(
     _require(user.id, "reports:read", session)
     stmt = report_list_statement(
         ctx.tenant_id,
-        q=q,
+        q=search_text(q),
         statuses=enum_filter(status, ReportStatus, "status"),
         patient_ids=uuid_filter(patient_id, "patient_id"),
         reviewer_ids=uuid_filter(reviewer_id, "reviewer_id"),

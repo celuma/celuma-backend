@@ -8,11 +8,15 @@ in SQL (server-paginated lists) and a user cannot tell which.
 Contract, in short:
 
 * Normalization: Unicode NFD, combining marks U+0300–U+036F removed,
-  lowercase. "Muñóz" → "munoz".
+  lowercase. "Muñóz" → "munoz", whether its accents arrive precomposed (NFC)
+  or as separate combining marks (NFD).
 * A query is split on whitespace into terms; separators inside a term are
   ignored ("CU-011026" → "cu011026"); every term must match (AND), each term
   may match a different field (OR across fields), but always inside ONE field
   value — never across the boundary between two fields.
+* Limits: at most MAX_QUERY_LENGTH characters and MAX_TERMS terms. A longer
+  query is rejected (`SearchQueryError`, a 422 from the list endpoints), never
+  truncated: dropping a term would silently widen an AND query.
 * A term containing a digit is an **identifier** term. It matches only as a
   literal substring of a field with separators removed, so "CU276262" never
   matches "CU276263" and "276262" matches "CU276262", "BX276262" and
@@ -50,15 +54,32 @@ UNACCENTED = (
     "OoUuAaIiOoUuUuUuUuUuAaAaGgKkOoOojGgNnAaAaAaEeEeIiIiOoOoRrRrUuUuSsTtHhAaEeOoOoOoOoYy"
 )
 
-#: Upper bounds that keep one request's SQL small. A longer query is not an
-#: error: extra terms are ignored after the first MAX_TERMS, and a text term
-#: longer than MAX_FUZZY_TERM_LENGTH is matched literally only.
+#: Query limits, identical in `celuma-frontend/src/lib/search.ts`. They keep
+#: one request's SQL bounded. A query over either limit is REJECTED, never
+#: shortened: the API answers 422 and the UI says the search was not applied.
+#: Length counts Unicode code points of the NFC-normalized, trimmed query;
+#: terms count what remains after punctuation-only terms are dropped.
+#:
+#: The length limit also bounds typo tolerance: a term has at most 200
+#: characters, so the words it is compared with have at most 202 — inside
+#: `levenshtein_less_equal`'s 255-character limit. No separate cap applies.
 MAX_QUERY_LENGTH = 200
 MAX_TERMS = 8
-MAX_FUZZY_TERM_LENGTH = 64
 
-_COMBINING = re.compile("[̀-ͯ]")
+#: Combining diacritical marks U+0300–U+036F, removed by the NFD rule.
+COMBINING_MARKS = "[\u0300-\u036f]"
+
+_COMBINING = re.compile(COMBINING_MARKS)
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+class SearchQueryError(ValueError):
+    """The query exceeds a limit; it must be rejected, not shortened."""
+
+    def __init__(self, reason: Literal["too_long", "too_many_terms"], limit: int, actual: int):
+        self.reason, self.limit, self.actual = reason, limit, actual
+        what = "characters" if reason == "too_long" else "terms"
+        super().__init__(f"Search query has {actual} {what}; at most {limit} are allowed")
 
 
 def normalize_text(value: str) -> str:
@@ -87,17 +108,31 @@ class SearchTerm:
     value: str
 
 
+def search_query_length(query: str) -> int:
+    """The length MAX_QUERY_LENGTH limits (code points, NFC, trimmed)."""
+    return len(unicodedata.normalize("NFC", query).strip())
+
+
 def parse_search_query(query: Optional[str]) -> list[SearchTerm]:
-    """Split a raw query into identifier/text terms (see the module docstring)."""
+    """Split a raw query into identifier/text terms (see the module docstring).
+
+    Raises `SearchQueryError` when the query exceeds MAX_QUERY_LENGTH or
+    MAX_TERMS: every term of an accepted query is applied.
+    """
     if not query:
         return []
+    length = search_query_length(query)
+    if length > MAX_QUERY_LENGTH:
+        raise SearchQueryError("too_long", MAX_QUERY_LENGTH, length)
     terms: list[SearchTerm] = []
-    for raw in normalize_text(query[:MAX_QUERY_LENGTH].strip()).split():
+    for raw in normalize_text(query.strip()).split():
         value = strip_separators(raw)
         if not value:
             continue  # punctuation-only term → ignored
         terms.append(SearchTerm("identifier" if any(c.isdigit() for c in value) else "text", value))
-    return terms[:MAX_TERMS]
+    if len(terms) > MAX_TERMS:
+        raise SearchQueryError("too_many_terms", MAX_TERMS, len(terms))
+    return terms
 
 
 # ---------------------------------------------------------------------------
@@ -108,12 +143,17 @@ def parse_search_query(query: Optional[str]) -> list[SearchTerm]:
 def sql_normalized(expr) -> ColumnElement:
     """SQL twin of `normalize_text` for a text expression (NULL stays NULL).
 
-    `translate()` scans its 244-character map once per input character, which
-    measured ~10x slower than `lower()` alone over a large tenant. It is the
-    identity on ASCII, so it only runs for values that contain something else.
+    `translate()` folds precomposed letters ("é" U+00E9); `regexp_replace`
+    then removes combining marks, so a decomposed "e" + U+0301 folds the same
+    way — without it "Pe\u0301rez" kept the mark and split into the words
+    "pe" and "rez". Both only matter for non-ASCII values, and `translate()`
+    scans its 244-character map once per input character (measured ~10x
+    slower than `lower()` alone over a large tenant), so ASCII values take the
+    plain `lower()` branch.
     """
+    folded = func.regexp_replace(func.translate(expr, ACCENTED, UNACCENTED), COMBINING_MARKS, "", "g")
     return case(
-        (expr.op("~")("[^[:ascii:]]"), func.lower(func.translate(expr, ACCENTED, UNACCENTED))),
+        (expr.op("~")("[^[:ascii:]]"), func.lower(folded)),
         else_=func.lower(expr),
     )
 
@@ -141,7 +181,7 @@ def _literal_match(expr, term: SearchTerm) -> ColumnElement[bool]:
 def _fuzzy_word_match(expr, term: SearchTerm) -> Optional[ColumnElement[bool]]:
     """Some digit-free word of `expr` is within the typo budget of `term`."""
     k = fuzzy_threshold(len(term.value))
-    if term.kind != "text" or k == 0 or len(term.value) > MAX_FUZZY_TERM_LENGTH:
+    if term.kind != "text" or k == 0:
         return None
     words = func.unnest(
         func.regexp_split_to_array(func.coalesce(sql_normalized(expr), ""), "[^a-z0-9]+")

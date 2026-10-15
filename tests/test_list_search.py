@@ -13,6 +13,7 @@ from app.services.list_search import (
     MAX_QUERY_LENGTH,
     MAX_TERMS,
     UNACCENTED,
+    SearchQueryError,
     SearchSpec,
     SearchTerm,
     fuzzy_threshold,
@@ -26,6 +27,11 @@ from app.services.list_search import (
 def test_normalize_text_matches_the_client():
     assert normalize_text("Muñóz") == "munoz"
     assert normalize_text("PATOLOGÍA") == "patologia"
+
+
+def test_precomposed_and_decomposed_accents_normalize_alike():
+    assert normalize_text("P\u00e9rez") == normalize_text("Pe\u0301rez") == "perez"
+    assert strip_separators("Mun\u0303o\u0301z") == "munoz"
 
 
 @pytest.mark.parametrize("raw, stripped", [("CTM-18", "ctm18"), ("CU-011026", "cu011026"),
@@ -48,9 +54,33 @@ def test_terms_are_classified_by_the_presence_of_a_digit(query, expected):
     assert parse_search_query(query) == expected
 
 
-def test_query_length_and_term_count_are_bounded():
-    assert len(parse_search_query("a" * (MAX_QUERY_LENGTH + 50))[0].value) == MAX_QUERY_LENGTH
-    assert len(parse_search_query(" ".join(f"t{i}" for i in range(MAX_TERMS + 5)))) == MAX_TERMS
+# Query limits (R1). These boundary cases mirror
+# celuma-frontend/src/test/lib/search.test.ts ("query limits"): the same query
+# is accepted or rejected on both sides, and an accepted query keeps every term.
+EIGHT_WORDS = "uno dos tres cuatro cinco seis siete ocho"
+
+
+@pytest.mark.parametrize("query, terms", [
+    (EIGHT_WORDS, 8),
+    (EIGHT_WORDS + " -- ..", 8),  # punctuation-only terms do not count
+    ("a" * MAX_QUERY_LENGTH, 1),
+    ("  " + "a" * MAX_QUERY_LENGTH + "  ", 1),  # surrounding whitespace does not count
+    ("e\u0301" * MAX_QUERY_LENGTH, 1),  # counted after NFC: 200 "é", not 400 code points
+])
+def test_queries_at_the_limits_are_accepted_whole(query, terms):
+    assert len(parse_search_query(query)) == terms
+
+
+@pytest.mark.parametrize("query, reason, actual", [
+    (EIGHT_WORDS + " CU276262", "too_many_terms", 9),
+    ("a" * (MAX_QUERY_LENGTH + 1), "too_long", MAX_QUERY_LENGTH + 1),
+    ("e\u0301" * (MAX_QUERY_LENGTH + 1), "too_long", MAX_QUERY_LENGTH + 1),
+])
+def test_queries_over_a_limit_are_rejected_not_truncated(query, reason, actual):
+    with pytest.raises(SearchQueryError) as excinfo:
+        parse_search_query(query)
+    assert (excinfo.value.reason, excinfo.value.actual) == (reason, actual)
+    assert excinfo.value.limit == (MAX_TERMS if reason == "too_many_terms" else MAX_QUERY_LENGTH)
 
 
 @pytest.mark.parametrize("length, budget", [(1, 0), (3, 0), (4, 1), (6, 1), (7, 2), (20, 2)])

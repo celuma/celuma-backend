@@ -191,6 +191,79 @@ class TestHumanTextMatching:
         assert found == ["CU-1"]
 
 
+class TestQueryLimits:
+    """R1: one contract on both sides — a query over a limit is rejected, never
+    truncated. Mirrors `test_list_search.py` and the client's search tests."""
+
+    EIGHT_WORDS = "uno dos tres cuatro cinco seis siete ocho"
+
+    def test_a_ninth_term_is_rejected_instead_of_dropped(self, client, lab):
+        # Before the fix the API dropped CU276262 and matched every sample
+        # containing the eight words; the browser matched nothing.
+        order = lab.order(self.EIGHT_WORDS.upper().replace(" ", "-"), patient=lab.perez)
+        lab.sample(order, "LIMIT-1")
+        accepted = client.get(SAMPLES, params={"page": 1, "q": self.EIGHT_WORDS}, headers=lab.headers)
+        assert codes(accepted) == ["LIMIT-1"]
+        rejected = client.get(SAMPLES, params={"page": 1, "q": f"{self.EIGHT_WORDS} CU276262"}, headers=lab.headers)
+        assert rejected.status_code == 422
+        assert "9 terms" in rejected.json()["detail"]
+
+    @pytest.mark.parametrize("path", [SAMPLES, ORDERS, REPORTS])
+    def test_the_character_limit_is_inclusive_and_enforced_everywhere(self, client, lab, path):
+        assert client.get(path, params={"page": 1, "q": "a" * 200}, headers=lab.headers).status_code == 200
+        too_long = client.get(path, params={"page": 1, "q": "a" * 201}, headers=lab.headers)
+        assert too_long.status_code == 422
+        assert "201 characters" in too_long.json()["detail"]
+
+    def test_the_limits_also_apply_without_paging(self, client, lab):
+        assert client.get(SAMPLES, params={"q": f"{self.EIGHT_WORDS} nueve"}, headers=lab.headers).status_code == 422
+
+    def test_a_long_text_term_keeps_typo_tolerance(self, client, lab):
+        word = "abcdefghij" * 15  # 150 letters, typo budget 2
+        lab.order("LONG-1", patient=lab.perez, requested_by=f"Dr. {word}")
+        typo = word[:70] + "x" + word[71:]
+        found = codes(client.get(ORDERS, params={"page": 1, "q": typo}, headers=lab.headers),
+                      key="orders", field="order_code")
+        assert found == ["LONG-1"]
+
+    def test_a_word_longer_than_the_edit_distance_limit_is_not_an_error(self, client, lab):
+        # levenshtein_less_equal rejects inputs over 255 characters; only words
+        # within the term's typo budget of its length are ever compared.
+        lab.order("HUGE-1", patient=lab.perez, notes="z" * 300)
+        response = client.get(ORDERS, params={"page": 1, "q": "y" + "z" * 199}, headers=lab.headers)
+        assert response.status_code == 200
+        assert response.json()["total"] == 0
+
+
+class TestDecomposedAccents:
+    """R2: "Pérez" may arrive precomposed (NFC, U+00E9) or decomposed (NFD,
+    "e" + U+0301). Both must search, typo-match and sort as "perez"."""
+
+    NFC = "P\u00e9rez"
+    NFD = "Pe\u0301rez"
+
+    @pytest.fixture
+    def accented(self, lab):
+        nfc = lab.patient("Ana", self.NFC, "P-NFC")
+        nfd = lab.patient("Ana", self.NFD, "P-NFD")
+        later = lab.patient("Ana", "Perfecto", "P-LATER")
+        for patient, code in ((nfc, "NFC-1"), (nfd, "NFD-1"), (later, "LATER-1")):
+            lab.sample(lab.order(f"O-{code}", patient=patient), code)
+        return lab
+
+    @pytest.mark.parametrize("query", ["perez", "peres", "Pérez", "Pe\u0301rez"])
+    def test_both_forms_match_literally_and_with_a_typo(self, client, accented, query):
+        found = codes(client.get(SAMPLES, params={"page": 1, "q": f"ana {query}"}, headers=accented.headers))
+        assert sorted(found) == ["NFC-1", "NFD-1"]
+
+    def test_both_forms_sort_as_the_same_name(self, client, accented):
+        rows = client.get(SAMPLES, params={"page": 1, "q": "ana", "sort": "patient"}, headers=accented.headers).json()
+        order = [row["sample_code"] for row in rows["samples"]]
+        # "perez" < "perfecto": an unfolded "pe\u0301rez" sorted after it.
+        assert order.index("LATER-1") == 2
+        assert set(order[:2]) == {"NFC-1", "NFD-1"}
+
+
 # ---------------------------------------------------------------------------
 # Pagination, ordering and totals (#6)
 # ---------------------------------------------------------------------------

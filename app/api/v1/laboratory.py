@@ -35,6 +35,7 @@ from app.services.list_pagination import (
     enum_filter,
     page_request,
     run_list,
+    search_text,
     sort_field,
     uuid_filter,
 )
@@ -303,7 +304,7 @@ def list_orders(
     _require(user.id, "lab:read", session)
     stmt = order_list_statement(
         ctx.tenant_id,
-        q=q,
+        q=search_text(q),
         statuses=enum_filter(status, OrderStatus, "status"),
         patient_ids=uuid_filter(patient_id, "patient_id"),
         physician_ids=uuid_filter(requesting_physician_id, "requesting_physician_id"),
@@ -900,7 +901,7 @@ def list_samples(
     _require(user.id, "lab:read", session)
     stmt = sample_list_statement(
         ctx.tenant_id,
-        q=q,
+        q=search_text(q),
         states=enum_filter(state, SampleState, "state"),
         types=enum_filter(type, SampleType, "type"),
         order_ids=uuid_filter(order_id, "order_id"),

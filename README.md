@@ -150,7 +150,7 @@ Each release is consolidated into one migration before it ships, so the chain
 records releases rather than the order in which features were developed:
 
 ```
-v1_0_0 → v1_1_0 → v1_2_0 → v1_3_0 (head)
+v1_0_0 → v1_1_0 → v1_2_0 → v1_3_0 → v1_3_1 → v1_4_0 (head, unreleased)
 ```
 
 `v1_3_0` is the whole **Céluma 1.3** database delta in one revision —
@@ -161,8 +161,12 @@ revisions the release was developed across, none of which was ever deployed
 to staging, production or a customer database.
 
 **`v1_3_0` is frozen.** It is the final Céluma 1.3 database contract; Phase 5
-validates it and does not rewrite it. Céluma 1.4's schema evolution begins
-from `v1_3_0` and is expected to ship as `v1_4_0`. See
+validates it and does not rewrite it. Céluma 1.3.1 added the frozen
+`v1_3_1`, and Céluma 1.4's schema evolution ships as `v1_4_0`
+(`alembic/versions/v1_4_0_list_search_indexes.py`, still open until 1.4 is
+released; later 1.4 areas extend it). The two retired 1.3 development
+revisions that once used the id `v1_4_0` are guarded in
+`tests/test_alembic_migrations.py`. See
 [`docs/celuma-1.3/pre-phase-5-migration-squash/`](../docs/celuma-1.3/pre-phase-5-migration-squash/):
 `migration-release-contract.md` for the numbering rule and the freeze, and
 `migration-local-database-transition-guide.md` if your local database is
