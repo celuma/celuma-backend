@@ -2,7 +2,6 @@
 from uuid import UUID
 
 import pytest
-from sqlmodel import select
 
 from app.models.user import AppUser
 from tests.http.factories import auth_headers, create_tenant, create_user
@@ -61,27 +60,70 @@ def test_pages_include_all_active_tenant_users(client, session):
     assert len(mentions.json()["users"]) == 10
 
 
+def _ids(response):
+    return [u["id"] for u in response.json()["users"]]
+
+
 def test_cursor_survives_deactivation(client, session):
     tenant = create_tenant(session)
     actor = create_user(session, tenant, email="reader@example.invalid", roles=("viewer",))
-    for index in range(12):
-        session.add(AppUser(tenant_id=tenant.id, full_name="Same name",
-                            first_name="Usuario", last_name=str(index),
-                            email=f"user{index}@example.invalid", hashed_password="unused"))
+    # Fixed low ids sort ahead of every random uuid4 id, so the actor is always
+    # last in the keyset order and can never be the user a cursor points at.
+    # (Deactivating the authenticated actor is a different, correct 401.)
+    assert actor.id > UUID(int=100)
+    for position in range(1, 13):
+        session.add(AppUser(
+            id=UUID(int=position), tenant_id=tenant.id, full_name="Same name",
+            first_name="Usuario", last_name=str(position),
+            email=f"user{position}@example.invalid", hashed_password="unused",
+            is_active=position != 8,  # already inactive, sits inside the second page
+        ))
+    foreign = create_tenant(session, name="Other synthetic lab")
+    session.add(AppUser(
+        id=UUID(int=100), tenant_id=foreign.id, full_name="Foreign",
+        first_name="Usuario", last_name="Foreign",
+        email="foreign@example.invalid", hashed_password="unused",
+    ))
     session.commit()
-    first = client.get(URL, params={"limit": 5}, headers=auth_headers(actor)).json()
-    cursor = first["next_after"]
+
+    first = client.get(URL, params={"limit": 5}, headers=auth_headers(actor))
+    assert first.status_code == 200
+    assert _ids(first) == [str(UUID(int=n)) for n in range(1, 6)]
+    cursor = first.json()["next_after"]
+    assert cursor == str(UUID(int=5))
+    assert cursor != str(actor.id)
+
     cursor_user = session.get(AppUser, UUID(cursor))
     cursor_user.is_active = False
     session.add(cursor_user)
     session.commit()
-    following = client.get(URL, params={"after": cursor}, headers=auth_headers(actor))
-    assert following.status_code == 200
-    actual = {u["id"] for u in following.json()["users"]}
-    expected = {str(u.id) for u in session.exec(select(AppUser).where(
-        AppUser.tenant_id == tenant.id, AppUser.is_active == True, AppUser.id > UUID(cursor)
-    )).all()}
-    assert actual == expected
+
+    # Continue from the now-inactive cursor: skips the inactive user 8 and
+    # resumes strictly after the cursor, with a fresh cursor and no repeats.
+    second = client.get(URL, params={"after": cursor, "limit": 3}, headers=auth_headers(actor))
+    assert second.status_code == 200
+    assert _ids(second) == [str(UUID(int=n)) for n in (6, 7, 9)]
+    assert second.json()["next_after"] == str(UUID(int=9))
+
+    # Last page: the foreign-tenant user (id 100) sorts between 12 and the
+    # actor and must not leak; the actor itself is still listed.
+    third = client.get(URL, params={"after": str(UUID(int=9))}, headers=auth_headers(actor))
+    assert third.status_code == 200
+    assert _ids(third) == [str(UUID(int=n)) for n in (10, 11, 12)] + [str(actor.id)]
+    assert third.json()["next_after"] is None
+
+
+def test_deactivated_actor_is_rejected(client, session):
+    tenant = create_tenant(session)
+    actor = create_user(session, tenant, email="reader@example.invalid", roles=("viewer",))
+    headers = auth_headers(actor)
+    assert client.get(URL, headers=headers).status_code == 200
+    actor.is_active = False
+    session.add(actor)
+    session.commit()
+    response = client.get(URL, headers=headers)
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Inactive user"
 
 
 def test_requires_lab_read_permission(client, session):
