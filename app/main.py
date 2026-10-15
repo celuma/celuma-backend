@@ -23,6 +23,7 @@ from app.api.v1.reports import router as reports_router
 from app.api.v1.report_letterheads import router as report_letterheads_router
 from app.api.v1.report_sections import router as report_sections_router
 from app.api.v1.study_types import router as study_types_router
+from app.api.v1.sample_types import router as sample_types_router
 from app.api.v1.price_catalog import router as price_catalog_router
 from app.api.v1.billing import router as billing_router
 from app.api.v1.dashboard import router as dashboard_router
@@ -397,6 +398,7 @@ app.include_router(
 )
 app.include_router(report_sections_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(study_types_router, prefix="/api/v1", dependencies=[Depends(current_user)])
+app.include_router(sample_types_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(price_catalog_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(billing_router, prefix="/api/v1", dependencies=[Depends(current_user)])
 app.include_router(dashboard_router, prefix="/api/v1", dependencies=[Depends(current_user)])

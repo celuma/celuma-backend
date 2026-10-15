@@ -70,7 +70,7 @@ SCENARIOS = [
     ("samples:search_name", "/api/v1/laboratory/samples/", {"page": "1", "page_size": "20", "q": "munoz"}),
     ("samples:search_typo", "/api/v1/laboratory/samples/", {"page": "1", "page_size": "20", "q": "biosia"}),
     ("samples:filters", "/api/v1/laboratory/samples/",
-     {"page": "1", "page_size": "20", "state": "RECEIVED,PROCESSING", "type": "BIOPSIA"}),
+     {"page": "1", "page_size": "20", "state": "RECEIVED,PROCESSING", "sample_type_id": "none"}),
     ("samples:sort_patient_desc", "/api/v1/laboratory/samples/",
      {"page": "1", "page_size": "20", "sort": "patient", "order": "desc"}),
     ("samples:combined_page2", "/api/v1/laboratory/samples/",

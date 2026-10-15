@@ -1,0 +1,48 @@
+{
+  "schema": "celuma.catalog-export",
+  "version": 1,
+  "catalog_kind": "study_types",
+  "exported_at": "2026-10-15T12:00:00Z",
+  "include_inactive": true,
+  "item_count": 4,
+  "items": [
+    {
+      "code": "CITO",
+      "name": "Citología (sintética)",
+      "description": "Ejemplo sintético; no es un catálogo real.",
+      "is_active": false,
+      "provenance": {
+        "source_id": "00000000-0000-4000-8000-000000000001"
+      }
+    },
+    {
+      "code": "HISTO",
+      "name": "Histopatología (sintética)",
+      "description": null,
+      "is_active": true,
+      "provenance": {
+        "source_id": "00000000-0000-4000-8000-000000000002",
+        "default_report_template_id": "00000000-0000-4000-8000-0000000000aa",
+        "default_report_template_name": "Plantilla sintética"
+      }
+    },
+    {
+      "code": "IHQ",
+      "name": "Inmunohistoquímica (sintética)",
+      "description": "Línea 1\nLínea 2",
+      "is_active": true,
+      "provenance": {
+        "source_id": "00000000-0000-4000-8000-000000000003"
+      }
+    },
+    {
+      "code": "ihq",
+      "name": "Código repetido (sintético)",
+      "description": null,
+      "is_active": true,
+      "provenance": {
+        "source_id": "00000000-0000-4000-8000-000000000004"
+      }
+    }
+  ]
+}

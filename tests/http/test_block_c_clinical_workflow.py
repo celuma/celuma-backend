@@ -33,7 +33,7 @@ from app.models.patient import Patient
 from app.models.study_type import StudyType
 from app.models.tenant import Branch, Tenant
 
-from .factories import auth_headers, create_branch, create_tenant, create_user
+from .factories import auth_headers, create_branch, create_sample_type, create_tenant, create_user
 
 
 # ---------------------------------------------------------------------------
@@ -58,11 +58,13 @@ def lab_fixture(session: Session):
     tenant = create_tenant(session, name="Laboratorio Uno")
     branch = create_branch(session, tenant, code="MAIN")
     study_type = create_study_type(session, tenant)
+    sample_type = create_sample_type(session, tenant)
     user = create_user(session, tenant, email="uno@example.com", roles=("superuser",))
     return {
         "tenant": tenant,
         "branch": branch,
         "study_type": study_type,
+        "sample_type": sample_type,
         "user": user,
         "headers": auth_headers(user),
     }
@@ -75,11 +77,13 @@ def other_lab_fixture(session: Session):
     tenant = create_tenant(session, name="Laboratorio Dos")
     branch = create_branch(session, tenant, code="SEC")
     study_type = create_study_type(session, tenant, code="CITO", name="Citología")
+    sample_type = create_sample_type(session, tenant)
     user = create_user(session, tenant, email="dos@example.com", roles=("superuser",))
     return {
         "tenant": tenant,
         "branch": branch,
         "study_type": study_type,
+        "sample_type": sample_type,
         "user": user,
         "headers": auth_headers(user),
     }
@@ -135,7 +139,7 @@ def _create_order_with_sample(client, lab, *, sample_code: str = "M-1") -> tuple
             lab,
             patient_id=patient["id"],
             order_code=f"ORD-{sample_code}",
-            samples=[{"sample_code": sample_code, "type": "BIOPSIA"}],
+            samples=[{"sample_code": sample_code, "sample_type_id": str(lab["sample_type"].id)}],
         ),
         headers=lab["headers"],
     )
@@ -223,7 +227,7 @@ class TestOrderAndSampleWorkflow:
                 "branch_id": str(lab["branch"].id),
                 "order_id": order_body["id"],
                 "sample_code": "M-1",
-                "type": "BIOPSIA",
+                "sample_type_id": str(lab["sample_type"].id),
             },
             headers=lab["headers"],
         )
@@ -292,8 +296,8 @@ class TestOrderAndSampleWorkflow:
                 lab,
                 patient_id=patient["id"],
                 samples=[
-                    {"sample_code": "M-1", "type": "BIOPSIA"},
-                    {"sample_code": "M-2", "type": "BIOPSIA"},
+                    {"sample_code": "M-1", "sample_type_id": str(lab["sample_type"].id)},
+                    {"sample_code": "M-2", "sample_type_id": str(lab["sample_type"].id)},
                 ],
             ),
             headers=lab["headers"],
@@ -319,7 +323,7 @@ class TestOrderAndSampleWorkflow:
                 json=_order_payload(
                     context,
                     patient_id=patient["id"],
-                    samples=[{"sample_code": "M-1", "type": "BIOPSIA"}],
+                    samples=[{"sample_code": "M-1", "sample_type_id": str(lab["sample_type"].id)}],
                 ),
                 headers=context["headers"],
             )
@@ -511,7 +515,7 @@ class TestClinicalRoleAuthorization:
                 "branch_id": str(lab["branch"].id),
                 "order_id": seeded_order.json()["id"],
                 "sample_code": f"M-{role}",
-                "type": "BIOPSIA",
+                "sample_type_id": str(lab["sample_type"].id),
             },
             headers=headers,
         )
@@ -597,7 +601,7 @@ class TestClinicalTenantIsolation:
             json=_order_payload(
                 other_lab,
                 patient_id=patient["id"],
-                samples=[{"sample_code": "M-1", "type": "BIOPSIA"}],
+                samples=[{"sample_code": "M-1", "sample_type_id": str(other_lab["sample_type"].id)}],
             ),
             headers=other_lab["headers"],
         )
@@ -680,7 +684,7 @@ class TestClinicalTenantIsolation:
                 "branch_id": str(other_lab["branch"].id),
                 "order_id": foreign_order.json()["id"],
                 "sample_code": "INTRUSO-1",
-                "type": "BIOPSIA",
+                "sample_type_id": str(other_lab["sample_type"].id),
             },
             headers=lab["headers"],
         )
@@ -702,7 +706,7 @@ class TestClinicalTenantIsolation:
             json=_order_payload(
                 other_lab,
                 patient_id=foreign_patient["id"],
-                samples=[{"sample_code": "INTRUSO-U1", "type": "BIOPSIA"}],
+                samples=[{"sample_code": "INTRUSO-U1", "sample_type_id": str(other_lab["sample_type"].id)}],
             ),
             headers=lab["headers"],
         )

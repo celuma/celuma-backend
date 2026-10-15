@@ -521,7 +521,7 @@ curl -X POST "http://localhost:8000/api/v1/laboratory/samples/" \
     "branch_id": "branch-uuid-here",
     "order_id": "order-uuid-here",
     "sample_code": "SAMP001",
-    "type": "SANGRE",
+    "sample_type_id": "sample-type-uuid-here",
     "notes": "Blood sample for CBC",
     "collected_at": "2025-08-18T10:00:00Z",
     "received_at": "2025-08-18T11:00:00Z"
@@ -537,7 +537,7 @@ response = requests.post(
         "branch_id": branch_id,
         "order_id": order_id,
         "sample_code": "SAMP001",
-        "type": "SANGRE",
+        "sample_type_id": "sample-type-uuid-here",
         "notes": "Blood sample for CBC",
         "collected_at": "2025-08-18T10:00:00Z",
         "received_at": "2025-08-18T11:00:00Z"
@@ -561,8 +561,8 @@ curl -X POST "http://localhost:8000/api/v1/laboratory/orders/unified" \
     "order_code": "ORD001",
     "requested_by": "Dr. Smith",
     "samples": [
-      { "sample_code": "SAMP001", "type": "SANGRE" },
-      { "sample_code": "SAMP002", "type": "TEJIDO", "notes": "Fragment" }
+      { "sample_code": "SAMP001", "sample_type_id": "sample-type-uuid-here" },
+      { "sample_code": "SAMP002", "sample_type_id": "sample-type-uuid-here", "notes": "Fragment" }
     ]
   }'
 ```
@@ -577,8 +577,8 @@ payload = {
     "order_code": "ORD001",
     "requested_by": "Dr. Smith",
     "samples": [
-        {"sample_code": "SAMP001", "type": "SANGRE"},
-        {"sample_code": "SAMP002", "type": "TEJIDO", "notes": "Fragment"},
+        {"sample_code": "SAMP001", "sample_type_id": "sample-type-uuid-here"},
+        {"sample_code": "SAMP002", "sample_type_id": "sample-type-uuid-here", "notes": "Fragment"},
     ],
 }
 
@@ -1300,7 +1300,7 @@ sample_response = requests.post(
         "branch_id": branch_id,
         "order_id": order_id,
         "sample_code": "SAMP001",
-        "type": "SANGRE",
+        "sample_type_id": "sample-type-uuid-here",
         "notes": "Blood sample for CBC and chemistry"
     }
 )

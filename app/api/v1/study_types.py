@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from sqlmodel import select, Session
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
@@ -27,6 +28,8 @@ from app.schemas.study_type import (
     StudyTypeReportDefaultsResponse,
     TemplateRef,
 )
+from app.services import catalog_transfer
+from app.services.sample_types import record_audit
 import logging
 
 logger = logging.getLogger(__name__)
@@ -75,6 +78,32 @@ def list_study_types(
         )
     
     return StudyTypesListResponse(study_types=results)
+
+
+@router.get("/export")
+def export_study_types(
+    include_inactive: bool = True,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Download the whole study-type catalog as versioned JSON (requires
+    admin:manage_catalog). Read-only; see catalog-transfer.md (issue #17)."""
+    if not has_permission(user.id, "admin:manage_catalog", session):
+        raise HTTPException(403, "Permission required: admin:manage_catalog")
+    document = catalog_transfer.build_export(session, ctx.tenant_id, "study_types", include_inactive=include_inactive)
+    record_audit(
+        session, tenant_id=ctx.tenant_id, user_id=user.id, action="CATALOG.EXPORTED",
+        entity_type="catalog_export", entity_id=ctx.tenant_id,
+        description="Study-type catalog exported",
+        metadata={"catalog_kind": "study_types", "item_count": document["item_count"],
+                  "include_inactive": include_inactive},
+    )
+    session.commit()
+    return JSONResponse(
+        document,
+        headers={"Content-Disposition": f'attachment; filename="{catalog_transfer.export_filename("study_types")}"'},
+    )
 
 
 @router.get("/{study_type_id}", response_model=StudyTypeDetailResponse)

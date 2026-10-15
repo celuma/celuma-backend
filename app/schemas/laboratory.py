@@ -1,8 +1,17 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from app.schemas.report import ReportMetaResponse, ReportDetailResponse
 from app.schemas.patient import PatientFullResponse
+from app.schemas.sample_type import SampleTypeRef
+
+
+def _reject_retired_type_field(data):
+    """The `type` enum was retired in Céluma 1.4 (issue #17): a request that
+    still sends it is refused explicitly instead of silently ignored."""
+    if isinstance(data, dict) and "type" in data:
+        raise ValueError("'type' was removed in Céluma 1.4; send 'sample_type_id' (an active sample type of your laboratory)")
+    return data
 
 
 # --- User Reference for Collaboration (defined early) ---
@@ -227,16 +236,22 @@ class SampleCreate(BaseModel):
     branch_id: str
     order_id: str
     sample_code: str
-    type: str
+    sample_type_id: str  # required: every new sample has an active catalog type
     notes: Optional[str] = None
     collected_at: Optional[datetime] = None
     received_at: Optional[datetime] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_legacy_type(cls, data):
+        return _reject_retired_type_field(data)
 
 class SampleResponse(BaseModel):
     """Schema for sample response"""
     id: str
     sample_code: str
-    type: str
+    #: Catalog type; null for a legacy sample ("Sin tipo").
+    sample_type: Optional[SampleTypeRef] = None
     state: str
     order_id: str
     tenant_id: str
@@ -285,10 +300,15 @@ class SampleImageUploadResponse(BaseModel):
 class UnifiedSampleCreate(BaseModel):
     """Input schema for creating a sample as part of unified order creation."""
     sample_code: str
-    type: str
+    sample_type_id: str
     notes: Optional[str] = None
     collected_at: Optional[datetime] = None
     received_at: Optional[datetime] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_legacy_type(cls, data):
+        return _reject_retired_type_field(data)
 
 
 class OrderUnifiedCreate(BaseModel):
@@ -439,7 +459,7 @@ class SampleListItem(BaseModel):
     """Sample item with enriched branch and order objects (tenant_id kept as id)."""
     id: str
     sample_code: str
-    type: str
+    sample_type: Optional[SampleTypeRef] = None
     state: str
     tenant_id: str
     branch: BranchRef
@@ -473,7 +493,11 @@ class SampleFilterOptionsResponse(BaseModel):
     which is what the pre-1.4 client derived from the full downloaded list.
     """
     states: List[str]
-    types: List[str]
+    #: Types referenced by the tenant's samples (deactivated ones included).
+    sample_types: List[FilterOption]
+    #: Whether any sample has no type: the list then offers "Sin tipo"
+    #: (filter value `none`).
+    has_untyped_samples: bool
     orders: List[FilterOption]
     patients: List[FilterOption]
     labels: List[FilterOption]
@@ -496,7 +520,7 @@ class SampleDetailResponse(BaseModel):
     """Complete detail for a sample including branch, order, and patient references."""
     id: str
     sample_code: str
-    type: str
+    sample_type: Optional[SampleTypeRef] = None
     state: str
     collected_at: Optional[str] = None
     received_at: Optional[str] = None

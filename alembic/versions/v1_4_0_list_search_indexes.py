@@ -60,6 +60,37 @@ migrations in a drained window (`celuma-engineering/runbooks/migrations.md`),
 and building these indexes took well under a second each at the measured
 scale. No `IF NOT EXISTS`: an index of the same name created by hand would be
 a surprise worth stopping for. Nothing here rewrites or backfills data.
+
+===========================================================================
+§2 — Sample-type catalog; the `sampletype` enum is retired (issue #17)
+===========================================================================
+
+Specification: `celuma-engineering/specs/laboratory/sample-types.md`;
+decision record: `celuma-engineering/adr/0012-sample-type-catalog.md`.
+
+**§2a — `sample_type`.** A tenant-owned catalog with the persisted fields of
+`study_type` (id, tenant_id, code, name, description, is_active,
+default_report_template_id, created_at) in a separate table, plus a
+`UNIQUE (tenant_id, code)` constraint — `study_type` has no such constraint,
+but import/copy rely on it as the final guard against a concurrent duplicate.
+The table is created EMPTY: the enum values are deliberately not seeded.
+
+**§2b — `sample.sample_type_id`.** A nullable FK to `sample_type`
+(`ON DELETE RESTRICT`). It is nullable for exactly one reason: legacy samples.
+Every sample that exists at upgrade time gets NULL ("Sin tipo"). New samples
+cannot be NULL — that is enforced by every creation route, not by the column.
+
+**§2c — the enum column is dropped.** `sample.type` and the `sampletype` enum
+are removed. Nothing is mapped, backfilled or copied: the product decision is
+that enum values carry over to nothing. Identity, state, notes, images, order
+links and labels of every sample are untouched (only this one column goes).
+
+**Downgrade is LOSSY.** It recreates `sampletype`, adds `sample.type NOT NULL`
+and must give every row *some* value: it writes `OTRO` for ALL samples. The
+discarded enum assignments cannot be reconstructed from NULL, and catalog
+assignments made after the upgrade are lost with the table. The only way to get
+the real 1.3.x assignments back is a backup/snapshot taken before the upgrade
+(`celuma-engineering/runbooks/migrations.md`, "Sample-type catalog").
 """
 from typing import Sequence, Union
 
@@ -85,20 +116,65 @@ LIST_INDEXES = (
 )
 
 
+#: Values of the retired `sampletype` enum; only the downgrade recreates it.
+RETIRED_SAMPLE_TYPE_VALUES = ("SANGRE", "BIOPSIA", "LAMINILLA", "TEJIDO", "OTRO")
+
+
 def upgrade() -> None:
     # §1a
     op.execute("CREATE EXTENSION IF NOT EXISTS fuzzystrmatch")
     # §1b
     for name, table, column in LIST_INDEXES:
         op.execute(f"CREATE INDEX {name} ON public.{table} USING btree ({column})")
+    # §2a
+    op.execute("""
+        CREATE TABLE public.sample_type (
+            created_at                  timestamp without time zone NOT NULL,
+            id                          uuid NOT NULL,
+            tenant_id                   uuid NOT NULL,
+            code                        character varying(50) NOT NULL,
+            name                        character varying(255) NOT NULL,
+            description                 character varying,
+            is_active                   boolean NOT NULL,
+            default_report_template_id  uuid,
+            CONSTRAINT sample_type_pkey PRIMARY KEY (id),
+            CONSTRAINT uq_sample_type_tenant_code UNIQUE (tenant_id, code),
+            CONSTRAINT sample_type_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenant(id),
+            CONSTRAINT fk_sample_type_report_template FOREIGN KEY (default_report_template_id) REFERENCES public.report_template(id)
+        )
+    """)
+    op.execute("CREATE INDEX ix_sample_type_tenant_id ON public.sample_type USING btree (tenant_id)")
+    op.execute("CREATE INDEX ix_sample_type_code ON public.sample_type USING btree (code)")
+    op.execute("CREATE INDEX ix_sample_type_tenant_active ON public.sample_type USING btree (tenant_id, is_active)")
+    # §2b — every existing row starts NULL ("Sin tipo")
+    op.execute("ALTER TABLE public.sample ADD COLUMN sample_type_id uuid")
+    op.execute(
+        "ALTER TABLE ONLY public.sample ADD CONSTRAINT sample_sample_type_id_fkey "
+        "FOREIGN KEY (sample_type_id) REFERENCES public.sample_type(id) ON DELETE RESTRICT"
+    )
+    op.execute("CREATE INDEX ix_sample_sample_type_id ON public.sample USING btree (sample_type_id)")
+    # §2c
+    op.execute("ALTER TABLE public.sample DROP COLUMN type")
+    op.execute("DROP TYPE public.sampletype")
 
 
 def downgrade() -> None:
     """Returns the database to the `v1_3_1` contract.
 
-    Dropping the indexes loses no data. The extension is dropped as well: the
-    1.3.1 schema did not have it, and nothing but the 1.4 list search uses it.
+    The sample-type section (§2) is LOSSY: every sample comes back as `OTRO`
+    (see the module docstring). Dropping the indexes loses no data. The
+    extension is dropped as well: the 1.3.1 schema did not have it, and
+    nothing but the 1.4 list search uses it.
     """
+    # §2 first (reverse order). LOSSY: see the module docstring.
+    values = ", ".join(f"'{v}'" for v in RETIRED_SAMPLE_TYPE_VALUES)
+    op.execute(f"CREATE TYPE public.sampletype AS ENUM ({values})")
+    op.execute("ALTER TABLE public.sample ADD COLUMN type public.sampletype NOT NULL DEFAULT 'OTRO'")
+    op.execute("ALTER TABLE public.sample ALTER COLUMN type DROP DEFAULT")
+    op.execute("DROP INDEX IF EXISTS public.ix_sample_sample_type_id")
+    op.execute("ALTER TABLE public.sample DROP CONSTRAINT IF EXISTS sample_sample_type_id_fkey")
+    op.execute("ALTER TABLE public.sample DROP COLUMN sample_type_id")
+    op.execute("DROP TABLE public.sample_type")
     for name, _table, _column in reversed(LIST_INDEXES):
         op.execute(f"DROP INDEX IF EXISTS public.{name}")
     op.execute("DROP EXTENSION IF EXISTS fuzzystrmatch")

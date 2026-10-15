@@ -1,6 +1,6 @@
 # Import all models to ensure they are registered with SQLModel
 from .base import BaseModel, TimestampMixin, TenantMixin, BranchMixin
-from .enums import OrderStatus, SampleType, SampleState, ReportStatus, PaymentStatus, EventType, ReviewStatus, AssignmentItemType
+from .enums import OrderStatus, SampleState, ReportStatus, PaymentStatus, EventType, ReviewStatus, AssignmentItemType
 from .tenant import Tenant, Branch
 from .user import AppUser, UserBranch
 from .permission import Permission
@@ -17,6 +17,7 @@ from .report_letterhead import ReportLetterhead
 from .report_letterhead_version import ReportLetterheadVersion, ReportLetterheadVersionStatus
 from .report_section import ReportSection
 from .study_type import StudyType
+from .sample_type import SampleType
 from .price_catalog import PriceCatalog
 from .billing import Invoice, Payment, InvoiceItem
 from .audit import AuditLog
@@ -54,7 +55,6 @@ __all__ = [
     "TenantMixin",
     "BranchMixin",
     "OrderStatus",
-    "SampleType",
     "SampleState",
     "ReportStatus",
     "PaymentStatus",
@@ -90,6 +90,7 @@ __all__ = [
     "ReportLetterheadVersionStatus",
     "ReportSection",
     "StudyType",
+    "SampleType",
     "PriceCatalog",
     "Invoice",
     "Payment",

@@ -33,6 +33,7 @@ import random
 import subprocess
 import sys
 import uuid
+import zlib
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -65,6 +66,14 @@ ORDER_CODE_PROBES = ("CU-011026", "CU-021026", "CU-991026", "CU-1001026", "CU-10
 
 STUDY_TYPES = (("CU", "Citología urinaria"), ("BX", "Biopsia"), ("IHQ", "Inmunohistoquímica"))
 SAMPLE_TYPES = ("SANGRE", "BIOPSIA", "LAMINILLA", "TEJIDO", "OTRO")
+#: Share of samples left without a catalog type, like the legacy rows of a
+#: laboratory upgraded to 1.4 ("Sin tipo").
+UNTYPED_SHARE = 0.1
+
+
+def _sample_type_for(code: str, chosen: str, ids: dict):
+    """Deterministic by code (no PRNG draw): ~UNTYPED_SHARE of samples are legacy."""
+    return None if (zlib.crc32(code.encode()) % 100) < UNTYPED_SHARE * 100 else ids[chosen]
 SAMPLE_STATES = ("RECEIVED", "PROCESSING", "READY", "DAMAGED", "CANCELLED")
 ORDER_STATUSES = ("RECEIVED", "PROCESSING", "DIAGNOSIS", "REVIEW", "RELEASED", "CLOSED", "CANCELLED")
 REPORT_STATUSES = ("DRAFT", "IN_REVIEW", "APPROVED", "PUBLISHED", "RETRACTED")
@@ -172,6 +181,11 @@ class Generator:
         self._insert("study_type", [{"id": study[c], "tenant_id": tenant_id, "code": c, "name": n,
                                      "is_active": True, "created_at": EPOCH} for c, n in STUDY_TYPES])
 
+        sample_type_ids = {c: uuid.uuid4() for c in SAMPLE_TYPES}
+        self._insert("sample_type", [{"id": sample_type_ids[c], "tenant_id": tenant_id, "code": c,
+                                      "name": c.title(), "is_active": True, "created_at": EPOCH}
+                                     for c in SAMPLE_TYPES])
+
         labels = [{"id": uuid.uuid4(), "tenant_id": tenant_id, "name": n, "color": "#49B6AD",
                    "created_at": EPOCH, "updated_at": EPOCH} for n in LABEL_NAMES]
         self._insert("label", labels)
@@ -233,10 +247,14 @@ class Generator:
                     other_next[st_code] += 1
                 sample_codes.add(code)
                 sid = uuid.uuid4()
+                # Same single PRNG draw the enum column used, so every other
+                # value of a seeded dataset is unchanged.
+                chosen_type = r.choice(SAMPLE_TYPES)
                 samples.append({
                     "id": sid, "tenant_id": tenant_id, "branch_id": branch_id, "order_id": order_id,
-                    "sample_code": code, "type": r.choice(SAMPLE_TYPES), "state": r.choice(SAMPLE_STATES),
+                    "sample_code": code, "state": r.choice(SAMPLE_STATES),
                     "received_at": created,
+                    "sample_type_id": _sample_type_for(code, chosen_type, sample_type_ids),
                 })
                 if r.random() < 0.15:
                     sample_labels.append({"sample_id": sid, "label_id": r.choice(labels)["id"]})
@@ -282,7 +300,8 @@ class Generator:
                 continue
             samples.append({
                 "id": uuid.uuid4(), "tenant_id": tenant_id, "branch_id": branch_id, "order_id": orders[0]["id"],
-                "sample_code": code, "type": "BIOPSIA", "state": "RECEIVED", "received_at": EPOCH,
+                "sample_code": code, "state": "RECEIVED", "received_at": EPOCH,
+                "sample_type_id": sample_type_ids["BIOPSIA"],
             })
 
         report_ids = {o["id"]: o.pop("report_id", None) for o in orders}
