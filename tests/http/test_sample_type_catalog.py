@@ -110,6 +110,31 @@ class TestAdministration:
         reactivated = client.put(f"{BASE}{body['id']}", json={"is_active": True}, headers=lab.headers)
         assert reactivated.json()["is_active"] is True
 
+    def test_description_omitted_is_unchanged_and_null_or_blank_clears(self, client, lab):
+        """Contract: omitting `description` leaves it alone (like every other
+        field); an explicit null or blank string clears it."""
+        st = create(client, lab, description="Texto previo").json()
+        url = f"{BASE}{st['id']}"
+
+        kept = client.put(url, json={"name": "Renombrada"}, headers=lab.headers).json()
+        assert kept["description"] == "Texto previo" and kept["name"] == "Renombrada"
+
+        for clearing in (None, "", "   "):
+            client.put(url, json={"description": "Otra vez"}, headers=lab.headers)
+            body = client.put(url, json={"description": clearing}, headers=lab.headers)
+            assert body.status_code == 200 and body.json()["description"] is None, clearing
+            assert client.get(url, headers=lab.headers).json()["description"] is None
+            assert client.get(url, headers=lab.headers).json()["name"] == "Renombrada"
+
+        # what the UI sends after emptying the field while editing
+        client.put(url, json={"description": "Texto"}, headers=lab.headers)
+        ui = client.put(url, json={"code": "BIOPSIA", "name": "Biopsia", "description": None, "is_active": True},
+                        headers=lab.headers)
+        assert ui.json()["description"] is None
+
+    def test_blank_description_on_create_is_stored_as_null(self, client, lab):
+        assert create(client, lab, description="  ").json()["description"] is None
+
     def test_validation_matches_study_types(self, client, lab):
         assert create(client, lab, code="  ").status_code == 422
         assert create(client, lab, code="X" * 51).status_code == 422

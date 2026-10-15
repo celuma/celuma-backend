@@ -203,7 +203,7 @@ def create_sample_type(
     if data.default_report_template_id:
         _owned_template(session, ctx, data.default_report_template_id)
     row = SampleType(
-        tenant_id=ctx.tenant_id, code=data.code, name=data.name, description=data.description,
+        tenant_id=ctx.tenant_id, code=data.code, name=data.name, description=(data.description or "").strip() or None,
         is_active=data.is_active if data.is_active is not None else True,
         default_report_template_id=data.default_report_template_id,
     )
@@ -247,8 +247,11 @@ def update_sample_type(
         row.default_report_template_id = data.default_report_template_id or None
     if data.name is not None:
         row.name = data.name
-    if data.description is not None:
-        row.description = data.description
+    # `description` is the one field that can be emptied. Omitted = unchanged;
+    # an explicit null or blank string clears it (stored as NULL). Pydantic
+    # cannot tell omitted from null by value, so `model_fields_set` decides.
+    if "description" in data.model_fields_set:
+        row.description = (data.description or "").strip() or None
     if data.is_active is not None:
         row.is_active = data.is_active
     session.add(row)

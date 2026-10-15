@@ -21,11 +21,19 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine.url import make_url
 
 from app.core.config import settings
-from tests.test_alembic_migrations import _admin_engine, _alembic, _current_revision
+from tests.test_alembic_migrations import (
+    HOTFIX_REVISION,
+    RELEASE_1_4_REVISION,
+    _admin_engine,
+    _alembic,
+    _current_revision,
+)
 
 DB = "celuma_sample_type_mig_test"
-PRE = "v1_3_1"
-HEAD = "v1_4_0"
+# The identifiers come from the chain-integrity module: only that module may spell
+# the reused `v1_4_0` id (see TestTheReusedV140Identifier).
+PRE = HOTFIX_REVISION
+HEAD = RELEASE_1_4_REVISION
 ENUM_VALUES = ["SANGRE", "BIOPSIA", "LAMINILLA", "TEJIDO", "OTRO"]
 
 
