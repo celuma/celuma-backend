@@ -1,22 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlmodel import Session, and_, func, select
+from sqlmodel import Session, func, select
 from app.core.db import get_session
 from app.api.v1.auth import AuthContext, current_user, get_auth_ctx
 from app.core.rbac import has_permission
-from app.models.assignment import Assignment
-from app.models.laboratory import Label, Order, OrderLabel, Sample
+from app.models.laboratory import Order
 from app.models.requesting_physician import RequestingPhysician
-from app.models.patient import Patient
 from app.models.tenant import Branch, Tenant
 from app.models.user import AppUser
+from app.services.laboratory_lists import build_order_items, order_list_statement
 from app.schemas.laboratory import (
-    BranchRef,
-    LabelResponse,
-    OrderListItem,
     OrdersListResponse,
-    PatientRef,
     RequestingPhysicianRef,
-    UserRef,
 )
 from app.schemas.requesting_physician import (
     RequestingPhysicianCreate,
@@ -146,81 +140,9 @@ def list_requesting_physician_orders(
         raise HTTPException(404, "Requesting physician not found")
 
     orders = session.exec(
-        select(Order).where(
-            Order.requesting_physician_id == physician.id,
-            Order.tenant_id == ctx.tenant_id,
-        )
+        order_list_statement(ctx.tenant_id, extra_where=(Order.requesting_physician_id == physician.id,))
     ).all()
-    results: list[OrderListItem] = []
-
-    for order in orders:
-        branch = session.get(Branch, order.branch_id)
-        patient = session.get(Patient, order.patient_id) if order.patient_id else None
-        sample_count = len(session.exec(select(Sample).where(Sample.order_id == order.id)).all())
-        has_report = order.report_id is not None
-        has_invoice = order.invoice_id is not None
-
-        label_ids = session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == order.id)).all()
-        labels = []
-        if label_ids:
-            label_objs = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
-            labels = [
-                LabelResponse(
-                    id=str(label.id),
-                    name=label.name,
-                    color=label.color,
-                    tenant_id=str(label.tenant_id),
-                    created_at=label.created_at,
-                )
-                for label in label_objs
-            ]
-
-        assignee_ids = session.exec(
-            select(Assignment.assignee_user_id).where(
-                and_(
-                    Assignment.item_type == "lab_order",
-                    Assignment.item_id == order.id,
-                    Assignment.unassigned_at.is_(None),
-                )
-            )
-        ).all()
-        assignees = []
-        if assignee_ids:
-            users = session.exec(select(AppUser).where(AppUser.id.in_(assignee_ids))).all()
-            assignees = [UserRef(id=str(item.id), name=item.full_name, email=item.email, avatar_url=item.avatar_url) for item in users]
-
-        results.append(
-            OrderListItem(
-                id=str(order.id),
-                order_code=order.order_code,
-                status=order.status,
-                tenant_id=str(order.tenant_id),
-                branch=BranchRef(
-                    id=str(order.branch_id),
-                    name=branch.name if branch else "",
-                    code=branch.code if branch else None,
-                ),
-                patient=PatientRef(
-                    id=str(patient.id),
-                    full_name=f"{patient.first_name} {patient.last_name}",
-                    patient_code=patient.patient_code,
-                ) if patient else None,
-                requesting_physician=_to_ref(physician),
-                requested_by=order.requested_by,
-                notes=order.notes,
-                created_at=str(getattr(order, "created_at", "")) if getattr(order, "created_at", None) else None,
-                report_id=str(order.report_id) if order.report_id else None,
-                invoice_id=str(order.invoice_id) if order.invoice_id else None,
-                study_type_id=str(order.study_type_id) if order.study_type_id else None,
-                sample_count=sample_count,
-                has_report=has_report,
-                has_invoice=has_invoice,
-                labels=labels if labels else None,
-                assignees=assignees if assignees else None,
-            )
-        )
-
-    return OrdersListResponse(orders=results)
+    return OrdersListResponse(orders=build_order_items(session, orders), total=len(orders))
 
 
 @router.post("/", response_model=RequestingPhysicianResponse)

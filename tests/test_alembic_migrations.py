@@ -137,10 +137,23 @@ RELEASE_REVISION = "v1_3_0"
 #: shipped product release, and 1.3.1 is a shipped product release.
 HOTFIX_REVISION = "v1_3_1"
 
+#: The Céluma 1.4 release revision, and the current head.
+#:
+#: `test_hotfix_revision_has_no_children` (now
+#: `test_the_only_child_of_the_1_3_1_hotfix_is_the_1_4_release`) existed to
+#: make this a deliberate decision rather than a quiet `down_revision`. The 1.4
+#: release needs schema (issues #5/#6/#7: `fuzzystrmatch` and the list
+#: indexes), so it gets its own revision on top of `v1_3_1`, which stays
+#: frozen and unedited.
+#:
+#: Its id is not `v1_4_0`: that id is in SUPERSEDED_REVISIONS below, a retired
+#: development identifier no executable code may reference.
+RELEASE_1_4_REVISION = "celuma_1_4_0"
+
 #: What `alembic upgrade head` lands on. Assertions that mean "the chain is
 #: fully applied" use this; assertions specifically about the 1.3 release
 #: migration's own behaviour keep using RELEASE_REVISION.
-HEAD_REVISION = HOTFIX_REVISION
+HEAD_REVISION = RELEASE_1_4_REVISION
 
 #: Revision ids that existed only on the unreleased `celuma-1.3` branch and
 #: were folded into RELEASE_REVISION. Nothing executable may reference them.
@@ -322,6 +335,7 @@ class TestChainShape:
         script = _script_directory()
         revisions = list(script.walk_revisions())
         assert [r.revision for r in revisions] == [
+            RELEASE_1_4_REVISION,
             HOTFIX_REVISION,
             RELEASE_REVISION,
             "v1_2_0",
@@ -347,15 +361,27 @@ class TestChainShape:
         ]
         assert children == [HOTFIX_REVISION]
 
-    def test_hotfix_revision_has_no_children(self):
-        """The freeze contract now applies at the new head: Céluma 1.4's
-        release revision is the next legitimate move, and it must be a
-        deliberate decision."""
+    def test_the_only_child_of_the_1_3_1_hotfix_is_the_1_4_release(self):
+        """`v1_3_1` is frozen; Céluma 1.4's release revision was the next
+        legitimate move and it was taken deliberately. Anything else appended
+        to the hotfix still fails here."""
         script = _script_directory()
         children = [
             revision.revision
             for revision in script.walk_revisions()
             if revision.down_revision == HOTFIX_REVISION
+        ]
+        assert children == [RELEASE_1_4_REVISION]
+
+    def test_the_1_4_release_revision_has_no_children(self):
+        """The freeze contract now applies at the new head: a later 1.4 area
+        extends `celuma_1_4_0` until 1.4 ships; anything appended after it is
+        a release decision."""
+        script = _script_directory()
+        children = [
+            revision.revision
+            for revision in script.walk_revisions()
+            if revision.down_revision == RELEASE_1_4_REVISION
         ]
         assert children == []
 
@@ -4444,7 +4470,7 @@ class TestTheConsolidatedHotfixRevision:
         ]
         assert after_release == [HOTFIX_REVISION]
         assert len(script.get_heads()) == 1
-        assert script.get_current_head() == HOTFIX_REVISION
+        assert script.get_current_head() == HEAD_REVISION
 
     def test_the_revision_still_sits_directly_on_the_frozen_release(self):
         revision = _script_directory().get_revision(HOTFIX_REVISION)
@@ -5597,3 +5623,85 @@ class TestReportTemplateBaseFieldBackfill:
         # ...while the live row alongside it was repaired.
         live = self._template_json(migration_db, template_id)
         assert live["base"]["delivery_date"]["label"] == "Fecha de entrega"
+
+
+class TestListSearchAndIndexesMigration:
+    """Céluma 1.4 (issues #5/#6/#7) — §1 of revision `celuma_1_4_0`.
+
+    §1a installs `fuzzystrmatch` for the server half of the list search
+    contract; §1b adds the tenant/foreign-key indexes the list benchmark
+    showed every list was missing.
+    """
+
+    INDEXES = {
+        "ix_sample_tenant_id": ("sample", "tenant_id"),
+        "ix_sample_order_id": ("sample", "order_id"),
+        "ix_order_tenant_id": ("order", "tenant_id"),
+        "ix_order_patient_id": ("order", "patient_id"),
+        "ix_patient_tenant_id": ("patient", "tenant_id"),
+        "ix_report_tenant_id": ("report", "tenant_id"),
+        "ix_report_order_id": ("report", "order_id"),
+        "ix_report_version_report_id": ("report_version", "report_id"),
+    }
+
+    @staticmethod
+    def _indexes(engine) -> dict:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT indexname, tablename, indexdef FROM pg_indexes WHERE schemaname = 'public'")
+            ).all()
+        return {name: (table, definition) for name, table, definition in rows}
+
+    @staticmethod
+    def _has_extension(engine) -> bool:
+        with engine.connect() as conn:
+            return bool(conn.execute(
+                text("SELECT count(*) FROM pg_extension WHERE extname = 'fuzzystrmatch'")
+            ).scalar_one())
+
+    def test_the_revision_sits_directly_on_the_frozen_hotfix(self):
+        revision = _script_directory().get_revision(RELEASE_1_4_REVISION)
+        assert revision.down_revision == HOTFIX_REVISION
+
+    def test_upgrade_installs_fuzzystrmatch(self, migration_db):
+        _alembic(HOTFIX_REVISION)
+        assert not self._has_extension(migration_db)
+
+        _alembic(RELEASE_1_4_REVISION)
+
+        assert self._has_extension(migration_db)
+        with migration_db.connect() as conn:
+            # The exact call the list search makes.
+            assert conn.execute(text("SELECT levenshtein_less_equal('biosia', 'biopsia', 2)")).scalar_one() == 1
+
+    def test_upgrade_creates_every_list_index(self, migration_db):
+        _alembic(HOTFIX_REVISION)
+        assert set(self.INDEXES).isdisjoint(self._indexes(migration_db))
+
+        _alembic(RELEASE_1_4_REVISION)
+
+        indexes = self._indexes(migration_db)
+        for name, (table, column) in self.INDEXES.items():
+            assert name in indexes, f"missing {name}"
+            assert indexes[name][0] == table
+            assert indexes[name][1].endswith(f"USING btree ({column})")
+
+    def test_downgrade_removes_both_and_re_upgrade_restores_them(self, migration_db):
+        _alembic("head")
+        _alembic(HOTFIX_REVISION, command="downgrade")
+
+        assert _current_revision(migration_db) == HOTFIX_REVISION
+        assert not self._has_extension(migration_db)
+        assert set(self.INDEXES).isdisjoint(self._indexes(migration_db))
+
+        _alembic("head")
+        assert self._has_extension(migration_db)
+        assert set(self.INDEXES) <= set(self._indexes(migration_db))
+
+    def test_the_revision_adds_and_removes_no_table(self, migration_db):
+        _alembic(HOTFIX_REVISION)
+        before = set(inspect(migration_db).get_table_names())
+
+        _alembic(RELEASE_1_4_REVISION)
+
+        assert set(inspect(migration_db).get_table_names()) == before

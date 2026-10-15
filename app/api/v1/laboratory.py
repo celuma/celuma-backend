@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from typing import Dict, Optional, List, Set
+from typing import Dict, Literal, Optional, List, Set
 from uuid import UUID
 from sqlmodel import select, Session, and_, func
 from sqlalchemy import cast, String
@@ -14,11 +14,29 @@ from app.models.requesting_physician import RequestingPhysician
 from app.models.report import Report, ReportVersion
 from app.models.user import AppUser
 from app.models.events import OrderEvent
-from app.models.enums import EventType, SampleState, AssignmentItemType, ReviewStatus
+from app.models.enums import EventType, OrderStatus, SampleState, SampleType, AssignmentItemType, ReviewStatus
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
 from app.services.report_default_reviewer import (
     ensure_default_reviewer_assignment,
+)
+from app.services.laboratory_lists import (
+    ORDER_SORTS,
+    SAMPLE_SORTS,
+    build_order_items,
+    build_sample_items,
+    order_filter_options,
+    order_list_statement,
+    sample_filter_options,
+    sample_list_statement,
+)
+from app.services.list_pagination import (
+    MAX_PAGE_SIZE,
+    enum_filter,
+    page_request,
+    run_list,
+    sort_field,
+    uuid_filter,
 )
 from app.services.usage import UsageService
 from app.services.usage_thresholds import record_storage_delta_with_thresholds
@@ -51,12 +69,12 @@ from app.schemas.laboratory import (
     PatientOrdersListResponse,
     PatientOrderSummary,
     OrdersListResponse,
-    OrderListItem,
+    OrderFilterOptionsResponse,
     BranchRef,
     PatientRef,
     RequestingPhysicianRef,
     SamplesListResponse,
-    SampleListItem,
+    SampleFilterOptionsResponse,
     SampleDetailResponse,
     OrderSlim,
     LabelCreate,
@@ -259,69 +277,62 @@ def update_order_status(order_id: str, session: Session) -> None:
 
 @router.get("/orders/", response_model=OrdersListResponse)
 def list_orders(
+    page: Optional[int] = Query(None, ge=1),
+    page_size: Optional[int] = Query(None, ge=1, le=MAX_PAGE_SIZE),
+    q: Optional[str] = None,
+    sort: Optional[str] = None,
+    order: Literal["asc", "desc"] = "asc",
+    status: Optional[List[str]] = Query(None),
+    patient_id: Optional[List[str]] = Query(None),
+    requesting_physician_id: Optional[List[str]] = Query(None),
+    has_report: Optional[bool] = None,
+    has_invoice: Optional[bool] = None,
+    label_id: Optional[List[str]] = Query(None),
+    assignee_id: Optional[List[str]] = Query(None),
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """List all laboratory orders (requires lab:read)."""
+    """List laboratory orders (requires lab:read).
+
+    Céluma 1.4: search (`q`), filters and ordering apply to the tenant's whole
+    collection. With `page`/`page_size` the response is one page plus the
+    total; without them it is the whole filtered collection (pre-1.4 clients).
+    See `app/services/list_pagination.py`.
+    """
     _require(user.id, "lab:read", session)
-    orders = session.exec(select(Order).where(Order.tenant_id == ctx.tenant_id)).all()
-    results: list[OrderListItem] = []
-    for o in orders:
-        # Resolve related names
-        branch = session.get(Branch, o.branch_id)
-        patient = session.get(Patient, o.patient_id) if o.patient_id else None
-        requesting_physician = session.get(RequestingPhysician, o.requesting_physician_id) if o.requesting_physician_id else None
-        sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
-        has_report = o.report_id is not None
-        has_invoice = o.invoice_id is not None
+    stmt = order_list_statement(
+        ctx.tenant_id,
+        q=q,
+        statuses=enum_filter(status, OrderStatus, "status"),
+        patient_ids=uuid_filter(patient_id, "patient_id"),
+        physician_ids=uuid_filter(requesting_physician_id, "requesting_physician_id"),
+        has_report=has_report,
+        has_invoice=has_invoice,
+        label_ids=uuid_filter(label_id, "label_id"),
+        assignee_ids=uuid_filter(assignee_id, "assignee_id"),
+        sort=sort_field(sort, ORDER_SORTS),
+        descending=order == "desc",
+    )
+    request = page_request(page, page_size)
+    items, total = run_list(session, stmt, request, build_order_items)
+    return OrdersListResponse(
+        orders=items,
+        total=total,
+        page=request.page if request else None,
+        page_size=request.page_size if request else None,
+    )
 
-        # Get labels
-        label_ids = session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == o.id)).all()
-        labels = []
-        if label_ids:
-            labels_objs = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
-            labels = [LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels_objs]
-        
-        # Get assignees
-        assignee_ids = session.exec(
-            select(Assignment.assignee_user_id).where(
-                and_(
-                    Assignment.item_type == "lab_order",
-                    Assignment.item_id == o.id,
-                    Assignment.unassigned_at.is_(None)
-                )
-            )
-        ).all()
-        assignees = []
-        if assignee_ids:
-            users = session.exec(select(AppUser).where(AppUser.id.in_(assignee_ids))).all()
-            assignees = [UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in users]
-        
-        results.append(
-            OrderListItem(
-                id=str(o.id),
-                order_code=o.order_code,
-                status=o.status,
-                tenant_id=str(o.tenant_id),
-                branch=BranchRef(id=str(o.branch_id), name=branch.name if branch else "", code=branch.code if branch else None),
-                patient=_patient_ref(patient),
-                requesting_physician=_requesting_physician_ref(requesting_physician),
-                requested_by=o.requested_by,
-                notes=o.notes,
-                created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
-                report_id=str(o.report_id) if o.report_id else None,
-                invoice_id=str(o.invoice_id) if o.invoice_id else None,
-                study_type_id=str(o.study_type_id) if o.study_type_id else None,
-                sample_count=sample_count,
-                has_report=has_report,
-                has_invoice=has_invoice,
-                labels=labels if labels else None,
-                assignees=assignees if assignees else None,
-            )
-        )
 
-    return OrdersListResponse(orders=results)
+@router.get("/orders/filter-options", response_model=OrderFilterOptionsResponse, response_model_exclude_none=True)
+def get_order_filter_options(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Column filter catalogs over every order of the tenant (requires lab:read)."""
+    _require(user.id, "lab:read", session)
+    return order_filter_options(session, ctx.tenant_id)
 
 @router.post("/orders/", response_model=OrderResponse)
 def create_order(
@@ -870,65 +881,54 @@ def search_users_for_mention(
 
 @router.get("/samples/", response_model=SamplesListResponse)
 def list_samples(
+    page: Optional[int] = Query(None, ge=1),
+    page_size: Optional[int] = Query(None, ge=1, le=MAX_PAGE_SIZE),
+    q: Optional[str] = None,
+    sort: Optional[str] = None,
+    order: Literal["asc", "desc"] = "asc",
+    state: Optional[List[str]] = Query(None),
+    type: Optional[List[str]] = Query(None),
+    order_id: Optional[List[str]] = Query(None),
+    patient_id: Optional[List[str]] = Query(None),
+    label_id: Optional[List[str]] = Query(None),
+    assignee_id: Optional[List[str]] = Query(None),
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """List all samples (requires lab:read)."""
+    """List samples (requires lab:read). Paging contract as `list_orders`."""
     _require(user.id, "lab:read", session)
-    samples = session.exec(select(Sample).where(Sample.tenant_id == ctx.tenant_id)).all()
-    items: list[SampleListItem] = []
-    for s in samples:
-        branch = session.get(Branch, s.branch_id)
-        order = session.get(Order, s.order_id)
-        patient = session.get(Patient, order.patient_id) if order and order.patient_id else None
-        
-        # Get only own labels (not inherited from order)
-        sample_label_ids = session.exec(select(SampleLabel.label_id).where(SampleLabel.sample_id == s.id)).all()
-        labels = []
-        if sample_label_ids:
-            labels_objs = session.exec(select(Label).where(Label.id.in_(sample_label_ids))).all()
-            labels = [LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels_objs]
-        
-        # Get assignees
-        assignee_ids = session.exec(
-            select(Assignment.assignee_user_id).where(
-                and_(
-                    Assignment.item_type == "sample",
-                    Assignment.item_id == s.id,
-                    Assignment.unassigned_at.is_(None)
-                )
-            )
-        ).all()
-        assignees = []
-        if assignee_ids:
-            users = session.exec(select(AppUser).where(AppUser.id.in_(assignee_ids))).all()
-            assignees = [UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in users]
-        
-        items.append(
-            SampleListItem(
-                id=str(s.id),
-                sample_code=s.sample_code,
-                type=s.type,
-                state=s.state,
-                tenant_id=str(s.tenant_id),
-                branch=BranchRef(id=str(s.branch_id), name=branch.name if branch else "", code=branch.code if branch else None),
-                order=OrderSlim(
-                    id=str(s.order_id),
-                    order_code=order.order_code if order else "",
-                    status=order.status if order else "",
-                    requested_by=order.requested_by if order else None,
-                    patient=PatientRef(
-                        id=str(patient.id) if patient else "",
-                        full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
-                        patient_code=patient.patient_code if patient else "",
-                    ) if patient else None,
-                ),
-                labels=labels if labels else None,
-                assignees=assignees if assignees else None,
-            )
-        )
-    return SamplesListResponse(samples=items)
+    stmt = sample_list_statement(
+        ctx.tenant_id,
+        q=q,
+        states=enum_filter(state, SampleState, "state"),
+        types=enum_filter(type, SampleType, "type"),
+        order_ids=uuid_filter(order_id, "order_id"),
+        patient_ids=uuid_filter(patient_id, "patient_id"),
+        label_ids=uuid_filter(label_id, "label_id"),
+        assignee_ids=uuid_filter(assignee_id, "assignee_id"),
+        sort=sort_field(sort, SAMPLE_SORTS),
+        descending=order == "desc",
+    )
+    request = page_request(page, page_size)
+    items, total = run_list(session, stmt, request, build_sample_items)
+    return SamplesListResponse(
+        samples=items,
+        total=total,
+        page=request.page if request else None,
+        page_size=request.page_size if request else None,
+    )
+
+
+@router.get("/samples/filter-options", response_model=SampleFilterOptionsResponse, response_model_exclude_none=True)
+def get_sample_filter_options(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Column filter catalogs over every sample of the tenant (requires lab:read)."""
+    _require(user.id, "lab:read", session)
+    return sample_filter_options(session, ctx.tenant_id)
 
 @router.get("/samples/{sample_id}", response_model=SampleDetailResponse)
 def get_sample_detail(
@@ -2122,67 +2122,10 @@ def list_patient_orders(
     if str(patient.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Patient not found")
     
-    orders = session.exec(select(Order).where(Order.patient_id == patient.id, Order.tenant_id == ctx.tenant_id)).all()
-    results: list[OrderListItem] = []
-    
-    for o in orders:
-        # Resolve related entities
-        branch = session.get(Branch, o.branch_id)
-        requesting_physician = session.get(RequestingPhysician, o.requesting_physician_id) if o.requesting_physician_id else None
-        sample_count = len(session.exec(select(Sample).where(Sample.order_id == o.id)).all())
-        has_report = o.report_id is not None
-        has_invoice = o.invoice_id is not None
-
-        # Get labels
-        label_ids = session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == o.id)).all()
-        labels = []
-        if label_ids:
-            labels_objs = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
-            labels = [LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels_objs]
-        
-        # Get assignees
-        assignee_ids = session.exec(
-            select(Assignment.assignee_user_id).where(
-                and_(
-                    Assignment.item_type == "lab_order",
-                    Assignment.item_id == o.id,
-                    Assignment.unassigned_at.is_(None)
-                )
-            )
-        ).all()
-        assignees = []
-        if assignee_ids:
-            users = session.exec(select(AppUser).where(AppUser.id.in_(assignee_ids))).all()
-            assignees = [UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in users]
-        
-        results.append(
-            OrderListItem(
-                id=str(o.id),
-                order_code=o.order_code,
-                status=o.status,
-                tenant_id=str(o.tenant_id),
-                branch=BranchRef(id=str(o.branch_id), name=branch.name if branch else "", code=branch.code if branch else None),
-                patient=PatientRef(
-                    id=str(o.patient_id),
-                    full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
-                    patient_code=patient.patient_code if patient else "",
-                ),
-                requesting_physician=_requesting_physician_ref(requesting_physician),
-                requested_by=o.requested_by,
-                notes=o.notes,
-                created_at=str(getattr(o, "created_at", "")) if getattr(o, "created_at", None) else None,
-                report_id=str(o.report_id) if o.report_id else None,
-                invoice_id=str(o.invoice_id) if o.invoice_id else None,
-                study_type_id=str(o.study_type_id) if o.study_type_id else None,
-                sample_count=sample_count,
-                has_report=has_report,
-                has_invoice=has_invoice,
-                labels=labels if labels else None,
-                assignees=assignees if assignees else None,
-            )
-        )
-
-    return OrdersListResponse(orders=results)
+    orders = session.exec(
+        order_list_statement(ctx.tenant_id, extra_where=(Order.patient_id == patient.id,))
+    ).all()
+    return OrdersListResponse(orders=build_order_items(session, orders), total=len(orders))
 
 
 # Endpoint /patients/{patient_id}/cases has been removed - use /patients/{patient_id}/orders instead
