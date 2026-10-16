@@ -89,7 +89,7 @@ This document describes the complete database schema for the Celuma laboratory m
 - Supports collaboration via the `Assignment` table (not a column array)
 - Fields:
   - `sample_code` (string, max 100 chars): Unique identifier per order
-  - `type` (SampleType): Type of sample (SANGRE, BIOPSIA, etc.)
+  - `sample_type_id` (uuid, nullable FK to `sample_type`): catalog type; NULL for legacy samples ("Sin tipo"). Required for every NEW sample by the API. Céluma 1.4 retired the `type` enum column.
   - `state` (SampleState): Current sample state (RECEIVED, PROCESSING, READY, DAMAGED, CANCELLED)
   - `collected_at` (timestamp, optional): When sample was collected
   - `received_at` (timestamp, optional): When sample was received at lab
@@ -381,12 +381,8 @@ Roles are stored as rows in the `role` table, not as a PostgreSQL enum. See sect
 - `CLOSED`: Order completed
 - `CANCELLED`: Order cancelled
 
-### SampleType
-- `SANGRE`: Blood sample
-- `BIOPSIA`: Biopsy sample
-- `LAMINILLA`: Slide sample
-- `TEJIDO`: Tissue sample
-- `OTRO`: Other sample types
+### Sample types (catalog, Céluma 1.4)
+The `SampleType` enum (`SANGRE`, `BIOPSIA`, `LAMINILLA`, `TEJIDO`, `OTRO`) was retired by the unreleased `v1_4_0` revision. Sample types are now a tenant-owned catalog (table `sample_type`: `id`, `tenant_id`, `code` (unique per tenant), `name`, `description`, `is_active`, `default_report_template_id`, `created_at`). Contract: `celuma-engineering/specs/laboratory/sample-types.md`.
 
 ### SampleState
 Sample-specific lifecycle states (independent from OrderStatus):

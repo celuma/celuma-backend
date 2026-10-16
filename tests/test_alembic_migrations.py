@@ -3702,11 +3702,23 @@ def _seed_report_version(
 
 def _seed_sample(conn, tenant_id: uuid.UUID, branch_id: uuid.UUID, order_id: uuid.UUID) -> uuid.UUID:
     sample_id = uuid.uuid4()
+    # Céluma 1.4 (#17) dropped `sample.type` (the enum), so a sample seeded at
+    # `head` carries no type — exactly the legacy "Sin tipo" shape. Below 1.4
+    # the column exists and is NOT NULL, so it is still supplied there.
+    has_enum_column = conn.execute(
+        text(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' "
+            "AND table_name = 'sample' AND column_name = 'type'"
+        )
+    ).first() is not None
     conn.execute(
         text(
             "INSERT INTO sample (id, tenant_id, branch_id, order_id, sample_code, "
-            "type, state) "
-            "VALUES (:id, :tenant_id, :branch_id, :order_id, :code, 'TEJIDO', 'RECEIVED')"
+            + ("type, " if has_enum_column else "")
+            + "state) "
+            "VALUES (:id, :tenant_id, :branch_id, :order_id, :code, "
+            + ("'TEJIDO', " if has_enum_column else "")
+            + "'RECEIVED')"
         ),
         {
             "id": sample_id,
@@ -5757,10 +5769,17 @@ class TestListSearchAndIndexesMigration:
         assert self._has_extension(migration_db)
         assert set(self.INDEXES) <= set(self._indexes(migration_db))
 
-    def test_the_revision_adds_and_removes_no_table(self, migration_db):
+    def test_the_revision_adds_exactly_the_sample_type_table(self, migration_db):
+        """Section 1 (indexes/extension) adds no table; section 2 (issue #17)
+        adds exactly `sample_type`. Every 1.3.1 table must survive, and the
+        downgrade must return the table set to its 1.3.1 shape."""
         _alembic(HOTFIX_REVISION)
         before = set(inspect(migration_db).get_table_names())
 
         _alembic(RELEASE_1_4_REVISION)
+        after = set(inspect(migration_db).get_table_names())
+        assert after - before == {"sample_type"}
+        assert before - after == set(), "the revision must not remove an existing table"
 
+        _alembic(HOTFIX_REVISION, command="downgrade")
         assert set(inspect(migration_db).get_table_names()) == before

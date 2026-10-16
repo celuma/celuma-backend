@@ -21,6 +21,7 @@ from app.models.patient import Patient
 from app.models.report import Report, ReportVersion
 from app.models.report_review import ReportReview
 from app.models.requesting_physician import RequestingPhysician
+from app.models.sample_type import SampleType
 
 from .factories import auth_headers, create_branch, create_tenant, create_user
 
@@ -41,6 +42,7 @@ class Lab:
                                  full_name=f"Admin {name}")
         self.headers = auth_headers(self.admin)
         self._seq = 0
+        self.biopsia = self.sample_type("BIOPSIA", "Biopsia")
 
     def _tick(self) -> datetime:
         self._seq += 1
@@ -69,9 +71,16 @@ class Lab:
                               requested_by=requested_by, status=status, notes=notes,
                               created_at=self._tick()))
 
-    def sample(self, order: Order, code: str, *, type="BIOPSIA", state="RECEIVED") -> Sample:
+    def sample_type(self, code: str, name: str, *, is_active: bool = True) -> SampleType:
+        return self.add(SampleType(tenant_id=self.tenant.id, code=code, name=name, is_active=is_active))
+
+    def sample(self, order: Order, code: str, *, sample_type="default", state="RECEIVED") -> Sample:
+        """`sample_type="default"` is the lab's Biopsia; `None` is a legacy ("Sin tipo") row."""
+        if sample_type == "default":
+            sample_type = self.biopsia
         return self.add(Sample(tenant_id=self.tenant.id, branch_id=self.branch.id, order_id=order.id,
-                               sample_code=code, type=type, state=state))
+                               sample_code=code, sample_type_id=sample_type.id if sample_type else None,
+                               state=state))
 
     def label(self, name: str) -> Label:
         return self.add(Label(tenant_id=self.tenant.id, name=name, color="#49B6AD"))
@@ -113,8 +122,8 @@ def lab(session):
     future = lab.order("CU-011026", patient=perez)
     lab.sample(first, "CU276262")
     lab.sample(first, "CU276263", state="PROCESSING")
-    lab.sample(first, "CU276252", type="SANGRE")
-    lab.sample(second, "BX276262", type="TEJIDO")
+    lab.sample(first, "CU276252", sample_type=lab.sample_type("SANGRE", "Sangre"))
+    lab.sample(second, "BX276262", sample_type=lab.sample_type("TEJIDO", "Tejido"))
     lab.sample(second, "IHQ276262")
     lab.sample(second, "CU999999", state="READY")
     lab.sample(future, "CU-1001026")
@@ -315,7 +324,7 @@ class TestPagination:
         assert client.get(SAMPLES, params={"page_size": 101}, headers=lab.headers).status_code == 422
         assert client.get(SAMPLES, params={"page": 0}, headers=lab.headers).status_code == 422
 
-    @pytest.mark.parametrize("params", [{"state": "BOGUS"}, {"type": "NOPE"}, {"label_id": "x"},
+    @pytest.mark.parametrize("params", [{"state": "BOGUS"}, {"type": "BIOPSIA"}, {"sample_type_id": "NOPE"}, {"label_id": "x"},
                                         {"sort": "tenant_id"}, {"order": "sideways"}])
     def test_invalid_parameters_are_rejected_not_ignored(self, client, lab, params):
         assert client.get(SAMPLES, params={"page": 1, **params}, headers=lab.headers).status_code == 422
@@ -324,7 +333,7 @@ class TestPagination:
 class TestFilters:
     def test_filters_combine_with_and_across_and_or_within(self, client, lab):
         found = codes(client.get(SAMPLES, params=[("page", 1), ("state", "RECEIVED"), ("state", "READY"),
-                                                  ("type", "BIOPSIA")], headers=lab.headers))
+                                                  ("sample_type_id", str(lab.biopsia.id))], headers=lab.headers))
         assert sorted(found) == ["CU-1001026", "CU276262", "CU999999", "IHQ276262"]
 
     def test_comma_separated_values_are_accepted(self, client, lab):

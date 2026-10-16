@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field, Relationship, Column
 from sqlalchemy import JSON
 from .base import BaseModel, TimestampMixin, TenantMixin, BranchMixin
-from .enums import OrderStatus, SampleType, SampleState
+from .enums import OrderStatus, SampleState
 
 if TYPE_CHECKING:
     from .storage import SampleImageRendition
@@ -53,7 +53,10 @@ class Sample(BaseModel, TenantMixin, BranchMixin, table=True):
     branch_id: UUID = Field(foreign_key="branch.id")
     order_id: UUID = Field(foreign_key="order.id")
     sample_code: str = Field(max_length=100)  # Unique per order or branch
-    type: SampleType
+    # Céluma 1.4 (#17): the retired `SampleType` enum column is replaced by a
+    # catalog reference. NULL = legacy sample ("Sin tipo"); required, active and
+    # same-tenant for every NEW sample (enforced in the API, not by NOT NULL).
+    sample_type_id: Optional[UUID] = Field(foreign_key="sample_type.id", index=True, default=None)
     state: SampleState = Field(default=SampleState.RECEIVED)
     collected_at: Optional[datetime] = Field(default=None)
     received_at: Optional[datetime] = Field(default=None)

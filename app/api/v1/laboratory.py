@@ -14,7 +14,13 @@ from app.models.requesting_physician import RequestingPhysician
 from app.models.report import Report, ReportVersion
 from app.models.user import AppUser
 from app.models.events import OrderEvent
-from app.models.enums import EventType, OrderStatus, SampleState, SampleType, AssignmentItemType, ReviewStatus
+from app.models.enums import EventType, OrderStatus, SampleState, AssignmentItemType, ReviewStatus
+from app.services.sample_types import (
+    UNTYPED_FILTER_VALUE,
+    ref_for_sample,
+    require_active_sample_types,
+    sample_type_refs,
+)
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
 from app.services.report_default_reviewer import (
@@ -34,6 +40,7 @@ from app.services.list_pagination import (
     MAX_PAGE_SIZE,
     enum_filter,
     page_request,
+    split_csv,
     run_list,
     search_text,
     sort_field,
@@ -116,6 +123,13 @@ def _require(user_id, code: str, session: Session) -> None:
     """Raise 403 if user lacks the specified permission."""
     if not has_permission(user_id, code, session):
         raise HTTPException(403, f"Permission required: {code}")
+
+
+def _sample_type_event_meta(session: Session, sample: Sample) -> dict:
+    """`sample_type` (name; null = "Sin tipo") and `sample_type_id` for a timeline
+    event, so an event stays readable if the catalog entry is renamed later."""
+    ref = ref_for_sample(session, sample)
+    return {"sample_type": ref.name if ref else None, "sample_type_id": ref.id if ref else None}
 
 
 def _requesting_physician_ref(physician: Optional[RequestingPhysician]) -> Optional[RequestingPhysicianRef]:
@@ -880,6 +894,14 @@ def search_users_for_mention(
     )
 
 
+def sample_type_id_filter(values: Optional[List[str]]) -> List[str]:
+    """Catalog ids and/or `none` ("Sin tipo"); anything else is a 422."""
+    out: List[str] = []
+    for value in split_csv(values):
+        out.extend([value] if value == UNTYPED_FILTER_VALUE else uuid_filter([value], "sample_type_id"))
+    return out
+
+
 @router.get("/samples/", response_model=SamplesListResponse)
 def list_samples(
     page: Optional[int] = Query(None, ge=1),
@@ -888,7 +910,8 @@ def list_samples(
     sort: Optional[str] = None,
     order: Literal["asc", "desc"] = "asc",
     state: Optional[List[str]] = Query(None),
-    type: Optional[List[str]] = Query(None),
+    sample_type_id: Optional[List[str]] = Query(None),
+    type: Optional[List[str]] = Query(None, include_in_schema=False),
     order_id: Optional[List[str]] = Query(None),
     patient_id: Optional[List[str]] = Query(None),
     label_id: Optional[List[str]] = Query(None),
@@ -897,13 +920,20 @@ def list_samples(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """List samples (requires lab:read). Paging contract as `list_orders`."""
+    """List samples (requires lab:read). Paging contract as `list_orders`.
+
+    `sample_type_id` filters by catalog type (repeatable); the value `none`
+    selects samples without a type ("Sin tipo"). The retired `type` enum filter
+    is refused (422) rather than ignored, which would return an unfiltered page.
+    """
     _require(user.id, "lab:read", session)
+    if type:
+        raise HTTPException(422, "The 'type' filter was removed in Céluma 1.4; use 'sample_type_id'")
     stmt = sample_list_statement(
         ctx.tenant_id,
         q=search_text(q),
         states=enum_filter(state, SampleState, "state"),
-        types=enum_filter(type, SampleType, "type"),
+        sample_type_ids=sample_type_id_filter(sample_type_id),
         order_ids=uuid_filter(order_id, "order_id"),
         patient_ids=uuid_filter(patient_id, "patient_id"),
         label_ids=uuid_filter(label_id, "label_id"),
@@ -981,7 +1011,7 @@ def get_sample_detail(
     return SampleDetailResponse(
         id=str(s.id),
         sample_code=s.sample_code,
-        type=s.type,
+        sample_type=ref_for_sample(session, s),
         state=s.state,
         collected_at=str(getattr(s, "collected_at", "")) if getattr(s, "collected_at", None) else None,
         received_at=str(getattr(s, "received_at", "")) if getattr(s, "received_at", None) else None,
@@ -1057,7 +1087,7 @@ def update_sample_state(
             "new_state": new_state.value,
             "sample_id": str(sample.id),
             "sample_code": sample.sample_code,
-            "sample_type": sample.type.value if hasattr(sample.type, 'value') else str(sample.type),
+            **_sample_type_event_meta(session, sample),
         },
         created_by=user.id,
     )
@@ -1115,7 +1145,7 @@ def update_sample_state(
     return SampleResponse(
         id=str(sample.id),
         sample_code=sample.sample_code,
-        type=sample.type,
+        sample_type=ref_for_sample(session, sample),
         state=sample.state,
         order_id=str(sample.order_id),
         tenant_id=str(sample.tenant_id),
@@ -1202,7 +1232,7 @@ def update_sample_notes(
     return SampleResponse(
         id=str(sample.id),
         sample_code=sample.sample_code,
-        type=sample.type,
+        sample_type=ref_for_sample(session, sample),
         state=sample.state,
         order_id=str(sample.order_id),
         tenant_id=str(sample.tenant_id),
@@ -1244,6 +1274,11 @@ def create_sample(
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Order does not belong to your tenant")
 
+    # Céluma 1.4 (#17): a new sample requires an active type of THIS tenant.
+    sample_type = require_active_sample_types(session, ctx.tenant_id, [sample_data.sample_type_id])[
+        sample_data.sample_type_id
+    ]
+
     # Check if sample_code is unique for this order
     existing_sample = session.exec(
         select(Sample).where(
@@ -1260,7 +1295,7 @@ def create_sample(
         branch_id=sample_data.branch_id,
         order_id=sample_data.order_id,
         sample_code=sample_data.sample_code,
-        type=sample_data.type,
+        sample_type_id=sample_type.id,
         notes=sample_data.notes,
         collected_at=sample_data.collected_at,
         received_at=sample_data.received_at
@@ -1280,7 +1315,8 @@ def create_sample(
         event_metadata={
             "sample_id": str(sample.id),
             "sample_code": sample.sample_code,
-            "sample_type": sample.type,
+            "sample_type": sample_type.name,
+            "sample_type_id": str(sample_type.id),
             "initial_state": SampleState.RECEIVED.value,
         },
         created_by=sample_data.created_by if hasattr(sample_data, 'created_by') else None,
@@ -1324,7 +1360,7 @@ def create_sample(
     return SampleResponse(
         id=str(sample.id),
         sample_code=sample.sample_code,
-        type=sample.type,
+        sample_type=ref_for_sample(session, sample),
         state=sample.state,
         order_id=str(sample.order_id),
         tenant_id=str(sample.tenant_id),
@@ -1382,6 +1418,12 @@ def create_order_with_samples(
         raise HTTPException(404, "Study type not found")
     if str(study_type.tenant_id) != str(payload.tenant_id):
         raise HTTPException(403, "Study type does not belong to this tenant")
+
+    # Céluma 1.4 (#17): every sample needs an active type of this tenant. Checked
+    # before anything is written, so a bad type leaves no order behind.
+    sample_types = require_active_sample_types(
+        session, ctx.tenant_id, [s.sample_type_id for s in payload.samples]
+    )
 
     # Generate order_code if not provided
     if not payload.order_code:
@@ -1451,7 +1493,7 @@ def create_order_with_samples(
             branch_id=payload.branch_id,
             order_id=order.id,
             sample_code=s.sample_code,
-            type=s.type,
+            sample_type_id=sample_types[s.sample_type_id].id,
             notes=s.notes,
             collected_at=s.collected_at,
             received_at=s.received_at,
@@ -1470,7 +1512,8 @@ def create_order_with_samples(
             event_metadata={
                 "sample_id": str(sample.id),
                 "sample_code": sample.sample_code,
-                "sample_type": sample.type,
+                "sample_type": sample_types[s.sample_type_id].name,
+                "sample_type_id": str(sample_types[s.sample_type_id].id),
                 "initial_state": SampleState.RECEIVED.value,
             },
             created_by=payload.created_by,
@@ -1532,7 +1575,7 @@ def create_order_with_samples(
             SampleResponse(
                 id=str(s.id),
                 sample_code=s.sample_code,
-                type=s.type,
+                sample_type=ref_for_sample(session, s),
                 state=s.state,
                 order_id=str(s.order_id),
                 tenant_id=str(s.tenant_id),
@@ -1733,7 +1776,7 @@ def upload_sample_image(
             "file_size": len(data),
             "sample_id": str(sample.id),
             "sample_code": sample.sample_code,
-            "sample_type": sample.type.value if hasattr(sample.type, 'value') else str(sample.type),
+            **_sample_type_event_meta(session, sample),
             "image_id": str(sample_image.id),
         },
         created_by=user.id,
@@ -1754,7 +1797,7 @@ def upload_sample_image(
                 "new_state": "PROCESSING",
                 "sample_id": str(sample.id),
                 "sample_code": sample.sample_code,
-                "sample_type": sample.type.value if hasattr(sample.type, 'value') else str(sample.type),
+                **_sample_type_event_meta(session, sample),
                 "trigger": "first_image_upload",
             },
             created_by=user.id,
@@ -2035,6 +2078,7 @@ def build_order_full_detail(
     order_label_ids = set(label_ids)
 
     # Build sample responses with assignees and labels
+    sample_type_map = sample_type_refs(session, (smp.sample_type_id for smp in samples))
     sample_resps = []
     for s in samples:
         sample_assignee_users = _get_sample_assignees(session, s.id, ctx.tenant_id)
@@ -2061,7 +2105,7 @@ def build_order_full_detail(
             SampleResponse(
                 id=str(s.id),
                 sample_code=s.sample_code,
-                type=s.type,
+                sample_type=sample_type_map.get(s.sample_type_id),
                 state=s.state,
                 order_id=str(s.order_id),
                 tenant_id=str(s.tenant_id),
@@ -3108,7 +3152,7 @@ def update_sample_assignees(
     return SampleDetailResponse(
         id=str(sample.id),
         sample_code=sample.sample_code,
-        type=sample.type,
+        sample_type=ref_for_sample(session, sample),
         state=sample.state,
         collected_at=str(sample.collected_at) if sample.collected_at else None,
         received_at=str(sample.received_at) if sample.received_at else None,
@@ -3251,7 +3295,7 @@ def update_sample_labels(
     return SampleDetailResponse(
         id=str(sample.id),
         sample_code=sample.sample_code,
-        type=sample.type,
+        sample_type=ref_for_sample(session, sample),
         state=sample.state,
         collected_at=str(sample.collected_at) if sample.collected_at else None,
         received_at=str(sample.received_at) if sample.received_at else None,

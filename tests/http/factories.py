@@ -434,6 +434,27 @@ def create_inbox_notification(
 # notification assertion depend on an unrelated endpoint's contract.
 
 
+def create_sample_type(
+    session: Session,
+    tenant: Tenant,
+    *,
+    code: str = "BIOPSIA",
+    name: Optional[str] = None,
+    is_active: bool = True,
+):
+    """A catalog sample type (Céluma 1.4, #17). Samples made WITHOUT one are
+    legacy rows ("Sin tipo")."""
+    from app.models.sample_type import SampleType
+
+    sample_type = SampleType(
+        tenant_id=tenant.id, code=code, name=name or code.title(), is_active=is_active
+    )
+    session.add(sample_type)
+    session.commit()
+    session.refresh(sample_type)
+    return sample_type
+
+
 def create_sample(
     session: Session,
     tenant: Tenant,
@@ -442,8 +463,9 @@ def create_sample(
     *,
     sample_code: str = "S-1",
     state=None,
+    sample_type=None,
 ):
-    from app.models.enums import SampleState, SampleType
+    from app.models.enums import SampleState
     from app.models.laboratory import Sample
 
     sample = Sample(
@@ -451,7 +473,7 @@ def create_sample(
         branch_id=branch.id,
         order_id=order.id,
         sample_code=sample_code,
-        type=SampleType.BIOPSIA,
+        sample_type_id=sample_type.id if sample_type is not None else None,
         state=state or SampleState.RECEIVED,
     )
     session.add(sample)

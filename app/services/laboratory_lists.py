@@ -20,7 +20,7 @@ from collections import defaultdict
 from typing import Iterable, Optional, Sequence
 from uuid import UUID
 
-from sqlalchemy import String, cast, exists, func, select as sa_select
+from sqlalchemy import String, cast, exists, func, or_, select as sa_select
 from sqlmodel import Session, select
 
 from app.models.assignment import Assignment
@@ -28,6 +28,7 @@ from app.models.enums import OrderStatus, SampleState
 from app.models.laboratory import Label, Order, OrderLabel, Sample, SampleLabel
 from app.models.patient import Patient
 from app.models.requesting_physician import RequestingPhysician
+from app.models.sample_type import SampleType
 from app.models.tenant import Branch
 from app.models.user import AppUser
 from app.schemas.laboratory import (
@@ -44,6 +45,7 @@ from app.schemas.laboratory import (
     UserRef,
 )
 from app.services.list_search import SearchSpec, search_condition, sort_key
+from app.services.sample_types import UNTYPED_FILTER_VALUE, sample_type_refs
 
 SAMPLE_SORTS = ("sample_code", "order_code", "patient")
 ORDER_SORTS = ("order_code", "patient", "requester", "status")
@@ -205,7 +207,7 @@ def sample_list_statement(
     *,
     q: Optional[str] = None,
     states: Sequence[str] = (),
-    types: Sequence[str] = (),
+    sample_type_ids: Sequence[str] = (),
     order_ids: Sequence[str] = (),
     patient_ids: Sequence[str] = (),
     label_ids: Sequence[str] = (),
@@ -218,12 +220,20 @@ def sample_list_statement(
         select(Sample)
         .join(Order, Order.id == Sample.order_id)
         .outerjoin(Patient, Patient.id == Order.patient_id)
+        .outerjoin(SampleType, SampleType.id == Sample.sample_type_id)
         .where(Sample.tenant_id == tenant_id)
     )
     if states:
         stmt = stmt.where(Sample.state.in_(states))
-    if types:
-        stmt = stmt.where(Sample.type.in_(types))
+    if sample_type_ids:
+        # Catalog identities, plus "none" = samples without a type ("Sin tipo").
+        wanted = [UUID(v) for v in sample_type_ids if v != UNTYPED_FILTER_VALUE]
+        clauses = []
+        if wanted:
+            clauses.append(Sample.sample_type_id.in_(wanted))
+        if UNTYPED_FILTER_VALUE in sample_type_ids:
+            clauses.append(Sample.sample_type_id.is_(None))
+        stmt = stmt.where(or_(*clauses))
     if order_ids:
         stmt = stmt.where(Sample.order_id.in_(_uuid_list(order_ids)))
     if patient_ids:
@@ -239,7 +249,8 @@ def sample_list_statement(
     condition = search_condition(q, SearchSpec(
         scalars=(
             Sample.sample_code,
-            cast(Sample.type, String),
+            SampleType.name,
+            SampleType.code,
             cast(Sample.state, String),
             Order.order_code,
             Order.requested_by,
@@ -264,6 +275,7 @@ def sample_list_statement(
 def build_sample_items(session: Session, samples: Sequence[Sample]) -> list[SampleListItem]:
     """List items for `samples` (in order) with a fixed number of queries."""
     ids = [s.id for s in samples]
+    type_refs = sample_type_refs(session, (s.sample_type_id for s in samples))
     orders = _by_id(session, Order, (s.order_id for s in samples))
     patients = _by_id(session, Patient, (o.patient_id for o in orders.values()))
     branches = _by_id(session, Branch, (s.branch_id for s in samples))
@@ -282,7 +294,7 @@ def build_sample_items(session: Session, samples: Sequence[Sample]) -> list[Samp
         items.append(SampleListItem(
             id=str(s.id),
             sample_code=s.sample_code,
-            type=s.type,
+            sample_type=type_refs.get(s.sample_type_id),
             state=s.state,
             tenant_id=str(s.tenant_id),
             branch=_branch_ref(s.branch_id, branches),
@@ -303,7 +315,15 @@ def sample_filter_options(session: Session, tenant_id) -> SampleFilterOptionsRes
     """Filter catalogs over the tenant's whole sample collection — never a page."""
     in_tenant = Sample.tenant_id == tenant_id
     states = set(session.exec(select(Sample.state).where(in_tenant).distinct()).all())
-    types = session.exec(select(cast(Sample.type, String)).where(in_tenant).distinct()).all()
+    types = session.exec(
+        sa_select(SampleType.id, SampleType.name, SampleType.is_active)
+        .where(SampleType.tenant_id == tenant_id, exists(
+            sa_select(1).where(Sample.sample_type_id == SampleType.id, in_tenant)))
+        .order_by(sort_key(SampleType.name), SampleType.id)
+    ).all()
+    has_untyped = session.exec(
+        select(exists(sa_select(1).where(in_tenant, Sample.sample_type_id.is_(None))))
+    ).one()
     orders = session.exec(
         sa_select(Order.id, Order.order_code)
         .where(exists(sa_select(1).where(Sample.order_id == Order.id, in_tenant)), Order.tenant_id == tenant_id)
@@ -333,7 +353,11 @@ def sample_filter_options(session: Session, tenant_id) -> SampleFilterOptionsRes
     ).all()
     return SampleFilterOptionsResponse(
         states=[s.value for s in SampleState if s in states],
-        types=sorted(types),
+        sample_types=[
+            FilterOption(value=str(i), text=name if active else f"{name} (inactivo)")
+            for i, name, active in types
+        ],
+        has_untyped_samples=bool(has_untyped),
         orders=_options(orders, text_of=lambda rest: rest[0]),
         patients=_options(patients, text_of=lambda rest: rest[0] or ""),
         labels=[FilterOption(value=str(i), text=name, color=color) for i, name, color in labels],

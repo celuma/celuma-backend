@@ -9,13 +9,6 @@ class OrderStatus(str, Enum):
     CLOSED = "CLOSED"
     CANCELLED = "CANCELLED"
 
-class SampleType(str, Enum):
-    SANGRE = "SANGRE"
-    BIOPSIA = "BIOPSIA"
-    LAMINILLA = "LAMINILLA"
-    TEJIDO = "TEJIDO"
-    OTRO = "OTRO"
-
 class SampleState(str, Enum):
     """Sample-specific states: Received -> Processing -> Ready (or Damaged/Cancelled)"""
     RECEIVED = "RECEIVED"      # Recibida - default when created
