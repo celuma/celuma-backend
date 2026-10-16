@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from typing import List, Literal, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlmodel import select, Session, and_
 from sqlalchemy import cast, String
 from sqlalchemy.orm.attributes import flag_modified
@@ -13,7 +15,6 @@ from app.models.report_letterhead_version import (
 )
 from app.models.laboratory import Order
 from app.models.tenant import Tenant, Branch
-from app.models.patient import Patient
 from app.models.storage import StorageObject
 from app.models.user import AppUser
 from app.models.audit import AuditLog
@@ -55,6 +56,21 @@ from app.services.notification_integrations import (
 )
 from app.services.report_template_autoversion import snapshot_and_activate_template_version
 from app.services.report_template_hash import hash_clinical_template_block
+from app.services.list_pagination import (
+    MAX_PAGE_SIZE,
+    enum_filter,
+    page_request,
+    run_list,
+    search_text,
+    sort_field,
+    uuid_filter,
+)
+from app.services.report_lists import (
+    REPORT_SORTS,
+    build_report_items,
+    report_filter_options,
+    report_list_statement,
+)
 from app.services.usage import UsageService
 from app.services.report_authorization import (
     ReportAlreadySignedError,
@@ -101,10 +117,7 @@ from app.schemas.report import (
     ReportVersionCreate, 
     ReportVersionResponse,
     ReportsListResponse,
-    ReportListItem,
-    BranchRef,
-    OrderRef,
-    PatientRef,
+    ReportFilterOptionsResponse,
     ReportStatusUpdate,
     ReportSignRequest,
     ReportReviewComment,
@@ -248,87 +261,53 @@ def _build_order_full_detail(order_id: str, session: Session, ctx: AuthContext):
 
 @router.get("/", response_model=ReportsListResponse)
 def list_reports(
+    page: Optional[int] = Query(None, ge=1),
+    page_size: Optional[int] = Query(None, ge=1, le=MAX_PAGE_SIZE),
+    q: Optional[str] = None,
+    sort: Optional[str] = None,
+    order: Literal["asc", "desc"] = "asc",
+    status: Optional[List[str]] = Query(None),
+    patient_id: Optional[List[str]] = Query(None),
+    reviewer_id: Optional[List[str]] = Query(None),
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """List all reports (requires reports:read)."""
+    """List reports (requires reports:read).
+
+    Céluma 1.4: search, filters and ordering apply to the tenant's whole
+    collection; `page`/`page_size` select one page and `total` counts every
+    match. See `app/services/list_pagination.py`.
+    """
     _require(user.id, "reports:read", session)
-    reports = session.exec(select(Report).where(Report.tenant_id == ctx.tenant_id)).all()
-    results: list[ReportListItem] = []
-    
-    for r in reports:
-        # Resolve related entities
-        branch = session.get(Branch, r.branch_id)
-        order = session.get(Order, r.order_id)
-        patient = session.get(Patient, order.patient_id) if order else None
-        
-        # Get current version info
-        current_version = session.exec(
-            select(ReportVersion).where(
-                ReportVersion.report_id == r.id, 
-                ReportVersion.is_current == True
-            )
-        ).first()
-        
-        version_no = current_version.version_no if current_version else None
-        has_pdf = bool(current_version and current_version.pdf_storage_id)
-        signed_by = str(current_version.signed_by) if current_version and current_version.signed_by else None
-        signed_at = current_version.signed_at if current_version else None
-        
-        # Get reviewers
-        reviews = session.exec(
-            select(ReportReview).where(ReportReview.order_id == order.id if order else None)
-        ).all()
-        reviewers = []
-        if reviews:
-            from app.schemas.report import ReviewerWithStatus
-            for review in reviews:
-                reviewer = session.get(AppUser, review.reviewer_user_id)
-                if reviewer:
-                    reviewers.append(ReviewerWithStatus(
-                        id=str(reviewer.id),
-                        name=reviewer.full_name,
-                        email=reviewer.email,
-                        avatar_url=reviewer.avatar_url,
-                        status=review.status.lower(),
-                        review_id=str(review.id)
-                    ))
-        
-        results.append(
-            ReportListItem(
-                id=str(r.id),
-                status=r.status,
-                tenant_id=str(r.tenant_id),
-                branch=BranchRef(
-                    id=str(r.branch_id),
-                    name=branch.name if branch else "",
-                    code=branch.code if branch else None
-                ),
-                order=OrderRef(
-                    id=str(r.order_id),
-                    order_code=order.order_code if order else "",
-                    status=order.status if order else "",
-                    requested_by=order.requested_by if order else None,
-                    patient=PatientRef(
-                        id=str(patient.id) if patient else "",
-                        full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
-                        patient_code=patient.patient_code if patient else "",
-                    ) if patient else None
-                ),
-                title=r.title,
-                published_at=r.published_at,
-                created_at=str(getattr(r, "created_at", "")) if getattr(r, "created_at", None) else None,
-                created_by=str(r.created_by) if r.created_by else None,
-                signed_by=signed_by,
-                signed_at=signed_at,
-                version_no=version_no,
-                has_pdf=has_pdf,
-                reviewers=reviewers if reviewers else None,
-            )
-        )
-    
-    return ReportsListResponse(reports=results)
+    stmt = report_list_statement(
+        ctx.tenant_id,
+        q=search_text(q),
+        statuses=enum_filter(status, ReportStatus, "status"),
+        patient_ids=uuid_filter(patient_id, "patient_id"),
+        reviewer_ids=uuid_filter(reviewer_id, "reviewer_id"),
+        sort=sort_field(sort, REPORT_SORTS),
+        descending=order == "desc",
+    )
+    request = page_request(page, page_size)
+    items, total = run_list(session, stmt, request, build_report_items)
+    return ReportsListResponse(
+        reports=items,
+        total=total,
+        page=request.page if request else None,
+        page_size=request.page_size if request else None,
+    )
+
+
+@router.get("/filter-options", response_model=ReportFilterOptionsResponse)
+def get_report_filter_options(
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Column filter catalogs over every report of the tenant (requires reports:read)."""
+    _require(user.id, "reports:read", session)
+    return report_filter_options(session, ctx.tenant_id)
 
 def _compensate_failed_v2_report_creation(report_id, session: Session) -> None:
     """Best-effort compensation when a V2 report's S3/version write fails
@@ -1302,71 +1281,14 @@ def get_pathologist_worklist(
     """Get worklist of reports in review (requires reports:read)."""
     _require(user.id, "reports:read", session)
     
-    # Build query for reports in IN_REVIEW status
-    query = select(Report).where(
-        Report.tenant_id == ctx.tenant_id,
-        Report.status == ReportStatus.IN_REVIEW
-    )
-    
-    # Optional branch filter
+    extra = [Report.status == ReportStatus.IN_REVIEW]
     if branch_id:
-        query = query.where(Report.branch_id == branch_id)
-    
-    reports = session.exec(query).all()
-    results: list[ReportListItem] = []
-    
-    for r in reports:
-        # Resolve related entities
-        branch = session.get(Branch, r.branch_id)
-        order = session.get(Order, r.order_id)
-        patient = session.get(Patient, order.patient_id) if order else None
-        
-        # Get current version info
-        current_version = session.exec(
-            select(ReportVersion).where(
-                ReportVersion.report_id == r.id, 
-                ReportVersion.is_current == True
-            )
-        ).first()
-        
-        version_no = current_version.version_no if current_version else None
-        has_pdf = bool(current_version and current_version.pdf_storage_id)
-        signed_by = str(current_version.signed_by) if current_version and current_version.signed_by else None
-        signed_at = current_version.signed_at if current_version else None
-        
-        results.append(
-            ReportListItem(
-                id=str(r.id),
-                status=r.status,
-                tenant_id=str(r.tenant_id),
-                branch=BranchRef(
-                    id=str(r.branch_id),
-                    name=branch.name if branch else "",
-                    code=branch.code if branch else None
-                ),
-                order=OrderRef(
-                    id=str(r.order_id),
-                    order_code=order.order_code if order else "",
-                    status=order.status if order else "",
-                    requested_by=order.requested_by if order else None,
-                    patient=PatientRef(
-                        id=str(patient.id) if patient else "",
-                        full_name=f"{patient.first_name} {patient.last_name}" if patient else "",
-                        patient_code=patient.patient_code if patient else "",
-                    ) if patient else None
-                ),
-                title=r.title,
-                published_at=r.published_at,
-                created_at=str(getattr(r, "created_at", "")) if getattr(r, "created_at", None) else None,
-                created_by=str(r.created_by) if r.created_by else None,
-                signed_by=signed_by,
-                signed_at=signed_at,
-                version_no=version_no,
-                has_pdf=has_pdf
-            )
-        )
-    
-    return ReportsListResponse(reports=results)
+        extra.append(Report.branch_id == branch_id)
+    reports = session.exec(report_list_statement(ctx.tenant_id, extra_where=extra)).all()
+    return ReportsListResponse(
+        reports=build_report_items(session, reports, include_reviewers=False),
+        total=len(reports),
+    )
 
 
 # ============================================================================

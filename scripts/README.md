@@ -138,3 +138,11 @@ taken from `--database`.
 > The committed fixture `tests/fixtures/schema/v1_13_0_pre_squash_schema.json`
 > is the frozen evidence for the migration squash. Regenerating it is not a
 > routine action.
+
+## list_performance/
+
+Synthetic, disposable benchmark for the list endpoints (Céluma 1.4, issues
+#5/#6/#7): `dataset.py` builds small/medium/large tenants in one database and
+`benchmark.py` measures server time, SQL statements, count cost and payload.
+Both refuse any database not named `celuma_listperf*` on a local host. See
+[`list_performance/README.md`](list_performance/README.md).

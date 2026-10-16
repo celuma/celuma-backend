@@ -106,7 +106,11 @@ def get_my_worklist(
             assignment_query = assignment_query.where(cast(Assignment.item_type, String) == item_type)
         
         assignments = session.exec(assignment_query).all()
-        
+        # Held for the whole build: the identity map keeps only weak
+        # references, so unreferenced prefetched rows would be collected and
+        # `session.get` would query again.
+        prefetched = _prefetch_assignment_targets(session, assignments)
+
         for assignment in assignments:
             item = _build_assignment_worklist_item(session, assignment)
             if item:
@@ -126,9 +130,10 @@ def get_my_worklist(
         # Include all reviews (pending, approved, rejected) - no default filter
         
         reviews = session.exec(review_query).all()
-        
+        reports_by_order, prefetched_for_reviews = _prefetch_review_targets(session, reviews)
+
         for review in reviews:
-            item = _build_review_worklist_item(session, review)
+            item = _build_review_worklist_item(session, review, reports_by_order)
             if item:
                 items.append(item)
     
@@ -151,6 +156,58 @@ def get_my_worklist(
     )
 
 
+def _load_into_session(session: Session, model, ids) -> list:
+    """Load rows by id in one query. `session.get` then answers from the
+    identity map, so the per-item builders below issue no SQL of their own."""
+    ids = {i for i in ids if i is not None}
+    if not ids:
+        return []
+    return session.exec(select(model).where(model.id.in_(ids))).all()
+
+
+def _prefetch_assignment_targets(session: Session, assignments) -> list:
+    """Céluma 1.4 (#6): batch what `_build_assignment_worklist_item` reads.
+
+    The worklist builds every item before sorting and paging (its total counts
+    only buildable items), so per-item lookups made each page cost several
+    queries per assignment — 1,164 statements for a 20-item page of the
+    synthetic large tenant's administrator.
+    """
+    by_type: dict = {}
+    for a in assignments:
+        kind = a.item_type.value if hasattr(a.item_type, "value") else str(a.item_type)
+        by_type.setdefault(kind, set()).add(a.item_id)
+    orders = _load_into_session(session, Order, by_type.get("lab_order", ()))
+    samples = _load_into_session(session, Sample, by_type.get("sample", ()))
+    reports = _load_into_session(session, Report, by_type.get("report", ()))
+    orders += _load_into_session(
+        session, Order, {s.order_id for s in samples} | {r.order_id for r in reports}
+    )
+    patients = _load_into_session(session, Patient, {o.patient_id for o in orders})
+    return [*orders, *samples, *reports, *patients]
+
+
+def _prefetch_review_targets(session: Session, reviews) -> tuple[dict, list]:
+    """Céluma 1.4 (#6): batch what `_build_review_worklist_item` reads.
+
+    Returns the order → report map used for reviews without a `report_id`, and
+    the prefetched rows, which the caller must hold while building items.
+    """
+    orders = _load_into_session(session, Order, {r.order_id for r in reviews})
+    reports = _load_into_session(session, Report, {r.report_id for r in reviews})
+    patients = _load_into_session(session, Patient, {o.patient_id for o in orders})
+    without_report = {r.order_id for r in reviews if not r.report_id}
+    reports_by_order: dict = {}
+    if without_report:
+        for report in session.exec(
+            select(Report)
+            .where(Report.order_id.in_(without_report))
+            .order_by(Report.created_at, Report.id)
+        ).all():
+            reports_by_order.setdefault(report.order_id, report)
+    return reports_by_order, [*orders, *reports, *patients]
+
+
 def _build_assignment_worklist_item(session: Session, assignment: Assignment) -> Optional[WorklistItemResponse]:
     """Build a WorklistItemResponse from an Assignment"""
     item_type = assignment.item_type.value if hasattr(assignment.item_type, 'value') else str(assignment.item_type)
@@ -159,7 +216,7 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
         order = session.get(Order, assignment.item_id)
         if not order:
             return None
-        patient = session.get(Patient, order.patient_id)
+        patient = session.get(Patient, order.patient_id) if order.patient_id else None
         return WorklistItemResponse(
             id=str(assignment.id),
             kind="assignment",
@@ -180,7 +237,7 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
         if not sample:
             return None
         order = session.get(Order, sample.order_id)
-        patient = session.get(Patient, order.patient_id) if order else None
+        patient = session.get(Patient, order.patient_id) if order and order.patient_id else None
         return WorklistItemResponse(
             id=str(assignment.id),
             kind="assignment",
@@ -201,7 +258,7 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
         if not report:
             return None
         order = session.get(Order, report.order_id)
-        patient = session.get(Patient, order.patient_id) if order else None
+        patient = session.get(Patient, order.patient_id) if order and order.patient_id else None
         return WorklistItemResponse(
             id=str(assignment.id),
             kind="assignment",
@@ -220,7 +277,9 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
     return None
 
 
-def _build_review_worklist_item(session: Session, review: ReportReview) -> Optional[WorklistItemResponse]:
+def _build_review_worklist_item(
+    session: Session, review: ReportReview, reports_by_order: Optional[dict] = None
+) -> Optional[WorklistItemResponse]:
     """Build a WorklistItemResponse from a ReportReview"""
     order = session.get(Order, review.order_id)
     if not order:
@@ -230,6 +289,8 @@ def _build_review_worklist_item(session: Session, review: ReportReview) -> Optio
     report = None
     if review.report_id:
         report = session.get(Report, review.report_id)
+    elif reports_by_order is not None:
+        report = reports_by_order.get(review.order_id)
     else:
         report = session.exec(
             select(Report).where(Report.order_id == review.order_id)
@@ -239,7 +300,7 @@ def _build_review_worklist_item(session: Session, review: ReportReview) -> Optio
     if not report:
         return None
     
-    patient = session.get(Patient, order.patient_id) if order else None
+    patient = session.get(Patient, order.patient_id) if order and order.patient_id else None
     
     return WorklistItemResponse(
         id=str(review.id),

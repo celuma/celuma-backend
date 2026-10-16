@@ -283,8 +283,28 @@ class ReportListItem(BaseModel):
     reviewers: Optional[List[ReviewerWithStatus]] = None
 
 class ReportsListResponse(BaseModel):
-    """Response schema for reports list"""
+    """Response schema for reports list.
+
+    Céluma 1.4: `total`/`page`/`page_size` follow the laboratory lists — see
+    `app.schemas.laboratory.OrdersListResponse`.
+    """
     reports: List[ReportListItem]
+    total: Optional[int] = None
+    page: Optional[int] = None
+    page_size: Optional[int] = None
+
+
+class ReportFilterOption(BaseModel):
+    """One choice of a reports-list column filter (Céluma 1.4)."""
+    value: str
+    text: str
+
+
+class ReportFilterOptionsResponse(BaseModel):
+    """Filter catalogs for the reports list, over the tenant's whole collection."""
+    statuses: List[str]
+    patients: List[ReportFilterOption]
+    reviewers: List[ReportFilterOption]
 
 # Schemas for report state transitions
 class ReportStatusUpdate(BaseModel):

@@ -422,8 +422,17 @@ class OrderListItem(BaseModel):
 
 
 class OrdersListResponse(BaseModel):
-    """Response for GET /laboratory/orders/ with enriched items."""
+    """Response for GET /laboratory/orders/ with enriched items.
+
+    Céluma 1.4: `total` is the number of orders matching the request's
+    search/filters across the whole tenant. `page`/`page_size` are set only in
+    paged mode (the request carried `page` or `page_size`); without them the
+    response is the whole filtered collection, as before 1.4.
+    """
     orders: List[OrderListItem]
+    total: Optional[int] = None
+    page: Optional[int] = None
+    page_size: Optional[int] = None
 
 
 class SampleListItem(BaseModel):
@@ -440,8 +449,47 @@ class SampleListItem(BaseModel):
 
 
 class SamplesListResponse(BaseModel):
-    """Response for GET /laboratory/samples/ with enriched items."""
+    """Response for GET /laboratory/samples/ with enriched items.
+
+    `total`/`page`/`page_size` follow `OrdersListResponse` (Céluma 1.4).
+    """
     samples: List[SampleListItem]
+    total: Optional[int] = None
+    page: Optional[int] = None
+    page_size: Optional[int] = None
+
+
+class FilterOption(BaseModel):
+    """One choice of a list column filter (Céluma 1.4)."""
+    value: str
+    text: str
+    color: Optional[str] = None
+
+
+class SampleFilterOptionsResponse(BaseModel):
+    """Filter catalogs for the samples list, over the tenant's whole collection.
+
+    Each catalog holds the values actually present among the tenant's samples,
+    which is what the pre-1.4 client derived from the full downloaded list.
+    """
+    states: List[str]
+    types: List[str]
+    orders: List[FilterOption]
+    patients: List[FilterOption]
+    labels: List[FilterOption]
+    assignees: List[FilterOption]
+
+
+class OrderFilterOptionsResponse(BaseModel):
+    """Filter catalogs for the orders list, over the tenant's whole collection."""
+    statuses: List[str]
+    patients: List[FilterOption]
+    requesting_physicians: List[FilterOption]
+    labels: List[FilterOption]
+    assignees: List[FilterOption]
+    #: Whether any order names a requester (catalog physician or free text);
+    #: the list shows its "Solicitante" column only then.
+    has_requester: bool
 
 
 class SampleDetailResponse(BaseModel):

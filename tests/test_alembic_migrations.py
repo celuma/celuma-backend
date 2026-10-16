@@ -23,8 +23,9 @@ per-block documents under docs/celuma-1.3/ record the former on purpose:
 
 The release contract these tests defend is one revision per product release:
 
-    Céluma 1.0 → v1_0_0    Céluma 1.2 → v1_2_0
-    Céluma 1.1 → v1_1_0    Céluma 1.3 → v1_3_0   (frozen)
+    Céluma 1.0 → v1_0_0    Céluma 1.2 → v1_2_0    Céluma 1.3.1 → v1_3_1 (frozen)
+    Céluma 1.1 → v1_1_0    Céluma 1.3 → v1_3_0    Céluma 1.4   → v1_4_0 (in development)
+                                       (frozen)
 
 These tests are the regression net for that decision:
 
@@ -137,21 +138,44 @@ RELEASE_REVISION = "v1_3_0"
 #: shipped product release, and 1.3.1 is a shipped product release.
 HOTFIX_REVISION = "v1_3_1"
 
+#: The Céluma 1.4 release revision (unreleased), and the current head.
+#:
+#: `test_hotfix_revision_has_no_children` (now
+#: `test_the_only_child_of_the_1_3_1_hotfix_is_the_1_4_release`) existed to
+#: make this a deliberate decision rather than a quiet `down_revision`. The 1.4
+#: release needs schema (issues #5/#6/#7: `fuzzystrmatch` and the list
+#: indexes), so it gets its own revision on top of `v1_3_1`, which stays
+#: frozen and unedited.
+#:
+#: Its id is `v1_4_0`, the identifier `v1_3_0`'s frozen docstring reserved for
+#: Céluma 1.4. That id also named two retired 1.3 development revisions; see
+#: RETIRED_MEANINGS_OF_V1_4_0 for how that conflict is resolved.
+RELEASE_1_4_REVISION = "v1_4_0"
+
+#: The only file that may define RELEASE_1_4_REVISION.
+RELEASE_1_4_MIGRATION_FILENAME = "v1_4_0_list_search_indexes.py"
+
 #: What `alembic upgrade head` lands on. Assertions that mean "the chain is
 #: fully applied" use this; assertions specifically about the 1.3 release
 #: migration's own behaviour keep using RELEASE_REVISION.
-HEAD_REVISION = HOTFIX_REVISION
+HEAD_REVISION = RELEASE_1_4_REVISION
 
 #: Revision ids that existed only on the unreleased `celuma-1.3` branch and
 #: were folded into RELEASE_REVISION. Nothing executable may reference them.
 #:
-#: The tuple has grown and shrunk with the development history and is now
-#: closed. Phase 2 closure retired `v1_4_0 … v1_9_0`; Phase 3 Blocks B, D and
-#: F each removed one entry when they reused a freed id for a live revision
-#: (`v1_4_0`, `v1_5_0`, `v1_6_0`); the Phase 3 closure squash put all three
-#: back, permanently. The pre-Phase-5 squash added the Phase 4 chain,
-#: `v1_10_0 … v1_13_0` — development-time revisions of product version *1.3*,
-#: never products 1.10–1.13.
+#: The tuple has grown and shrunk with the development history. Phase 2
+#: closure retired `v1_4_0 … v1_9_0`; Phase 3 Blocks B, D and F each removed
+#: one entry when they reused a freed id for a live revision (`v1_4_0`,
+#: `v1_5_0`, `v1_6_0`); the Phase 3 closure squash put all three back. The
+#: pre-Phase-5 squash added the Phase 4 chain, `v1_10_0 … v1_13_0` —
+#: development-time revisions of product version *1.3*, never products
+#: 1.10–1.13.
+#:
+#: Céluma 1.4 (2026-10-14, Rafael's release decision) removed `v1_4_0` once
+#: more, now for the product release `v1_3_0` had reserved it for — the same
+#: narrow move Phase 3 made. Its retired meanings stay guarded by
+#: RETIRED_MEANINGS_OF_V1_4_0 below; every id still listed here stays
+#: forbidden exactly as before.
 #:
 #: Every id here belonged to a revision that never reached production,
 #: staging or a customer database, so no `alembic_version` row anywhere
@@ -161,7 +185,6 @@ HEAD_REVISION = HOTFIX_REVISION
 #: commits. See docs/celuma-1.3/pre-phase-5-migration-squash/
 #: migration-squash-inventory.md.
 SUPERSEDED_REVISIONS = (
-    "v1_4_0",
     "v1_5_0",
     "v1_6_0",
     "v1_7_0",
@@ -171,6 +194,17 @@ SUPERSEDED_REVISIONS = (
     "v1_11_0",
     "v1_12_0",
     "v1_13_0",
+)
+
+#: The two retired revisions that once used the id `v1_4_0`, by filename.
+#: Both lived only on the `celuma-1.3` branch and were folded into `v1_3_0`;
+#: re-verified from git on 2026-10-14: no first-parent state of `main` and no
+#: release tag ever contained either file, and CI migrated staging only from
+#: `main`/tags. They may never come back, and `v1_4_0` may never again mean
+#: anything but RELEASE_1_4_REVISION.
+RETIRED_MEANINGS_OF_V1_4_0 = (
+    "v1_4_0_report_template_version.py",  # Phase 2 Block B, 2026-07-29 → 08-03
+    "v1_4_0_notifications_core.py",  # Phase 3 Block B, 2026-08-06 → 08-10
 )
 
 #: The Phase 2 report/letterhead objects.
@@ -322,6 +356,7 @@ class TestChainShape:
         script = _script_directory()
         revisions = list(script.walk_revisions())
         assert [r.revision for r in revisions] == [
+            RELEASE_1_4_REVISION,
             HOTFIX_REVISION,
             RELEASE_REVISION,
             "v1_2_0",
@@ -347,15 +382,27 @@ class TestChainShape:
         ]
         assert children == [HOTFIX_REVISION]
 
-    def test_hotfix_revision_has_no_children(self):
-        """The freeze contract now applies at the new head: Céluma 1.4's
-        release revision is the next legitimate move, and it must be a
-        deliberate decision."""
+    def test_the_only_child_of_the_1_3_1_hotfix_is_the_1_4_release(self):
+        """`v1_3_1` is frozen; Céluma 1.4's release revision was the next
+        legitimate move and it was taken deliberately. Anything else appended
+        to the hotfix still fails here."""
         script = _script_directory()
         children = [
             revision.revision
             for revision in script.walk_revisions()
             if revision.down_revision == HOTFIX_REVISION
+        ]
+        assert children == [RELEASE_1_4_REVISION]
+
+    def test_the_1_4_release_revision_has_no_children(self):
+        """The freeze contract now applies at the new head: a later 1.4 area
+        extends `v1_4_0` until 1.4 ships; anything appended after it is a
+        release decision."""
+        script = _script_directory()
+        children = [
+            revision.revision
+            for revision in script.walk_revisions()
+            if revision.down_revision == RELEASE_1_4_REVISION
         ]
         assert children == []
 
@@ -398,6 +445,39 @@ class TestChainShape:
             if path == pathlib.Path(__file__):
                 continue
             if stale in _executable_source(path):
+                offenders.append(str(path.relative_to(BACKEND_ROOT)))
+        assert offenders == []
+
+
+class TestTheReusedV140Identifier:
+    """`v1_4_0` is the Céluma 1.4 release revision and nothing else.
+
+    The id had two retired development meanings (RETIRED_MEANINGS_OF_V1_4_0).
+    Removing it from SUPERSEDED_REVISIONS lifted only the blanket ban; these
+    take over its protection, narrowly.
+    """
+
+    def test_exactly_one_file_defines_the_1_4_release_revision(self):
+        files = sorted(p.name for p in VERSIONS_DIR.glob(f"{RELEASE_1_4_REVISION}_*.py"))
+        assert files == [RELEASE_1_4_MIGRATION_FILENAME]
+        revision = _script_directory().get_revision(RELEASE_1_4_REVISION)
+        assert pathlib.Path(revision.path).name == RELEASE_1_4_MIGRATION_FILENAME
+        assert revision.down_revision == HOTFIX_REVISION
+
+    @pytest.mark.parametrize("retired", RETIRED_MEANINGS_OF_V1_4_0)
+    def test_a_retired_meaning_of_v1_4_0_never_returns(self, retired):
+        assert not (VERSIONS_DIR / retired).exists()
+
+    def test_only_the_release_migration_references_v1_4_0_in_code(self):
+        """The superseded-reference guard, kept for this id with one
+        allowed definition site. Tests may name it through the constant."""
+        offenders = []
+        for path in list((BACKEND_ROOT / "app").rglob("*.py")) + list(
+            (BACKEND_ROOT / "tests").rglob("*.py")
+        ) + list(VERSIONS_DIR.rglob("*.py")):
+            if path == pathlib.Path(__file__) or path.name == RELEASE_1_4_MIGRATION_FILENAME:
+                continue
+            if RELEASE_1_4_REVISION in _executable_source(path):
                 offenders.append(str(path.relative_to(BACKEND_ROOT)))
         assert offenders == []
 
@@ -632,7 +712,7 @@ class TestReleaseMigration:
     def test_clean_upgrade_from_last_pre_1_3_revision(self, migration_db):
         """Pinned to RELEASE_REVISION, not "head": this test is about the
         v1_2_0 -> v1_3_0 transition specifically, isolated from whatever
-        later phases (Block B's v1_4_0 onward) add on top."""
+        later phases (Block B's retired v1_4_0 onward) add on top."""
         _alembic(LAST_PRE_1_3_REVISION)
         assert _current_revision(migration_db) == LAST_PRE_1_3_REVISION
 
@@ -4202,11 +4282,16 @@ class TestReportsV2TemplateVersionConstraint:
         JSON document's contents, not a schema object — so it contributes no
         line here. Three differences, exactly: replace this expected set if a
         later block deliberately adds schema, per the Block C handoff; do not
-        delete the guard."""
+        delete the guard.
+
+        Upgrades to HOTFIX_REVISION, not "head": since Céluma 1.4 head is
+        `v1_4_0`, whose own schema is asserted by
+        `TestListSearchAndIndexesMigration` (same retarget as
+        `TestSchemaEquivalence`)."""
         _alembic(RELEASE_REVISION)
         before = _capture_schema(_MIGRATION_TEST_DB)
 
-        _alembic("head")
+        _alembic(HOTFIX_REVISION)
         after = _capture_schema(_MIGRATION_TEST_DB)
 
         differences = _diff_schemas(before, after)
@@ -4444,7 +4529,7 @@ class TestTheConsolidatedHotfixRevision:
         ]
         assert after_release == [HOTFIX_REVISION]
         assert len(script.get_heads()) == 1
-        assert script.get_current_head() == HOTFIX_REVISION
+        assert script.get_current_head() == HEAD_REVISION
 
     def test_the_revision_still_sits_directly_on_the_frozen_release(self):
         revision = _script_directory().get_revision(HOTFIX_REVISION)
@@ -5597,3 +5682,85 @@ class TestReportTemplateBaseFieldBackfill:
         # ...while the live row alongside it was repaired.
         live = self._template_json(migration_db, template_id)
         assert live["base"]["delivery_date"]["label"] == "Fecha de entrega"
+
+
+class TestListSearchAndIndexesMigration:
+    """Céluma 1.4 (issues #5/#6/#7) — §1 of revision `v1_4_0`.
+
+    §1a installs `fuzzystrmatch` for the server half of the list search
+    contract; §1b adds the tenant/foreign-key indexes the list benchmark
+    showed every list was missing.
+    """
+
+    INDEXES = {
+        "ix_sample_tenant_id": ("sample", "tenant_id"),
+        "ix_sample_order_id": ("sample", "order_id"),
+        "ix_order_tenant_id": ("order", "tenant_id"),
+        "ix_order_patient_id": ("order", "patient_id"),
+        "ix_patient_tenant_id": ("patient", "tenant_id"),
+        "ix_report_tenant_id": ("report", "tenant_id"),
+        "ix_report_order_id": ("report", "order_id"),
+        "ix_report_version_report_id": ("report_version", "report_id"),
+    }
+
+    @staticmethod
+    def _indexes(engine) -> dict:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT indexname, tablename, indexdef FROM pg_indexes WHERE schemaname = 'public'")
+            ).all()
+        return {name: (table, definition) for name, table, definition in rows}
+
+    @staticmethod
+    def _has_extension(engine) -> bool:
+        with engine.connect() as conn:
+            return bool(conn.execute(
+                text("SELECT count(*) FROM pg_extension WHERE extname = 'fuzzystrmatch'")
+            ).scalar_one())
+
+    def test_the_revision_sits_directly_on_the_frozen_hotfix(self):
+        revision = _script_directory().get_revision(RELEASE_1_4_REVISION)
+        assert revision.down_revision == HOTFIX_REVISION
+
+    def test_upgrade_installs_fuzzystrmatch(self, migration_db):
+        _alembic(HOTFIX_REVISION)
+        assert not self._has_extension(migration_db)
+
+        _alembic(RELEASE_1_4_REVISION)
+
+        assert self._has_extension(migration_db)
+        with migration_db.connect() as conn:
+            # The exact call the list search makes.
+            assert conn.execute(text("SELECT levenshtein_less_equal('biosia', 'biopsia', 2)")).scalar_one() == 1
+
+    def test_upgrade_creates_every_list_index(self, migration_db):
+        _alembic(HOTFIX_REVISION)
+        assert set(self.INDEXES).isdisjoint(self._indexes(migration_db))
+
+        _alembic(RELEASE_1_4_REVISION)
+
+        indexes = self._indexes(migration_db)
+        for name, (table, column) in self.INDEXES.items():
+            assert name in indexes, f"missing {name}"
+            assert indexes[name][0] == table
+            assert indexes[name][1].endswith(f"USING btree ({column})")
+
+    def test_downgrade_removes_both_and_re_upgrade_restores_them(self, migration_db):
+        _alembic("head")
+        _alembic(HOTFIX_REVISION, command="downgrade")
+
+        assert _current_revision(migration_db) == HOTFIX_REVISION
+        assert not self._has_extension(migration_db)
+        assert set(self.INDEXES).isdisjoint(self._indexes(migration_db))
+
+        _alembic("head")
+        assert self._has_extension(migration_db)
+        assert set(self.INDEXES) <= set(self._indexes(migration_db))
+
+    def test_the_revision_adds_and_removes_no_table(self, migration_db):
+        _alembic(HOTFIX_REVISION)
+        before = set(inspect(migration_db).get_table_names())
+
+        _alembic(RELEASE_1_4_REVISION)
+
+        assert set(inspect(migration_db).get_table_names()) == before
