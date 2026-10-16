@@ -117,29 +117,94 @@ class TestPeriod:
 
 
 class TestModes:
-    def settings(self, mode):
-        return n.NumberingSettings("order", mode=mode)
+    """The decision matrix: activation x policy x capability (the tenant policy AND the caller's own permission)."""
 
-    def test_automatic_generates_when_blank_and_accepts_manual(self):
-        assert n.check_mode(self.settings("automatic"), None) is True
-        assert n.check_mode(self.settings("automatic"), "MAN-1") is False
+    def settings(self, kind="order", **over):
+        return n.NumberingSettings(kind, active=True, **over)
 
-    def test_automatic_only_refuses_a_supplied_code(self):
-        assert n.check_mode(self.settings("automatic_only"), None) is True
+    def test_active_allowed_generates_when_blank_and_accepts_manual_only_with_the_capability(self):
+        s = self.settings(manual_policy="allowed")
+        assert n.check_mode(s, None, True) is True and n.check_mode(s, None, False) is True
+        assert n.check_mode(s, "MAN-1", True) is False
         with pytest.raises(HTTPException) as exc:
-            n.check_mode(self.settings("automatic_only"), "MAN-1")
-        assert exc.value.status_code == 422 and exc.value.detail["code"] == "numbering_manual_code_not_allowed"
+            n.check_mode(s, "MAN-1", False)
+        assert exc.value.status_code == 403 and exc.value.detail["code"] == "numbering_manual_code_forbidden"
 
-    def test_manual_only_requires_a_code(self):
-        assert n.check_mode(self.settings("manual_only"), "MAN-1") is False
+    def test_forbidden_refuses_a_supplied_code_whoever_asks(self):
+        s = self.settings(manual_policy="forbidden")
+        assert n.check_mode(s, None, True) is True
+        for permitted in (True, False):
+            with pytest.raises(HTTPException) as exc:
+                n.check_mode(s, "MAN-1", permitted)
+            assert exc.value.status_code == 422 and exc.value.detail["code"] == "numbering_manual_code_not_allowed"
+
+    def test_required_demands_a_code_and_says_403_when_the_caller_cannot_type_one(self):
+        s = self.settings(manual_policy="required")
+        assert n.check_mode(s, "MAN-1", True) is False
         with pytest.raises(HTTPException) as exc:
-            n.check_mode(self.settings("manual_only"), None)
+            n.check_mode(s, None, True)
         assert exc.value.status_code == 422 and exc.value.detail["code"] == "numbering_code_required"
+        with pytest.raises(HTTPException) as exc:
+            n.check_mode(s, None, False)
+        assert exc.value.status_code == 403
+
+    def test_inactive_keeps_the_pre_numbering_behaviour_with_no_capability_gate(self):
+        order, sample = n.NumberingSettings("order"), n.NumberingSettings("sample")
+        assert n.check_mode(order, None, False) is True and n.check_mode(order, "X", False) is False
+        assert n.check_mode(sample, "X", False) is False
+        with pytest.raises(HTTPException) as exc:
+            n.check_mode(sample, None, True)
+        assert exc.value.detail["code"] == "numbering_code_required"
 
     def test_blank_and_whitespace_mean_not_supplied(self):
         assert n.normalize_supplied(None) is None
         assert n.normalize_supplied("   ") is None
         assert n.normalize_supplied("  X1 ") == "X1"
+
+    @pytest.mark.parametrize("kind,active,policy,permitted,expected", [
+        ("order", False, "allowed", False, "optional"), ("sample", False, "allowed", False, "required"),
+        ("order", True, "allowed", True, "optional"), ("order", True, "allowed", False, "hidden"),
+        ("order", True, "forbidden", True, "hidden"), ("order", True, "required", True, "required"),
+        ("order", True, "required", False, "blocked"),
+    ])
+    def test_what_the_form_is_told(self, kind, active, policy, permitted, expected):
+        s = n.NumberingSettings(kind, active=active, manual_policy=policy)
+        assert n.manual_entry_for(s, permitted) == expected
+
+
+class TestBranchToken:
+    def test_branch_scope_requires_the_branch_token_exactly_once_and_tenant_scope_forbids_it(self):
+        assert n.validate_format("{BASE}{BRANCH}{SEQ}{MM}{YY}", "branch") == []
+        assert n.validate_format("{BASE}{SEQ}{MM}{YY}", "branch")
+        assert n.validate_format("{BASE}{BRANCH}{BRANCH}{SEQ}{MM}{YY}", "branch")
+        assert n.validate_format("{BASE}{BRANCH}{SEQ}{MM}{YY}", "tenant")
+
+    def test_render_with_the_branch_code(self):
+        assert n.render_code("{BASE}-{BRANCH}-{SEQ}{MM}{YY}", 2, "CU", 1, 2026, 10, branch="NORTE") == "CU-NORTE-011026"
+
+    @pytest.mark.parametrize("branch", ["", "NO RTE", "a/b", "a\n", "é"])
+    def test_an_unsafe_or_empty_branch_code_is_refused(self, branch):
+        with pytest.raises(HTTPException) as exc:
+            n.render_code("{BASE}{BRANCH}{SEQ}{MM}{YY}", 2, "CU", 1, 2026, 10, branch=branch)
+        assert exc.value.detail["code"] == "numbering_branch_code_unsafe"
+
+
+class TestStartValueAndLiterals:
+    @pytest.mark.parametrize("value,ok", [(1, True), (500, True), (99_999_999, True), (0, False), (-1, False), (100_000_000, False), (True, False), ("1", False), (1.0, False)])
+    def test_start_value_bounds(self, value, ok):
+        assert (n.validate_start_value(value) == []) is ok
+
+    @pytest.mark.parametrize("literal", ["\n", "\r", "\t", "\x00", "\x1b", "\u202e", "\u200b", "\u00a0", "é", "日本", " ", "/", "\\", "'", '"', ";", "<", ">", "%", "$", "#", "*", "(", ")", "{", "}"])
+    def test_every_unsafe_literal_character_is_rejected_anywhere_in_the_format(self, literal):
+        for fmt in (f"{{BASE}}{literal}{{SEQ}}{{MM}}{{YY}}", f"{literal}{{BASE}}{{SEQ}}{{MM}}{{YY}}", f"{{BASE}}{{SEQ}}{{MM}}{{YY}}{literal}"):
+            assert n.validate_format(fmt), repr(fmt)
+
+    def test_a_trailing_newline_is_not_accepted_as_if_it_were_the_end(self):
+        assert n.validate_format("{BASE}{SEQ}{MM}{YY}\n")  # `$` would have let this through
+
+    @pytest.mark.parametrize("literal", ["-", ".", "_", "A", "z", "0", "9", "LAB.", "-x-"])
+    def test_safe_literals_are_accepted(self, literal):
+        assert n.validate_format(f"{{BASE}}{literal}{{SEQ}}{{MM}}{{YY}}") == []
 
 
 class TestPreviewExamples:
@@ -149,3 +214,20 @@ class TestPreviewExamples:
             (1, "CU011026"), (2, "CU021026"), (9, "CU091026"), (10, "CU101026"),
             (99, "CU991026"), (100, "CU1001026"), (999, "CU9991026"), (1000, "CU10001026"),
         ]
+
+
+class TestTimezoneValidation:
+    @pytest.mark.parametrize("name", ["UTC", "America/Mexico_City", "Europe/Madrid", "Etc/GMT+5", "Pacific/Auckland"])
+    def test_known_zones_are_accepted(self, name):
+        assert n.validate_timezone(name) == []
+
+    @pytest.mark.parametrize("name", ["", "Mars/Base", "../x", "UTC\n", " UTC", "a b", "é", None, 3, "A" * 101])
+    def test_unknown_or_malformed_zones_are_rejected(self, name):
+        assert n.validate_timezone(name)
+
+    def test_the_period_zone_is_the_laboratorys_unless_the_counter_is_branch_scoped(self):
+        tenant = n.NumberingSettings("order", timezone="UTC")
+        branch = n.NumberingSettings("order", timezone="UTC", scope="branch")
+        assert tenant.zone_name("Pacific/Auckland") == "UTC"
+        assert branch.zone_name("Pacific/Auckland") == "Pacific/Auckland"
+        assert branch.zone_name(None) == "UTC"

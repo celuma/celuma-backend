@@ -30,7 +30,7 @@ from tests.test_alembic_migrations import (
 from tests.test_sample_type_migration import insert
 
 DB = "celuma_numbering_mig_test"
-TABLES = ("numbering_config", "numbering_counter", "numbering_allocation")
+TABLES = ("numbering_config", "numbering_counter", "numbering_allocation", "idempotency_receipt")
 INDEXES = ("ix_order_tenant_order_code", "ix_sample_tenant_sample_code")
 
 
@@ -116,7 +116,7 @@ class TestUpgrade:
     def test_constraints_and_isolation_of_the_ledger(self, mdb):
         up()
         inspector = inspect(mdb)
-        for table in ("numbering_counter", "numbering_allocation"):
+        for table in ("numbering_counter", "numbering_allocation", "idempotency_receipt"):
             fks = {fk["referred_table"] for fk in inspector.get_foreign_keys(table)}
             assert fks == {"tenant"}, f"{table} must not reference orders, samples or catalogs"
         uniques = {u["name"]: u["column_names"] for u in inspector.get_unique_constraints("numbering_allocation")}
@@ -124,20 +124,24 @@ class TestUpgrade:
         with mdb.begin() as conn:
             tenant = insert(conn, "tenant")["id"]
         scope = "00000000-0000-0000-0000-000000000001"
+        cfg = "INSERT INTO numbering_config (tenant_id, entity_kind, active, manual_policy, format, sequence_min_width, start_value, scope, timezone, updated_at) VALUES (:t, "
         bad_rows = [
-            ("INSERT INTO numbering_config VALUES (:t, 'patient', 'automatic', 'x', 2, now(), NULL)", {"t": tenant}),
-            ("INSERT INTO numbering_config VALUES (:t, 'order', 'bogus', 'x', 2, now(), NULL)", {"t": tenant}),
-            ("INSERT INTO numbering_config VALUES (:t, 'order', 'automatic', 'x', 7, now(), NULL)", {"t": tenant}),
-            ("INSERT INTO numbering_counter VALUES (:t, 'order', :s, 2026, 13, 1, now())", {"t": tenant, "s": scope}),
-            ("INSERT INTO numbering_counter VALUES (:t, 'order', :s, 2026, 10, -1, now())", {"t": tenant, "s": scope}),
+            (cfg + "'patient', false, 'allowed', 'x', 2, 1, 'tenant', 'UTC', now())", {"t": tenant}),
+            (cfg + "'order', false, 'bogus', 'x', 2, 1, 'tenant', 'UTC', now())", {"t": tenant}),
+            (cfg + "'order', false, 'allowed', 'x', 7, 1, 'tenant', 'UTC', now())", {"t": tenant}),
+            (cfg + "'order', false, 'allowed', 'x', 2, 0, 'tenant', 'UTC', now())", {"t": tenant}),
+            (cfg + "'order', false, 'allowed', 'x', 2, 100000000, 'tenant', 'UTC', now())", {"t": tenant}),
+            (cfg + "'order', false, 'allowed', 'x', 2, 1, 'galaxy', 'UTC', now())", {"t": tenant}),
+            ("INSERT INTO numbering_counter VALUES (:t, 'order', :s, :s, 2026, 13, 1, now())", {"t": tenant, "s": scope}),
+            ("INSERT INTO numbering_counter VALUES (:t, 'order', :s, :s, 2026, 10, -1, now())", {"t": tenant, "s": scope}),
         ]
         for sql, params in bad_rows:
             with pytest.raises(IntegrityError):
                 with mdb.begin() as conn:
                     conn.execute(text(sql), params)
-        ledger = ("INSERT INTO numbering_allocation (id, tenant_id, entity_kind, scope_id, period_year, period_month, "
-                  "sequence_value, code, format, sequence_min_width, created_at) VALUES "
-                  "(gen_random_uuid(), :t, :k, :s, 2026, 10, :v, :c, 'f', 2, now())")
+        ledger = ("INSERT INTO numbering_allocation (id, tenant_id, entity_kind, scope_id, branch_id, period_year, period_month, "
+                  "sequence_value, code, scheme, format, sequence_min_width, created_at) VALUES "
+                  "(gen_random_uuid(), :t, :k, :s, :s, 2026, 10, :v, :c, 'monthly', 'f', 2, now())")
         with mdb.begin() as conn:
             conn.execute(text(ledger), {"t": tenant, "k": "order", "s": scope, "v": 1, "c": "CU011026"})
             conn.execute(text(ledger), {"t": tenant, "k": "sample", "s": scope, "v": 1, "c": "CU011026"})  # other kind: allowed
@@ -145,6 +149,22 @@ class TestUpgrade:
             with pytest.raises(IntegrityError):
                 with mdb.begin() as conn:
                     conn.execute(text(ledger), {"t": tenant, "s": scope, **params})
+
+    def test_the_manual_code_capability_exists_and_belongs_to_admin_and_superuser_only(self, mdb):
+        up()
+        with mdb.connect() as conn:
+            roles = conn.execute(text(
+                "SELECT r.code FROM role r JOIN role_permission rp ON rp.role_id = r.id JOIN permission p ON p.id = rp.permission_id "
+                "WHERE p.code = 'lab:enter_manual_code' ORDER BY 1")).scalars().all()
+        assert roles == ["admin", "superuser"]
+
+    def test_the_migration_activates_nobody(self, mdb):
+        up(HOTFIX_REVISION)
+        with mdb.begin() as conn:
+            seed_legacy(conn)
+        up()
+        with mdb.connect() as conn:
+            assert conn.execute(text("SELECT count(*) FROM numbering_config")).scalar_one() == 0  # no row = not activated
 
     def test_models_match_the_migrated_columns(self, mdb):
         up()
@@ -174,6 +194,8 @@ class TestDowngrade:
         assert _current_revision(mdb) == HOTFIX_REVISION
         inspector = inspect(mdb)
         assert not set(TABLES) & set(inspector.get_table_names())
+        with mdb.connect() as conn:
+            assert conn.execute(text("SELECT count(*) FROM permission WHERE code = 'lab:enter_manual_code'")).scalar_one() == 0
         assert not set(INDEXES) & {i["name"] for t in ("order", "sample") for i in inspector.get_indexes(t)}
         with mdb.connect() as conn:
             assert snapshot(conn, '"order"') == orders_before

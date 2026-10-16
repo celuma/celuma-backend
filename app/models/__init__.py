@@ -18,7 +18,7 @@ from .report_letterhead_version import ReportLetterheadVersion, ReportLetterhead
 from .report_section import ReportSection
 from .study_type import StudyType
 from .sample_type import SampleType
-from .numbering import NumberingConfig, NumberingCounter, NumberingAllocation
+from .numbering import NumberingConfig, NumberingCounter, NumberingAllocation, IdempotencyReceipt
 from .price_catalog import PriceCatalog
 from .billing import Invoice, Payment, InvoiceItem
 from .audit import AuditLog

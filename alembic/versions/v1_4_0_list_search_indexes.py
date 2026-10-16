@@ -93,18 +93,24 @@ Specification: `celuma-engineering/specs/laboratory/monthly-numbering.md`;
 decision record: `celuma-engineering/adr/0013-monthly-numbering-counters.md`.
 
 **§3a — `numbering_config`.** Per tenant and entity kind (`order`/`sample`):
-format, minimum sequence width and mode. Created EMPTY: a tenant without a
-row uses the defaults, so nothing is backfilled and no existing row changes.
+`active` (deliberate activation), manual-code policy, format, minimum width,
+start value, counter scope (tenant-wide or per branch) and the numbering
+timezone (IANA) that defines the month of tenant-wide counters. Created EMPTY: a
+tenant without a row is NOT activated, so applying this migration changes no
+laboratory's behaviour (orders keep `<code>-<n>`, now from a race-safe
+compatibility counter instead of `count + 1`; samples stay typed by hand).
+Activation is an explicit, audited action of an administrator.
 
-**§3b — `numbering_counter`.** The monotonic monthly counter, keyed by
-tenant, entity kind, scope id (study-type or sample-type id) and period. Empty.
-`scope_id` has deliberately NO foreign key: the counter must outlive the
-catalog row.
+**§3b — `numbering_counter`.** The monotonic counter, keyed by tenant, entity
+kind, scope id (study-type or sample-type id), branch (the nil UUID for
+tenant-wide and compatibility counters) and period (year/month; 0/0 for the
+compatibility counters). Empty. `scope_id` has deliberately NO foreign key:
+the counter must outlive the catalog row.
 
 **§3c — `numbering_allocation`.** The permanent ledger of generated codes,
-unique per tenant + kind + code and per scope + period + sequence value.
-No foreign key to orders, samples or catalogs, so deleting any of them cannot
-release a number. Empty.
+unique per tenant + kind + code and per counter + sequence value. No foreign
+key to orders, samples or catalogs, so deleting any of them cannot release a
+number. Empty.
 
 **§3d — lookup indexes.** `ix_order_tenant_order_code` and
 `ix_sample_tenant_sample_code` (plain, non-unique): the availability checks of
@@ -112,10 +118,17 @@ generation and the manual-code checks look codes up by tenant. They are NOT
 unique because legacy data may contain duplicates (sample codes were only ever
 unique per order). Nothing in `order`/`sample` is rewritten.
 
-**Downgrade of §3 drops the three tables:** counters and ledger are lost. A
-later re-upgrade restarts sequences at 1 each month; generation then skips
-every value whose code already exists, so it cannot collide with orders or
-samples that are still there (only retired, deleted numbers become reusable).
+**§3e — idempotency and the manual-code capability.** `idempotency_receipt`
+(tenant + actor + operation + key unique; SHA-256 fingerprint; the ids and
+codes it produced; no foreign keys to resources), written in the same
+transaction as the work it describes. And the permission `lab:enter_manual_code`,
+inserted into `permission` and granted to `admin` and `superuser` only.
+
+**Downgrade of §3 drops the four tables and the permission:** counters, ledger
+and receipts are lost. A later re-upgrade restarts sequences and generation
+skips every value whose code still exists, so it cannot collide with orders or
+samples that are still there (only retired, deleted numbers become reusable and
+old idempotency keys are forgotten); prefer a snapshot restore.
 
 **Downgrade is LOSSY.** It recreates `sampletype`, adds `sample.type NOT NULL`
 and must give every row *some* value: it writes `OTRO` for ALL samples. The
@@ -147,6 +160,9 @@ LIST_INDEXES = (
     ("ix_report_version_report_id", "report_version", "report_id"),
 )
 
+
+#: Capability to type a code while numbering is active (§3e).
+MANUAL_CODE_PERMISSION = "lab:enter_manual_code"
 
 #: Values of the retired `sampletype` enum; only the downgrade recreates it.
 RETIRED_SAMPLE_TYPE_VALUES = ("SANGRE", "BIOPSIA", "LAMINILLA", "TEJIDO", "OTRO")
@@ -193,17 +209,24 @@ def upgrade() -> None:
         CREATE TABLE public.numbering_config (
             tenant_id           uuid NOT NULL,
             entity_kind         character varying(16) NOT NULL,
-            mode                character varying(24) NOT NULL,
+            active              boolean NOT NULL,
+            manual_policy       character varying(12) NOT NULL,
             format              character varying(60) NOT NULL,
             sequence_min_width  integer NOT NULL,
+            start_value         integer NOT NULL,
+            scope               character varying(8) NOT NULL,
+            timezone            character varying(100) NOT NULL,
+            activated_at        timestamp without time zone,
             updated_at          timestamp without time zone NOT NULL,
             updated_by          uuid,
             CONSTRAINT numbering_config_pkey PRIMARY KEY (tenant_id, entity_kind),
             CONSTRAINT numbering_config_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenant(id),
             CONSTRAINT numbering_config_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES public.app_user(id),
             CONSTRAINT ck_numbering_config_kind CHECK (entity_kind IN ('order', 'sample')),
-            CONSTRAINT ck_numbering_config_mode CHECK (mode IN ('automatic', 'automatic_only', 'manual_only')),
-            CONSTRAINT ck_numbering_config_width CHECK (sequence_min_width BETWEEN 1 AND 6)
+            CONSTRAINT ck_numbering_config_policy CHECK (manual_policy IN ('allowed', 'forbidden', 'required')),
+            CONSTRAINT ck_numbering_config_scope CHECK (scope IN ('tenant', 'branch')),
+            CONSTRAINT ck_numbering_config_width CHECK (sequence_min_width BETWEEN 1 AND 6),
+            CONSTRAINT ck_numbering_config_start CHECK (start_value BETWEEN 1 AND 99999999)
         )
     """)
     op.execute("""
@@ -211,14 +234,15 @@ def upgrade() -> None:
             tenant_id     uuid NOT NULL,
             entity_kind   character varying(16) NOT NULL,
             scope_id      uuid NOT NULL,
+            branch_id     uuid NOT NULL,
             period_year   integer NOT NULL,
             period_month  integer NOT NULL,
             last_value    integer NOT NULL,
             updated_at    timestamp without time zone NOT NULL,
-            CONSTRAINT numbering_counter_pkey PRIMARY KEY (tenant_id, entity_kind, scope_id, period_year, period_month),
+            CONSTRAINT numbering_counter_pkey PRIMARY KEY (tenant_id, entity_kind, scope_id, branch_id, period_year, period_month),
             CONSTRAINT numbering_counter_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenant(id),
             CONSTRAINT ck_numbering_counter_kind CHECK (entity_kind IN ('order', 'sample')),
-            CONSTRAINT ck_numbering_counter_month CHECK (period_month BETWEEN 1 AND 12),
+            CONSTRAINT ck_numbering_counter_month CHECK (period_month BETWEEN 0 AND 12),
             CONSTRAINT ck_numbering_counter_value CHECK (last_value >= 0)
         )
     """)
@@ -228,10 +252,12 @@ def upgrade() -> None:
             tenant_id           uuid NOT NULL,
             entity_kind         character varying(16) NOT NULL,
             scope_id            uuid NOT NULL,
+            branch_id           uuid NOT NULL,
             period_year         integer NOT NULL,
             period_month        integer NOT NULL,
             sequence_value      integer NOT NULL,
             code                character varying(100) NOT NULL,
+            scheme              character varying(8) NOT NULL,
             format              character varying(60) NOT NULL,
             sequence_min_width  integer NOT NULL,
             entity_id           uuid,
@@ -240,9 +266,40 @@ def upgrade() -> None:
             CONSTRAINT numbering_allocation_pkey PRIMARY KEY (id),
             CONSTRAINT numbering_allocation_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenant(id),
             CONSTRAINT uq_numbering_allocation_code UNIQUE (tenant_id, entity_kind, code),
-            CONSTRAINT uq_numbering_allocation_value UNIQUE (tenant_id, entity_kind, scope_id, period_year, period_month, sequence_value),
-            CONSTRAINT ck_numbering_allocation_kind CHECK (entity_kind IN ('order', 'sample'))
+            CONSTRAINT uq_numbering_allocation_value UNIQUE (tenant_id, entity_kind, scope_id, branch_id, period_year, period_month, sequence_value),
+            CONSTRAINT ck_numbering_allocation_kind CHECK (entity_kind IN ('order', 'sample')),
+            CONSTRAINT ck_numbering_allocation_scheme CHECK (scheme IN ('monthly', 'legacy'))
         )
+    """)
+    op.execute("""
+        CREATE TABLE public.idempotency_receipt (
+            id                   uuid NOT NULL,
+            tenant_id            uuid NOT NULL,
+            actor_user_id        uuid NOT NULL,
+            operation            character varying(32) NOT NULL,
+            idempotency_key      character varying(128) NOT NULL,
+            request_fingerprint  character varying(64) NOT NULL,
+            response_status      integer NOT NULL,
+            result               json NOT NULL,
+            resources            json NOT NULL,
+            created_at           timestamp without time zone NOT NULL,
+            CONSTRAINT idempotency_receipt_pkey PRIMARY KEY (id),
+            CONSTRAINT idempotency_receipt_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenant(id),
+            CONSTRAINT uq_idempotency_receipt_key UNIQUE (tenant_id, actor_user_id, operation, idempotency_key)
+        )
+    """)
+    op.execute("CREATE INDEX ix_idempotency_receipt_tenant_id ON public.idempotency_receipt USING btree (tenant_id)")
+    # §3e — the capability to type a code while numbering is active. Granted to admin and superuser
+    # only; every other role (and any custom role) must be given it deliberately.
+    op.execute(f"""
+        INSERT INTO public.permission (id, code, domain, display_name, description)
+        VALUES (gen_random_uuid(), '{MANUAL_CODE_PERMISSION}', 'lab', 'Escribir códigos manualmente',
+                'Escribir el código de una orden o muestra en lugar de usar la numeración automática')
+    """)
+    op.execute(f"""
+        INSERT INTO public.role_permission (role_id, permission_id)
+        SELECT r.id, p.id FROM public.role r CROSS JOIN public.permission p
+        WHERE r.code IN ('admin', 'superuser') AND p.code = '{MANUAL_CODE_PERMISSION}'
     """)
     op.execute("CREATE INDEX ix_numbering_allocation_tenant_id ON public.numbering_allocation USING btree (tenant_id)")
     op.execute("CREATE INDEX ix_numbering_allocation_entity ON public.numbering_allocation USING btree (entity_id)")
@@ -261,6 +318,12 @@ def downgrade() -> None:
     # §3 first (reverse order): counters and ledger are lost (see §3).
     op.execute("DROP INDEX IF EXISTS public.ix_sample_tenant_sample_code")
     op.execute("DROP INDEX IF EXISTS public.ix_order_tenant_order_code")
+    op.execute("DROP TABLE public.idempotency_receipt")
+    op.execute(f"""
+        DELETE FROM public.role_permission WHERE permission_id IN
+            (SELECT id FROM public.permission WHERE code = '{MANUAL_CODE_PERMISSION}')
+    """)
+    op.execute(f"DELETE FROM public.permission WHERE code = '{MANUAL_CODE_PERMISSION}'")
     op.execute("DROP TABLE public.numbering_allocation")
     op.execute("DROP TABLE public.numbering_counter")
     op.execute("DROP TABLE public.numbering_config")

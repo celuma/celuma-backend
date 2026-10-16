@@ -4,7 +4,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlmodel import Session
 
@@ -13,6 +12,7 @@ from app.main import app
 from app.models.study_type import StudyType
 from app.services import numbering
 
+from .keyed_client import KeyedClient
 from .factories import auth_headers, create_branch, create_patient, create_sample_type, create_tenant, create_user
 
 SAMPLES = "/api/v1/laboratory/samples/"
@@ -78,15 +78,47 @@ def freeze(monkeypatch, year=2026, month=10, day=15, hour=18, minute=0):
     return state
 
 
-def set_counter(session: Session, lab: Lab, kind: str, scope, value: int, year=2026, month=10) -> None:
+NIL = "00000000-0000-0000-0000-000000000000"
+
+
+def set_counter(session: Session, lab: Lab, kind: str, scope, value: int, year=2026, month=10, branch=None) -> None:
     session.execute(
         text(
-            "INSERT INTO numbering_counter (tenant_id, entity_kind, scope_id, period_year, period_month, last_value, updated_at) "
-            "VALUES (:t, :k, :s, :y, :m, :v, now()) ON CONFLICT (tenant_id, entity_kind, scope_id, period_year, period_month) "
+            "INSERT INTO numbering_counter (tenant_id, entity_kind, scope_id, branch_id, period_year, period_month, last_value, updated_at) "
+            "VALUES (:t, :k, :s, :b, :y, :m, :v, now()) ON CONFLICT (tenant_id, entity_kind, scope_id, branch_id, period_year, period_month) "
             "DO UPDATE SET last_value = :v"
         ),
-        {"t": str(lab.tenant.id), "k": kind, "s": str(scope.id), "y": year, "m": month, "v": value},
+        {"t": str(lab.tenant.id), "k": kind, "s": str(scope.id), "b": str(branch.id) if branch else NIL,
+         "y": year, "m": month, "v": value},
     )
+    session.commit()
+
+
+def configure(session: Session, lab: Lab, kinds=("order", "sample"), **over) -> None:
+    """Store a numbering configuration directly (activation is a deliberate act: tests do it explicitly)."""
+    values = {"active": True, "manual_policy": "allowed", "format": "{BASE}{SEQ}{MM}{YY}",
+              "sequence_min_width": 2, "start_value": 1, "scope": "tenant", "timezone": "America/Mexico_City", **over}
+    for kind in ((kinds,) if isinstance(kinds, str) else kinds):
+        session.execute(
+            text(
+                "INSERT INTO numbering_config (tenant_id, entity_kind, active, manual_policy, format, sequence_min_width, "
+                "start_value, scope, timezone, updated_at) VALUES (:t, :k, :active, :manual_policy, :format, :sequence_min_width, "
+                ":start_value, :scope, :timezone, now()) ON CONFLICT (tenant_id, entity_kind) DO UPDATE SET active = :active, "
+                "manual_policy = :manual_policy, format = :format, sequence_min_width = :sequence_min_width, "
+                "start_value = :start_value, scope = :scope, timezone = :timezone"
+            ),
+            {"t": str(lab.tenant.id), "k": kind, **values},
+        )
+    session.commit()
+
+
+def grant_manual_permission(session: Session, role_code: str) -> None:
+    """Grant the capability to type codes to a role (a deliberate administrative act)."""
+    session.execute(text(
+        "INSERT INTO role_permission (role_id, permission_id) "
+        "SELECT r.id, p.id FROM role r, permission p WHERE r.code = :rc AND p.code = 'lab:enter_manual_code' "
+        "ON CONFLICT DO NOTHING"
+    ), {"rc": role_code})
     session.commit()
 
 
@@ -137,11 +169,35 @@ def fresh_client(engine):
             yield s
 
     app.dependency_overrides[get_session] = override
-    with TestClient(app) as test_client:
+    with KeyedClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
 
 
-def new_client() -> TestClient:
+def new_client() -> KeyedClient:
     """An independent client for a worker thread (dependency override already set)."""
-    return TestClient(app)
+    return KeyedClient(app)
+
+
+def run_parallel(jobs):
+    """Run callables at the same time (behind a barrier); returns their results in order."""
+    import threading
+
+    barrier = threading.Barrier(len(jobs))
+    results = [None] * len(jobs)
+
+    def worker(i, job):
+        client = new_client()
+        barrier.wait(timeout=30)
+        try:
+            results[i] = job(client)
+        except Exception as exc:  # surfaced by the assertions of the caller
+            results[i] = exc
+
+    threads = [threading.Thread(target=worker, args=(i, j)) for i, j in enumerate(jobs)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+        assert not t.is_alive(), "a worker hung (deadlock?)"
+    return results
