@@ -5769,16 +5769,17 @@ class TestListSearchAndIndexesMigration:
         assert self._has_extension(migration_db)
         assert set(self.INDEXES) <= set(self._indexes(migration_db))
 
-    def test_the_revision_adds_exactly_the_sample_type_table(self, migration_db):
+    def test_the_revision_adds_exactly_the_sample_type_and_numbering_tables(self, migration_db):
         """Section 1 (indexes/extension) adds no table; section 2 (issue #17)
-        adds exactly `sample_type`. Every 1.3.1 table must survive, and the
+        adds exactly `sample_type`; section 3 (issue #8) adds the three
+        monthly-numbering tables. Every 1.3.1 table must survive, and the
         downgrade must return the table set to its 1.3.1 shape."""
         _alembic(HOTFIX_REVISION)
         before = set(inspect(migration_db).get_table_names())
 
         _alembic(RELEASE_1_4_REVISION)
         after = set(inspect(migration_db).get_table_names())
-        assert after - before == {"sample_type"}
+        assert after - before == {"sample_type", "numbering_config", "numbering_counter", "numbering_allocation"}
         assert before - after == set(), "the revision must not remove an existing table"
 
         _alembic(HOTFIX_REVISION, command="downgrade")

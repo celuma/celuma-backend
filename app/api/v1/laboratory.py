@@ -46,6 +46,7 @@ from app.services.list_pagination import (
     sort_field,
     uuid_filter,
 )
+from app.services import numbering
 from app.services.usage import UsageService
 from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from datetime import datetime
@@ -395,20 +396,22 @@ def create_order(
     if str(study_type.tenant_id) != str(order_data.tenant_id):
         raise HTTPException(403, "Study type does not belong to this tenant")
     
-    # Generate order_code if not provided
-    if not order_data.order_code:
-        # Count existing orders with same tenant_id and study_type_id
-        count = session.exec(
-            select(func.count(Order.id)).where(
-                Order.tenant_id == order_data.tenant_id,
-                Order.study_type_id == order_data.study_type_id
-            )
-        ).first() or 0
-        next_seq = count + 1
-        order_code = f"{study_type.code}-{next_seq}"
+    # Céluma 1.4 (#8): monthly code from the allocation service, or a manual
+    # override (see celuma-engineering/specs/laboratory/monthly-numbering.md).
+    order_settings = numbering.get_settings(session, tenant.id, numbering.ORDER)
+    supplied_order_code = numbering.normalize_supplied(order_data.order_code)
+    order_allocation = None
+    if numbering.check_mode(order_settings, supplied_order_code):
+        order_allocation = numbering.allocate_batch(
+            session, tenant_id=tenant.id, period=numbering.period_for(branch),
+            requests=[numbering.AllocationRequest("order", numbering.ORDER, study_type.id, study_type.code)],
+            settings_by_kind={numbering.ORDER: order_settings}, actor_id=ctx.user_id,
+        )["order"]
+        order_code = order_allocation.code
     else:
-        order_code = order_data.order_code
-    
+        order_code = supplied_order_code
+        numbering.claim_manual_codes(session, tenant.id, numbering.ORDER, [order_code])
+
     # Check if order_code is unique for this tenant
     existing_order = session.exec(
         select(Order).where(
@@ -437,6 +440,8 @@ def create_order(
     
     session.add(order)
     session.flush()  # Get order.id before creating invoice
+    if order_allocation:
+        numbering.attach_entity(session, order_allocation, order.id)
 
     _materialize_default_reviewer(session, order)
 
@@ -1279,10 +1284,25 @@ def create_sample(
         sample_data.sample_type_id
     ]
 
+    # Céluma 1.4 (#8): monthly code per sample type, or a manual override.
+    sample_settings = numbering.get_settings(session, tenant.id, numbering.SAMPLE)
+    supplied_sample_code = numbering.normalize_supplied(sample_data.sample_code)
+    sample_allocation = None
+    if numbering.check_mode(sample_settings, supplied_sample_code):
+        sample_allocation = numbering.allocate_batch(
+            session, tenant_id=tenant.id, period=numbering.period_for(branch),
+            requests=[numbering.AllocationRequest("sample", numbering.SAMPLE, sample_type.id, sample_type.code)],
+            settings_by_kind={numbering.SAMPLE: sample_settings}, actor_id=ctx.user_id,
+        )["sample"]
+        sample_code = sample_allocation.code
+    else:
+        sample_code = supplied_sample_code
+        numbering.claim_manual_codes(session, tenant.id, numbering.SAMPLE, [sample_code])
+
     # Check if sample_code is unique for this order
     existing_sample = session.exec(
         select(Sample).where(
-            Sample.sample_code == sample_data.sample_code,
+            Sample.sample_code == sample_code,
             Sample.order_id == sample_data.order_id
         )
     ).first()
@@ -1294,7 +1314,7 @@ def create_sample(
         tenant_id=sample_data.tenant_id,
         branch_id=sample_data.branch_id,
         order_id=sample_data.order_id,
-        sample_code=sample_data.sample_code,
+        sample_code=sample_code,
         sample_type_id=sample_type.id,
         notes=sample_data.notes,
         collected_at=sample_data.collected_at,
@@ -1303,6 +1323,8 @@ def create_sample(
     
     session.add(sample)
     session.flush()  # Get sample.id for event
+    if sample_allocation:
+        numbering.attach_entity(session, sample_allocation, sample.id)
     
     # Create SAMPLE_CREATED event
     sample_created_event = OrderEvent(
@@ -1425,19 +1447,36 @@ def create_order_with_samples(
         session, ctx.tenant_id, [s.sample_type_id for s in payload.samples]
     )
 
-    # Generate order_code if not provided
-    if not payload.order_code:
-        # Count existing orders with same tenant_id and study_type_id
-        count = session.exec(
-            select(func.count(Order.id)).where(
-                Order.tenant_id == payload.tenant_id,
-                Order.study_type_id == payload.study_type_id
-            )
-        ).first() or 0
-        next_seq = count + 1
-        order_code = f"{study_type.code}-{next_seq}"
-    else:
-        order_code = payload.order_code
+    # Céluma 1.4 (#8): decide, before anything is written, which codes are
+    # generated and which are manual overrides, then allocate everything in
+    # one deterministic order (order scope first, then sample scopes by id).
+    order_settings = numbering.get_settings(session, tenant.id, numbering.ORDER)
+    sample_settings = numbering.get_settings(session, tenant.id, numbering.SAMPLE)
+    supplied_order_code = numbering.normalize_supplied(payload.order_code)
+    supplied_sample_codes = [numbering.normalize_supplied(s.sample_code) for s in payload.samples]
+    requests: list = []
+    if numbering.check_mode(order_settings, supplied_order_code):
+        requests.append(numbering.AllocationRequest("order", numbering.ORDER, study_type.id, study_type.code))
+    manual_sample_codes: set[str] = set()
+    for idx, (s, supplied) in enumerate(zip(payload.samples, supplied_sample_codes)):
+        if numbering.check_mode(sample_settings, supplied):
+            st = sample_types[s.sample_type_id]
+            requests.append(numbering.AllocationRequest(("sample", idx), numbering.SAMPLE, st.id, st.code))
+        else:
+            # Prevent duplicate manual sample_code within this unified request
+            if supplied in manual_sample_codes:
+                raise HTTPException(400, f"Duplicate sample_code in request: {supplied}")
+            manual_sample_codes.add(supplied)
+    if supplied_order_code:
+        numbering.claim_manual_codes(session, tenant.id, numbering.ORDER, [supplied_order_code])
+    numbering.claim_manual_codes(session, tenant.id, numbering.SAMPLE, manual_sample_codes)
+    allocations = numbering.allocate_batch(
+        session, tenant_id=tenant.id, period=numbering.period_for(branch), requests=requests,
+        settings_by_kind={numbering.ORDER: order_settings, numbering.SAMPLE: sample_settings},
+        actor_id=ctx.user_id,
+    ) if requests else {}
+    order_allocation = allocations.get("order")
+    order_code = order_allocation.code if order_allocation else supplied_order_code
 
     # Ensure order_code unique per tenant
     existing = session.exec(
@@ -1466,33 +1505,32 @@ def create_order_with_samples(
     )
     session.add(order)
     session.flush()  # get order.id for samples
+    if order_allocation:
+        numbering.attach_entity(session, order_allocation, order.id)
 
     _materialize_default_reviewer(session, order)
 
     # Create samples
     created_samples: list[Sample] = []
-    sample_codes_in_order: set[str] = set()
-    for s in payload.samples:
-        # Prevent duplicate sample_code within this unified request
-        if s.sample_code in sample_codes_in_order:
-            raise HTTPException(400, f"Duplicate sample_code in request: {s.sample_code}")
-        sample_codes_in_order.add(s.sample_code)
+    for idx, s in enumerate(payload.samples):
+        sample_allocation = allocations.get(("sample", idx))
+        sample_code = sample_allocation.code if sample_allocation else supplied_sample_codes[idx]
 
         # Ensure sample_code unique for this order
         existing_sample = session.exec(
             select(Sample).where(
-                Sample.sample_code == s.sample_code,
+                Sample.sample_code == sample_code,
                 Sample.order_id == order.id,
             )
         ).first()
         if existing_sample:
-            raise HTTPException(400, f"Sample code already exists for this order: {s.sample_code}")
+            raise HTTPException(400, f"Sample code already exists for this order: {sample_code}")
 
         sample = Sample(
             tenant_id=payload.tenant_id,
             branch_id=payload.branch_id,
             order_id=order.id,
-            sample_code=s.sample_code,
+            sample_code=sample_code,
             sample_type_id=sample_types[s.sample_type_id].id,
             notes=s.notes,
             collected_at=s.collected_at,
@@ -1500,6 +1538,8 @@ def create_order_with_samples(
         )
         session.add(sample)
         session.flush()  # Get sample.id for event
+        if sample_allocation:
+            numbering.attach_entity(session, sample_allocation, sample.id)
         
         # Create SAMPLE_CREATED event for each sample
         sample_created_event = OrderEvent(

@@ -1,4 +1,4 @@
-"""v1.4.0 - List search extension and list indexes (Céluma 1.4 release migration, in development)
+"""v1.4.0 - List search, sample-type catalog and monthly numbering (Céluma 1.4 release migration, in development)
 
 Revision ID: v1_4_0
 Revises: v1_3_1
@@ -85,6 +85,38 @@ are removed. Nothing is mapped, backfilled or copied: the product decision is
 that enum values carry over to nothing. Identity, state, notes, images, order
 links and labels of every sample are untouched (only this one column goes).
 
+===========================================================================
+§3 — Configurable monthly numbering for orders and samples (issue #8)
+===========================================================================
+
+Specification: `celuma-engineering/specs/laboratory/monthly-numbering.md`;
+decision record: `celuma-engineering/adr/0013-monthly-numbering-counters.md`.
+
+**§3a — `numbering_config`.** Per tenant and entity kind (`order`/`sample`):
+format, minimum sequence width and mode. Created EMPTY: a tenant without a
+row uses the defaults, so nothing is backfilled and no existing row changes.
+
+**§3b — `numbering_counter`.** The monotonic monthly counter, keyed by
+tenant, entity kind, scope id (study-type or sample-type id) and period. Empty.
+`scope_id` has deliberately NO foreign key: the counter must outlive the
+catalog row.
+
+**§3c — `numbering_allocation`.** The permanent ledger of generated codes,
+unique per tenant + kind + code and per scope + period + sequence value.
+No foreign key to orders, samples or catalogs, so deleting any of them cannot
+release a number. Empty.
+
+**§3d — lookup indexes.** `ix_order_tenant_order_code` and
+`ix_sample_tenant_sample_code` (plain, non-unique): the availability checks of
+generation and the manual-code checks look codes up by tenant. They are NOT
+unique because legacy data may contain duplicates (sample codes were only ever
+unique per order). Nothing in `order`/`sample` is rewritten.
+
+**Downgrade of §3 drops the three tables:** counters and ledger are lost. A
+later re-upgrade restarts sequences at 1 each month; generation then skips
+every value whose code already exists, so it cannot collide with orders or
+samples that are still there (only retired, deleted numbers become reusable).
+
 **Downgrade is LOSSY.** It recreates `sampletype`, adds `sample.type NOT NULL`
 and must give every row *some* value: it writes `OTRO` for ALL samples. The
 discarded enum assignments cannot be reconstructed from NULL, and catalog
@@ -156,6 +188,66 @@ def upgrade() -> None:
     # §2c
     op.execute("ALTER TABLE public.sample DROP COLUMN type")
     op.execute("DROP TYPE public.sampletype")
+    # §3a-§3d (empty tables; nothing existing is rewritten)
+    op.execute("""
+        CREATE TABLE public.numbering_config (
+            tenant_id           uuid NOT NULL,
+            entity_kind         character varying(16) NOT NULL,
+            mode                character varying(24) NOT NULL,
+            format              character varying(60) NOT NULL,
+            sequence_min_width  integer NOT NULL,
+            updated_at          timestamp without time zone NOT NULL,
+            updated_by          uuid,
+            CONSTRAINT numbering_config_pkey PRIMARY KEY (tenant_id, entity_kind),
+            CONSTRAINT numbering_config_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenant(id),
+            CONSTRAINT numbering_config_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES public.app_user(id),
+            CONSTRAINT ck_numbering_config_kind CHECK (entity_kind IN ('order', 'sample')),
+            CONSTRAINT ck_numbering_config_mode CHECK (mode IN ('automatic', 'automatic_only', 'manual_only')),
+            CONSTRAINT ck_numbering_config_width CHECK (sequence_min_width BETWEEN 1 AND 6)
+        )
+    """)
+    op.execute("""
+        CREATE TABLE public.numbering_counter (
+            tenant_id     uuid NOT NULL,
+            entity_kind   character varying(16) NOT NULL,
+            scope_id      uuid NOT NULL,
+            period_year   integer NOT NULL,
+            period_month  integer NOT NULL,
+            last_value    integer NOT NULL,
+            updated_at    timestamp without time zone NOT NULL,
+            CONSTRAINT numbering_counter_pkey PRIMARY KEY (tenant_id, entity_kind, scope_id, period_year, period_month),
+            CONSTRAINT numbering_counter_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenant(id),
+            CONSTRAINT ck_numbering_counter_kind CHECK (entity_kind IN ('order', 'sample')),
+            CONSTRAINT ck_numbering_counter_month CHECK (period_month BETWEEN 1 AND 12),
+            CONSTRAINT ck_numbering_counter_value CHECK (last_value >= 0)
+        )
+    """)
+    op.execute("""
+        CREATE TABLE public.numbering_allocation (
+            id                  uuid NOT NULL,
+            tenant_id           uuid NOT NULL,
+            entity_kind         character varying(16) NOT NULL,
+            scope_id            uuid NOT NULL,
+            period_year         integer NOT NULL,
+            period_month        integer NOT NULL,
+            sequence_value      integer NOT NULL,
+            code                character varying(100) NOT NULL,
+            format              character varying(60) NOT NULL,
+            sequence_min_width  integer NOT NULL,
+            entity_id           uuid,
+            created_by          uuid,
+            created_at          timestamp without time zone NOT NULL,
+            CONSTRAINT numbering_allocation_pkey PRIMARY KEY (id),
+            CONSTRAINT numbering_allocation_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenant(id),
+            CONSTRAINT uq_numbering_allocation_code UNIQUE (tenant_id, entity_kind, code),
+            CONSTRAINT uq_numbering_allocation_value UNIQUE (tenant_id, entity_kind, scope_id, period_year, period_month, sequence_value),
+            CONSTRAINT ck_numbering_allocation_kind CHECK (entity_kind IN ('order', 'sample'))
+        )
+    """)
+    op.execute("CREATE INDEX ix_numbering_allocation_tenant_id ON public.numbering_allocation USING btree (tenant_id)")
+    op.execute("CREATE INDEX ix_numbering_allocation_entity ON public.numbering_allocation USING btree (entity_id)")
+    op.execute('CREATE INDEX ix_order_tenant_order_code ON public."order" USING btree (tenant_id, order_code)')
+    op.execute("CREATE INDEX ix_sample_tenant_sample_code ON public.sample USING btree (tenant_id, sample_code)")
 
 
 def downgrade() -> None:
@@ -166,7 +258,13 @@ def downgrade() -> None:
     extension is dropped as well: the 1.3.1 schema did not have it, and
     nothing but the 1.4 list search uses it.
     """
-    # §2 first (reverse order). LOSSY: see the module docstring.
+    # §3 first (reverse order): counters and ledger are lost (see §3).
+    op.execute("DROP INDEX IF EXISTS public.ix_sample_tenant_sample_code")
+    op.execute("DROP INDEX IF EXISTS public.ix_order_tenant_order_code")
+    op.execute("DROP TABLE public.numbering_allocation")
+    op.execute("DROP TABLE public.numbering_counter")
+    op.execute("DROP TABLE public.numbering_config")
+    # §2 next. LOSSY: see the module docstring.
     values = ", ".join(f"'{v}'" for v in RETIRED_SAMPLE_TYPE_VALUES)
     op.execute(f"CREATE TYPE public.sampletype AS ENUM ({values})")
     op.execute("ALTER TABLE public.sample ADD COLUMN type public.sampletype NOT NULL DEFAULT 'OTRO'")

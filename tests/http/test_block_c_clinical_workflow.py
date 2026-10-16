@@ -205,8 +205,15 @@ class TestPatientLifecycle:
 
 class TestOrderAndSampleWorkflow:
     def test_order_with_patient_then_sample_then_status_progression(
-        self, client, session: Session, lab
+        self, client, session: Session, lab, monkeypatch
     ):
+        # Céluma 1.4 (#8): the generated code is monthly (`<study type code><nn><MM><YY>`,
+        # no separator); the pre-1.4 `<code>-<count + 1>` generation is retired.
+        from datetime import datetime, timezone
+
+        from app.services import numbering
+
+        monkeypatch.setattr(numbering, "_now", lambda: datetime(2026, 10, 15, 18, 0, tzinfo=timezone.utc))
         patient = _create_patient_via_api(client, lab)
 
         order = client.post(
@@ -217,7 +224,7 @@ class TestOrderAndSampleWorkflow:
         assert order.status_code == 200, order.text
         order_body = order.json()
         # Code generated from the study type's own code.
-        assert order_body["order_code"] == "HIST-1"
+        assert order_body["order_code"] == "HIST011026"
         assert order_body["patient_id"] == patient["id"]
 
         sample = client.post(
