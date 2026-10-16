@@ -216,7 +216,8 @@ class TestOrderAndSampleWorkflow:
         )
         assert order.status_code == 200, order.text
         order_body = order.json()
-        # Code generated from the study type's own code.
+        # Code generated from the study type's own code. A laboratory that has not activated the
+        # monthly numbering (#8) keeps the pre-1.4 `<code>-<n>` shape, now from a race-safe counter.
         assert order_body["order_code"] == "HIST-1"
         assert order_body["patient_id"] == patient["id"]
 

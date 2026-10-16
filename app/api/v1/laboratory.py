@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, File, Query
 from typing import Dict, Literal, Optional, List, Set
 from uuid import UUID
 from sqlmodel import select, Session, and_, func
@@ -46,6 +46,7 @@ from app.services.list_pagination import (
     sort_field,
     uuid_filter,
 )
+from app.services import idempotency, numbering
 from app.services.usage import UsageService
 from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from datetime import datetime
@@ -349,15 +350,32 @@ def get_order_filter_options(
     _require(user.id, "lab:read", session)
     return order_filter_options(session, ctx.tenant_id)
 
+def _order_response(order: Order) -> OrderResponse:
+    return OrderResponse(
+        id=str(order.id),
+        order_code=order.order_code,
+        status=order.status,
+        patient_id=str(order.patient_id) if order.patient_id else None,
+        tenant_id=str(order.tenant_id),
+        branch_id=str(order.branch_id)
+    )
+
+
 @router.post("/orders/", response_model=OrderResponse)
 def create_order(
     order_data: OrderCreate,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
+    idempotency_key: Optional[str] = Header(None, alias=idempotency.HEADER),
 ):
-    """Create a new laboratory order (requires lab:create_order)."""
+    """Create a new laboratory order (requires lab:create_order).
+
+    Idempotent: the `Idempotency-Key` header is required (428 without it); a retry of the
+    same request replays the original response, the same key with another payload is 409.
+    """
     _require(user.id, "lab:create_order", session)
+    idem_key = idempotency.validate_key(idempotency_key)
     # Céluma 1.3 Phase 5, Block C (finding C-001): the body's `tenant_id` is
     # client-supplied and must be anchored to the authenticated context
     # before anything else is validated against it — otherwise every check
@@ -378,6 +396,17 @@ def create_order(
     if str(branch.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Branch does not belong to your tenant")
 
+    # Céluma 1.4 (#8): access was re-checked above on every call, replays included; from here
+    # on only the FIRST execution runs.
+    claim = idempotency.begin(
+        session, tenant_id=tenant.id, actor_id=user.id, operation=idempotency.OP_ORDER,
+        key=idem_key, request_fingerprint=idempotency.fingerprint(order_data),
+    )
+    if claim.replay:
+        idempotency.verify_resources(session, claim)
+        original = session.get(Order, claim.receipt.resources[0]["id"])
+        return idempotency.replayed(_order_response(original))
+
     if not order_data.patient_id and not order_data.requesting_physician_id:
         raise HTTPException(400, "Patient or requesting physician is required")
     patient = _validate_patient(session, order_data.patient_id, order_data.tenant_id)
@@ -395,20 +424,23 @@ def create_order(
     if str(study_type.tenant_id) != str(order_data.tenant_id):
         raise HTTPException(403, "Study type does not belong to this tenant")
     
-    # Generate order_code if not provided
-    if not order_data.order_code:
-        # Count existing orders with same tenant_id and study_type_id
-        count = session.exec(
-            select(func.count(Order.id)).where(
-                Order.tenant_id == order_data.tenant_id,
-                Order.study_type_id == order_data.study_type_id
-            )
-        ).first() or 0
-        next_seq = count + 1
-        order_code = f"{study_type.code}-{next_seq}"
+    # Céluma 1.4 (#8): monthly code from the allocation service, or a manual
+    # override (see celuma-engineering/specs/laboratory/monthly-numbering.md).
+    order_settings = numbering.get_settings(session, tenant.id, numbering.ORDER)
+    supplied_order_code = numbering.normalize_supplied(order_data.order_code)
+    order_allocation = None
+    if numbering.check_mode(order_settings, supplied_order_code, numbering.can_enter_manual(session, user)):
+        order_allocation = numbering.allocate_batch(
+            session, tenant_id=tenant.id, instant=numbering.now(),
+            requests=[numbering.AllocationRequest(
+                "order", numbering.ORDER, study_type.id, study_type.code, branch.id, branch.code, branch.timezone)],
+            settings_by_kind={numbering.ORDER: order_settings}, actor_id=ctx.user_id,
+        )["order"]
+        order_code = order_allocation.code
     else:
-        order_code = order_data.order_code
-    
+        order_code = supplied_order_code
+        numbering.claim_manual_codes(session, tenant.id, numbering.ORDER, [order_code])
+
     # Check if order_code is unique for this tenant
     existing_order = session.exec(
         select(Order).where(
@@ -437,6 +469,11 @@ def create_order(
     
     session.add(order)
     session.flush()  # Get order.id before creating invoice
+    if order_allocation:
+        numbering.attach_entity(session, order_allocation, order.id)
+    else:
+        numbering.audit_manual_code(session, tenant_id=tenant.id, user_id=user.id, kind=numbering.ORDER,
+                                    entity_id=order.id, code=order.order_code)
 
     _materialize_default_reviewer(session, order)
 
@@ -450,17 +487,12 @@ def create_order(
             extra={"event": "invoice.auto_create_failed", "order_id": str(order.id), "error": str(e)},
         )
     
+    response = _order_response(order)
+    # The receipt commits with the order, the invoice and the allocation, or not at all.
+    idempotency.store(session, claim, result={"order": {"id": str(order.id), "code": order.order_code}},
+                      resources=[{"kind": "order", "id": str(order.id)}])
     session.commit()
-    session.refresh(order)
-    
-    return OrderResponse(
-        id=str(order.id),
-        order_code=order.order_code,
-        status=order.status,
-        patient_id=str(order.patient_id) if order.patient_id else None,
-        tenant_id=str(order.tenant_id),
-        branch_id=str(order.branch_id)
-    )
+    return response
 
 @router.get("/orders/{order_id}", response_model=OrderDetailResponse)
 def get_order(
@@ -1250,9 +1282,14 @@ def create_sample(
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
+    idempotency_key: Optional[str] = Header(None, alias=idempotency.HEADER),
 ):
-    """Create a new sample (requires lab:create_sample)."""
+    """Create a new sample (requires lab:create_sample).
+
+    Idempotent: `Idempotency-Key` is required (428 without it); see `create_order`.
+    """
     _require(user.id, "lab:create_sample", session)
+    idem_key = idempotency.validate_key(idempotency_key)
     # Céluma 1.3 Phase 5, Block C (finding C-001) — see `create_order`.
     if str(sample_data.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Cannot create samples for a different tenant")
@@ -1274,15 +1311,39 @@ def create_sample(
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Order does not belong to your tenant")
 
+    claim = idempotency.begin(
+        session, tenant_id=tenant.id, actor_id=user.id, operation=idempotency.OP_SAMPLE,
+        key=idem_key, request_fingerprint=idempotency.fingerprint(sample_data),
+    )
+    if claim.replay:
+        idempotency.verify_resources(session, claim)
+        return idempotency.replayed(_sample_response(session, session.get(Sample, claim.receipt.resources[0]["id"])))
+
     # Céluma 1.4 (#17): a new sample requires an active type of THIS tenant.
     sample_type = require_active_sample_types(session, ctx.tenant_id, [sample_data.sample_type_id])[
         sample_data.sample_type_id
     ]
 
+    # Céluma 1.4 (#8): monthly code per sample type, or a manual override.
+    sample_settings = numbering.get_settings(session, tenant.id, numbering.SAMPLE)
+    supplied_sample_code = numbering.normalize_supplied(sample_data.sample_code)
+    sample_allocation = None
+    if numbering.check_mode(sample_settings, supplied_sample_code, numbering.can_enter_manual(session, user)):
+        sample_allocation = numbering.allocate_batch(
+            session, tenant_id=tenant.id, instant=numbering.now(),
+            requests=[numbering.AllocationRequest(
+                "sample", numbering.SAMPLE, sample_type.id, sample_type.code, branch.id, branch.code, branch.timezone)],
+            settings_by_kind={numbering.SAMPLE: sample_settings}, actor_id=ctx.user_id,
+        )["sample"]
+        sample_code = sample_allocation.code
+    else:
+        sample_code = supplied_sample_code
+        numbering.claim_manual_codes(session, tenant.id, numbering.SAMPLE, [sample_code])
+
     # Check if sample_code is unique for this order
     existing_sample = session.exec(
         select(Sample).where(
-            Sample.sample_code == sample_data.sample_code,
+            Sample.sample_code == sample_code,
             Sample.order_id == sample_data.order_id
         )
     ).first()
@@ -1294,7 +1355,7 @@ def create_sample(
         tenant_id=sample_data.tenant_id,
         branch_id=sample_data.branch_id,
         order_id=sample_data.order_id,
-        sample_code=sample_data.sample_code,
+        sample_code=sample_code,
         sample_type_id=sample_type.id,
         notes=sample_data.notes,
         collected_at=sample_data.collected_at,
@@ -1303,6 +1364,11 @@ def create_sample(
     
     session.add(sample)
     session.flush()  # Get sample.id for event
+    if sample_allocation:
+        numbering.attach_entity(session, sample_allocation, sample.id)
+    else:
+        numbering.audit_manual_code(session, tenant_id=tenant.id, user_id=user.id, kind=numbering.SAMPLE,
+                                    entity_id=sample.id, code=sample.sample_code)
     
     # Create SAMPLE_CREATED event
     sample_created_event = OrderEvent(
@@ -1326,9 +1392,15 @@ def create_sample(
     # Update order status based on new sample
     update_order_status(str(sample_data.order_id), session)
     
+    # The receipt commits with the sample, its event and the allocation, or not at all.
+    idempotency.store(session, claim, result={"samples": [{"id": str(sample.id), "code": sample.sample_code}]},
+                      resources=[{"kind": "sample", "id": str(sample.id)}])
     session.commit()
     session.refresh(sample)
-    
+    return _sample_response(session, sample)
+
+
+def _sample_response(session: Session, sample: Sample) -> SampleResponse:
     # Get assignees from Assignment table (new sample won't have any, but include for consistency)
     assignee_users = _get_sample_assignees(session, sample.id, str(sample.tenant_id))
     
@@ -1372,12 +1444,14 @@ def create_sample(
     )
 
 
+
 @router.post("/orders/unified", response_model=OrderUnifiedResponse)
 def create_order_with_samples(
     payload: OrderUnifiedCreate,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
+    idempotency_key: Optional[str] = Header(None, alias=idempotency.HEADER),
 ):
     """Create a new laboratory order and multiple samples in one operation (requires lab:create_order and lab:create_sample).
 
@@ -1385,9 +1459,11 @@ def create_order_with_samples(
     - Generates order_code automatically if not provided
     - Ensures `order_code` uniqueness per tenant
     - Creates order and all samples atomically
+    - Idempotent: `Idempotency-Key` is required (428 without it); see `create_order`
     """
     _require(user.id, "lab:create_order", session)
     _require(user.id, "lab:create_sample", session)
+    idem_key = idempotency.validate_key(idempotency_key)
     # Céluma 1.3 Phase 5, Block C (finding C-001) — see `create_order`. This
     # is the route the frontend's order-registration screen actually calls.
     if str(payload.tenant_id) != ctx.tenant_id:
@@ -1402,6 +1478,16 @@ def create_order_with_samples(
         raise HTTPException(404, "Branch not found")
     if str(branch.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Branch does not belong to your tenant")
+    claim = idempotency.begin(
+        session, tenant_id=tenant.id, actor_id=user.id, operation=idempotency.OP_UNIFIED,
+        key=idem_key, request_fingerprint=idempotency.fingerprint(payload),
+    )
+    if claim.replay:
+        idempotency.verify_resources(session, claim)
+        return idempotency.replayed(_unified_response(
+            session, session.get(Order, claim.receipt.resources[0]["id"]),
+            [session.get(Sample, r["id"]) for r in claim.receipt.resources[1:]],
+        ))
     if not payload.patient_id and not payload.requesting_physician_id:
         raise HTTPException(400, "Patient or requesting physician is required")
     patient = _validate_patient(session, payload.patient_id, payload.tenant_id)
@@ -1425,19 +1511,39 @@ def create_order_with_samples(
         session, ctx.tenant_id, [s.sample_type_id for s in payload.samples]
     )
 
-    # Generate order_code if not provided
-    if not payload.order_code:
-        # Count existing orders with same tenant_id and study_type_id
-        count = session.exec(
-            select(func.count(Order.id)).where(
-                Order.tenant_id == payload.tenant_id,
-                Order.study_type_id == payload.study_type_id
-            )
-        ).first() or 0
-        next_seq = count + 1
-        order_code = f"{study_type.code}-{next_seq}"
-    else:
-        order_code = payload.order_code
+    # Céluma 1.4 (#8): decide, before anything is written, which codes are
+    # generated and which are manual overrides, then allocate everything in
+    # one deterministic order (order scope first, then sample scopes by id).
+    order_settings = numbering.get_settings(session, tenant.id, numbering.ORDER)
+    sample_settings = numbering.get_settings(session, tenant.id, numbering.SAMPLE)
+    supplied_order_code = numbering.normalize_supplied(payload.order_code)
+    supplied_sample_codes = [numbering.normalize_supplied(s.sample_code) for s in payload.samples]
+    requests: list = []
+    permitted = numbering.can_enter_manual(session, user)
+    if numbering.check_mode(order_settings, supplied_order_code, permitted):
+        requests.append(numbering.AllocationRequest(
+            "order", numbering.ORDER, study_type.id, study_type.code, branch.id, branch.code, branch.timezone))
+    manual_sample_codes: set[str] = set()
+    for idx, (s, supplied) in enumerate(zip(payload.samples, supplied_sample_codes)):
+        if numbering.check_mode(sample_settings, supplied, permitted):
+            st = sample_types[s.sample_type_id]
+            requests.append(numbering.AllocationRequest(
+                ("sample", idx), numbering.SAMPLE, st.id, st.code, branch.id, branch.code, branch.timezone))
+        else:
+            # Prevent duplicate manual sample_code within this unified request
+            if supplied in manual_sample_codes:
+                raise HTTPException(400, f"Duplicate sample_code in request: {supplied}")
+            manual_sample_codes.add(supplied)
+    if supplied_order_code:
+        numbering.claim_manual_codes(session, tenant.id, numbering.ORDER, [supplied_order_code])
+    numbering.claim_manual_codes(session, tenant.id, numbering.SAMPLE, manual_sample_codes)
+    allocations = numbering.allocate_batch(
+        session, tenant_id=tenant.id, instant=numbering.now(), requests=requests,
+        settings_by_kind={numbering.ORDER: order_settings, numbering.SAMPLE: sample_settings},
+        actor_id=ctx.user_id,
+    ) if requests else {}
+    order_allocation = allocations.get("order")
+    order_code = order_allocation.code if order_allocation else supplied_order_code
 
     # Ensure order_code unique per tenant
     existing = session.exec(
@@ -1466,33 +1572,35 @@ def create_order_with_samples(
     )
     session.add(order)
     session.flush()  # get order.id for samples
+    if order_allocation:
+        numbering.attach_entity(session, order_allocation, order.id)
+    else:
+        numbering.audit_manual_code(session, tenant_id=tenant.id, user_id=user.id, kind=numbering.ORDER,
+                                    entity_id=order.id, code=order.order_code)
 
     _materialize_default_reviewer(session, order)
 
     # Create samples
     created_samples: list[Sample] = []
-    sample_codes_in_order: set[str] = set()
-    for s in payload.samples:
-        # Prevent duplicate sample_code within this unified request
-        if s.sample_code in sample_codes_in_order:
-            raise HTTPException(400, f"Duplicate sample_code in request: {s.sample_code}")
-        sample_codes_in_order.add(s.sample_code)
+    for idx, s in enumerate(payload.samples):
+        sample_allocation = allocations.get(("sample", idx))
+        sample_code = sample_allocation.code if sample_allocation else supplied_sample_codes[idx]
 
         # Ensure sample_code unique for this order
         existing_sample = session.exec(
             select(Sample).where(
-                Sample.sample_code == s.sample_code,
+                Sample.sample_code == sample_code,
                 Sample.order_id == order.id,
             )
         ).first()
         if existing_sample:
-            raise HTTPException(400, f"Sample code already exists for this order: {s.sample_code}")
+            raise HTTPException(400, f"Sample code already exists for this order: {sample_code}")
 
         sample = Sample(
             tenant_id=payload.tenant_id,
             branch_id=payload.branch_id,
             order_id=order.id,
-            sample_code=s.sample_code,
+            sample_code=sample_code,
             sample_type_id=sample_types[s.sample_type_id].id,
             notes=s.notes,
             collected_at=s.collected_at,
@@ -1500,6 +1608,11 @@ def create_order_with_samples(
         )
         session.add(sample)
         session.flush()  # Get sample.id for event
+        if sample_allocation:
+            numbering.attach_entity(session, sample_allocation, sample.id)
+        else:
+            numbering.audit_manual_code(session, tenant_id=tenant.id, user_id=user.id, kind=numbering.SAMPLE,
+                                        entity_id=sample.id, code=sample.sample_code)
         
         # Create SAMPLE_CREATED event for each sample
         sample_created_event = OrderEvent(
@@ -1534,12 +1647,21 @@ def create_order_with_samples(
             extra={"event": "invoice.auto_create_failed", "order_id": str(order.id), "error": str(e)},
         )
 
-    # Commit transaction
+    # The receipt commits with the order, every sample, the invoice and all allocations, or not at all.
+    idempotency.store(
+        session, claim,
+        result={"order": {"id": str(order.id), "code": order.order_code},
+                "samples": [{"id": str(x.id), "code": x.sample_code} for x in created_samples]},
+        resources=[{"kind": "order", "id": str(order.id)}] + [{"kind": "sample", "id": str(x.id)} for x in created_samples],
+    )
     session.commit()
     session.refresh(order)
     for s in created_samples:
         session.refresh(s)
+    return _unified_response(session, order, created_samples)
 
+
+def _unified_response(session: Session, order: Order, created_samples: list) -> OrderUnifiedResponse:
     # Build sample responses with assignees and labels
     sample_responses = []
     for s in created_samples:
@@ -1598,6 +1720,8 @@ def create_order_with_samples(
         ),
         samples=sample_responses,
     )
+
+
 
 
 @router.post("/samples/{sample_id}/images", response_model=SampleImageUploadResponse)

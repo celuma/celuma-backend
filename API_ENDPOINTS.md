@@ -1012,7 +1012,7 @@ Headers: `Authorization: Bearer <token>`
 
 **Notes:**
 - `study_type_id` is **required** (determines the price and invoice generation)
-- `order_code` is **optional** and auto-generated if not provided
+- `order_code` is **optional**; if omitted it is generated per the Céluma 1.4 monthly numbering (`<study type code><nn><MM><YY>`, e.g. `CU011026`; see "Monthly numbering" below)
   - Format: `{StudyType.code}-{N}` (e.g., IHQ-1, IHQ-2, BIOPSIA-1)
   - Sequence is per tenant and per study_type_id
   - If provided, it must be unique per tenant
@@ -1241,6 +1241,8 @@ Returns `orders` array with enriched `branch` and `patient` objects and summary 
 - Only returns active users in the same tenant
 - Limited to 10 results for performance
 
+> **Céluma 1.4 (issue #8) — monthly numbering and idempotency.** The three creation routes (`POST /laboratory/orders/`, `/orders/unified`, `POST /laboratory/samples/`) **require an `Idempotency-Key` header** (8–128 chars of `A-Za-z0-9._:-`; 428 without it): a retry of the same request replays the original records (`Idempotent-Replayed: true`) and creates no second number, invoice or audit row; the same key with another payload is 409; a deleted record is 410. `order_code` / `sample_code` are optional: omitted or blank = generated. A laboratory is **not activated** by default (orders keep `<code>-<n>`, samples are typed); once an administrator activates a kind, codes are `{BASE}{SEQ}{MM}{YY}` (`CU011026`; the hyphen is optional: `CU-011026`) with one counter per tenant (or branch) × study/sample type × month (the month is taken in the laboratory's configurable IANA numbering `timezone`, or in the branch's zone for branch-scoped counters), a configurable start value and manual-code policy (`allowed`/`forbidden`/`required`) that also requires the user capability `lab:enter_manual_code`. New: `GET /api/v1/numbering/config` and `POST /api/v1/numbering/preview` (`timezone`, `scope`, `start_value` and the other candidate settings are validated; unknown zones are 422) (`lab:read`; the preview reserves nothing), `PUT /api/v1/numbering/config/{order|sample}` (`admin:manage_catalog`). Contract: `celuma-engineering/specs/laboratory/monthly-numbering.md`.
+
 > **Céluma 1.4 (issue #17):** a sample's type is a catalog entry. Requests send `sample_type_id` (required; an active type of the caller's tenant — 404 if unknown/foreign, 400 if inactive; the old `type` field is refused with 422) and responses return `sample_type: {id, code, name, is_active}` or `null` ("Sin tipo", legacy samples) instead of `type`. List filter `type` became `sample_type_id` (`none` = Sin tipo). Catalog endpoints: `/api/v1/sample-types/` (list/get: `lab:read`; create/update/delete, `/export`, `/import/{preview,confirm}`, `/copy-from-study-types/{preview,confirm}`: `admin:manage_catalog`) and `GET /api/v1/study-types/export`. Contract: `celuma-engineering/specs/laboratory/sample-types.md` and `catalog-transfer.md`.
 
 ### POST /api/v1/laboratory/samples/
@@ -1276,7 +1278,7 @@ Returns `orders` array with enriched `branch` and `patient` objects and summary 
 
 **Notes:**
 - `study_type_id` is **required** (determines the price and invoice generation)
-- `order_code` is **optional** and auto-generated if not provided
+- `order_code` is **optional**; if omitted it is generated per the Céluma 1.4 monthly numbering (`<study type code><nn><MM><YY>`, e.g. `CU011026`; see "Monthly numbering" below)
   - Format: `{StudyType.code}-{N}` (e.g., IHQ-1, IHQ-2, BIOPSIA-1)
   - Sequence is per tenant and per study_type_id
   - If provided, it must be unique per tenant

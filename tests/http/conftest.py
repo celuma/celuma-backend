@@ -12,7 +12,6 @@ import os
 import subprocess
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlmodel import Session, create_engine
 from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
@@ -21,6 +20,8 @@ import app.models  # noqa: F401  registers every table on SQLModel.metadata
 from app.core.config import settings
 from app.core.db import get_session
 from app.main import app, rate_limit_storage
+
+from .keyed_client import KeyedClient
 
 
 # Céluma 1.3 Phase 2, Block B, Story B10: HTTP tests run against a real,
@@ -411,6 +412,6 @@ def client_fixture(session: Session):
         yield session
 
     app.dependency_overrides[get_session] = get_session_override
-    with TestClient(app) as test_client:
+    with KeyedClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

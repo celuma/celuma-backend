@@ -235,7 +235,8 @@ class SampleCreate(BaseModel):
     tenant_id: str
     branch_id: str
     order_id: str
-    sample_code: str
+    #: Optional (Céluma 1.4, #8): omitted/blank = generated monthly code; supplied = manual override.
+    sample_code: Optional[str] = None
     sample_type_id: str  # required: every new sample has an active catalog type
     notes: Optional[str] = None
     collected_at: Optional[datetime] = None
@@ -299,7 +300,8 @@ class SampleImageUploadResponse(BaseModel):
 
 class UnifiedSampleCreate(BaseModel):
     """Input schema for creating a sample as part of unified order creation."""
-    sample_code: str
+    #: Optional (Céluma 1.4, #8): omitted/blank = generated monthly code; supplied = manual override.
+    sample_code: Optional[str] = None
     sample_type_id: str
     notes: Optional[str] = None
     collected_at: Optional[datetime] = None

@@ -1,13 +1,24 @@
 #!/bin/bash
 
 # Script to verify the full flow: order → invoice with catalog price → payment → balance
-# Usage: ./verify_billing_flow.sh <TOKEN>
+# Usage: ./verify_billing_flow.sh <TOKEN>      (or: TOKEN='Bearer <jwt>' ./verify_billing_flow.sh)
+#
+# Creates a real order, invoice and payment: run it ONLY against a disposable/synthetic stack
+# with its own lab, study type, price, patient and sample type. The token is never embedded.
 
 set -e
 
 # Configuration
 BASE_URL="${BASE_URL:-http://localhost:8000}"
-TOKEN="${1:-Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI1YzZmMjVmYi00ODUxLTQ5ZjctYWNlMi03MjE2NWM2MzRlZjAiLCJleHAiOjE3NzA4OTEyMzl9.bVpfH8zwKXG9hWxCIhH8rNRkWvmx6Dm9WQywWEZKzMg}"
+TOKEN="${1:-${TOKEN:-}}"
+if [ -z "$TOKEN" ]; then
+    echo "ERROR: falta el token. Uso: $0 'Bearer <jwt>'  (o exporta TOKEN)" >&2
+    exit 2
+fi
+case "$TOKEN" in
+    [Bb]earer\ *) ;;
+    *) TOKEN="Bearer $TOKEN" ;;
+esac
 
 echo "====================================="
 echo "Verificación de flujo de facturación"
@@ -45,36 +56,75 @@ echo ""
 # 3. Fetch patients
 echo -e "${YELLOW}3. Obteniendo pacientes...${NC}"
 PATIENTS=$(curl -s -H "Authorization: $TOKEN" "$BASE_URL/api/v1/patients/")
-PATIENT_ID=$(echo "$PATIENTS" | jq -r '.patients[0].id')
-PATIENT_NAME=$(echo "$PATIENTS" | jq -r '.patients[0] | "\(.first_name) \(.last_name)"')
-TENANT_ID=$(echo "$PATIENTS" | jq -r '.patients[0].tenant_id')
-BRANCH_ID=$(echo "$PATIENTS" | jq -r '.patients[0].branch_id')
+PATIENT_ID=$(echo "$PATIENTS" | jq -r '(if type == "array" then . else .patients end)[0].id')
+PATIENT_NAME=$(echo "$PATIENTS" | jq -r '(if type == "array" then . else .patients end)[0] | "\(.first_name) \(.last_name)"')
+TENANT_ID=$(echo "$PATIENTS" | jq -r '(if type == "array" then . else .patients end)[0].tenant_id')
+BRANCH_ID=$(echo "$PATIENTS" | jq -r '(if type == "array" then . else .patients end)[0].branch_id')
 echo -e "${GREEN}✓ Usando paciente: $PATIENT_NAME (ID: $PATIENT_ID)${NC}"
+echo ""
+
+# 3b. Pick an ACTIVE sample type of this tenant (new samples require one; the retired `type` enum is refused)
+echo -e "${YELLOW}3b. Obteniendo tipo de muestra activo...${NC}"
+SAMPLE_TYPES=$(curl -s -H "Authorization: $TOKEN" "$BASE_URL/api/v1/sample-types/?active_only=true")
+SAMPLE_TYPE_ID=$(echo "$SAMPLE_TYPES" | jq -r '.sample_types[0].id // empty')
+SAMPLE_TYPE_CODE=$(echo "$SAMPLE_TYPES" | jq -r '.sample_types[0].code // empty')
+if [ -z "$SAMPLE_TYPE_ID" ]; then
+    echo -e "${RED}✗ El catálogo de tipos de muestra está vacío: crea o importa al menos un tipo activo en Configuración → Tipos de Muestra${NC}" >&2
+    exit 1
+fi
+echo -e "${GREEN}✓ Usando tipo de muestra: $SAMPLE_TYPE_CODE (ID: $SAMPLE_TYPE_ID)${NC}"
 echo ""
 
 # 4. Create order (no order_code — auto-generated)
 echo -e "${YELLOW}4. Creando orden con tipo de estudio $STUDY_TYPE_CODE...${NC}"
-ORDER_RESPONSE=$(curl -s -H "Authorization: $TOKEN" \
-    -H "Content-Type: application/json" \
-    -X POST "$BASE_URL/api/v1/laboratory/orders/unified" \
-    -d '{
-        "tenant_id": "'$TENANT_ID'",
-        "branch_id": "'$BRANCH_ID'",
-        "patient_id": "'$PATIENT_ID'",
-        "study_type_id": "'$STUDY_TYPE_ID'",
-        "requested_by": "Dr. Test",
-        "notes": "Prueba de verificación de facturación",
-        "samples": [{
-            "sample_code": "TEST-'$(date +%s)'",
-            "type": "OTRO",
-            "notes": "Muestra de prueba"
-        }]
-    }')
+# Céluma 1.4 (#8): creation requires an Idempotency-Key. ONE key for this one logical request; a retry
+# after a transport failure reuses it, so a response lost after the commit is replayed, not duplicated.
+IDEMPOTENCY_KEY="$(uuidgen)"
+ORDER_PAYLOAD='{
+    "tenant_id": "'$TENANT_ID'",
+    "branch_id": "'$BRANCH_ID'",
+    "patient_id": "'$PATIENT_ID'",
+    "study_type_id": "'$STUDY_TYPE_ID'",
+    "requested_by": "Dr. Test",
+    "notes": "Prueba de verificación de facturación",
+    "samples": [{
+        "sample_code": "TEST-'$(date +%s)'",
+        "sample_type_id": "'$SAMPLE_TYPE_ID'",
+        "notes": "Muestra de prueba"
+    }]
+}'
+# At most 3 guarded TRANSPORT attempts (connection failure, timeout), always with the same key and payload.
+# Any HTTP answer, error bodies included, is definitive and is never retried or re-asked.
+CURL="${CURL:-curl}"            # overridable only so the retry behaviour can be tested with a controlled wrapper
+ORDER_RESPONSE=""
+HTTP_CODE=""
+for ATTEMPT in 1 2 3; do
+    set +e
+    RAW=$("$CURL" -sS --connect-timeout 5 --max-time 30 -w '\n%{http_code}' \
+        -H "Authorization: $TOKEN" \
+        -H "Content-Type: application/json" \
+        -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+        -X POST "$BASE_URL/api/v1/laboratory/orders/unified" \
+        -d "$ORDER_PAYLOAD" 2>/dev/null)
+    CURL_RC=$?
+    set -e
+    if [ "$CURL_RC" -eq 0 ]; then
+        HTTP_CODE="${RAW##*$'\n'}"
+        ORDER_RESPONSE="${RAW%$'\n'*}"
+        break
+    fi
+    echo -e "${YELLOW}⚠ Intento $ATTEMPT/3 sin respuesta (curl código $CURL_RC); se reintenta con la misma Idempotency-Key${NC}" >&2
+    [ "$ATTEMPT" -lt 3 ] && sleep 1
+done
+if [ -z "$HTTP_CODE" ]; then
+    echo -e "${RED}✗ Sin respuesta del servidor tras 3 intentos; la orden pudo o no haberse creado. Repite con la misma llave: $IDEMPOTENCY_KEY${NC}" >&2
+    exit 3
+fi
 
 ORDER_ID=$(echo "$ORDER_RESPONSE" | jq -r '.order.id')
 ORDER_CODE=$(echo "$ORDER_RESPONSE" | jq -r '.order.order_code')
 if [ -z "$ORDER_ID" ] || [ "$ORDER_ID" == "null" ]; then
-    echo -e "${RED}✗ Error al crear orden${NC}"
+    echo -e "${RED}✗ Error al crear orden (HTTP $HTTP_CODE)${NC}"
     echo "$ORDER_RESPONSE" | jq '.'
     exit 1
 fi
