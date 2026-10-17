@@ -1,15 +1,18 @@
 """Auditable operational removal of erroneous captures (Céluma 1.4, issue #11).
 
-PROPOSAL, not an owner-confirmed decision: removal is a reversible TOMBSTONE, never a physical
-delete. The row keeps its id, code, ledger entry, relationships, storage objects and audit trail;
-every ordinary query stops seeing it (`app/core/soft_removal.py`). Consequences, all decided here:
+Engineering close-out decision (not a personal approval by the owner): removal is RETAINED
+OPERATIONAL REMOVAL, a tombstone and never a physical delete. The row keeps its id, code, ledger entry,
+relationships, storage objects and audit trail, indefinitely for this release; every ordinary query
+stops seeing it (`app/core/soft_removal.py`). There is NO restore action and NO automatic purge in this
+block (both deferred); retained data merely keeps them possible later. Consequences:
 
 - Window and evidence: identical to every direct edit (`order_lifecycle.lock_and_guard`): Reception
   through Diagnosis, and no review/approval/signing/publication evidence on ANY related report or
   version, historical included. A report returned from review is NOT removable.
 - Draft reports: a DRAFT report with no evidence is retained and hidden together with its order.
 - Invoice / payments: the invoice created with the order is retained. Removal is BLOCKED when the
-  invoice has any payment or is not PENDING: nothing is refunded, voided or deleted silently; the
+  invoice has any payment or is not PENDING (read under the order lock that every billing writer also
+  takes, see `order_lifecycle.lock_order_for_billing`, so a payment and a removal cannot both commit): nothing is refunded, voided or deleted silently; the
   billing flow must resolve it first. A PENDING invoice without payments stays in the database and
   disappears from billing lists with its order.
 - Samples of a removed order are removed with it (their images stay in storage, still counted by usage).

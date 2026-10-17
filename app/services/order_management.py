@@ -86,7 +86,9 @@ def resolve_requested_ids(physician_ids: Optional[Sequence[str]], legacy_id: Opt
     return ids
 
 
-def load_physicians(session: Session, tenant_id, ids: Sequence[str]) -> List[RequestingPhysician]:
+def load_physicians(
+    session: Session, tenant_id, ids: Sequence[str], keep_inactive: Iterable = (),
+) -> List[RequestingPhysician]:
     """Validate and load the physicians in the submitted order: each must exist in THIS tenant and be
     active (same 404 / 403 / 400 answers the single-physician field always gave)."""
     physicians: List[RequestingPhysician] = []
@@ -100,7 +102,8 @@ def load_physicians(session: Session, tenant_id, ids: Sequence[str]) -> List[Req
             raise HTTPException(404, "Requesting physician not found")
         if str(physician.tenant_id) != str(tenant_id):
             raise HTTPException(403, "Requesting physician does not belong to this tenant")
-        if not physician.is_active:
+        # A physician already on the order may stay after being deactivated (history); a NEW one must be active.
+        if not physician.is_active and physician.id not in set(keep_inactive):
             raise HTTPException(400, "Requesting physician is inactive")
         physicians.append(physician)
     return physicians
@@ -110,9 +113,35 @@ def physician_name(physician: RequestingPhysician) -> str:
     return physician.full_name or f"{physician.first_name} {physician.last_name}".strip()
 
 
+#: `order.requested_by` is a legacy varchar(255): the derived text is a BOUNDED SUMMARY for old readers only.
+LEGACY_REQUESTED_BY_LIMIT = 255
+
+
 def derive_requested_by(physicians: Iterable[RequestingPhysician]) -> Optional[str]:
+    """Legacy one-line summary of the physician set (never the authoritative data).
+
+    Whole names joined with "; " while they fit in the legacy column; when they do not, the names that fit
+    are followed by "; +N más" so a 1.3.x reader can tell the list is longer. A single name longer than the
+    column is cut with an ellipsis. The authoritative collection (`order_requesting_physician`) and the
+    report metadata always carry every full name; nothing here is a primary physician.
+    """
     names = [physician_name(p) for p in physicians]
-    return "; ".join(names) if names else None
+    if not names:
+        return None
+    limit = LEGACY_REQUESTED_BY_LIMIT
+    joined = "; ".join(names)
+    if len(joined) <= limit:
+        return joined
+    kept: List[str] = []
+    for index, name in enumerate(names):
+        candidate = "; ".join(kept + [name])
+        suffix = f"; +{len(names) - index - 1} más"
+        if len(candidate) + (len(suffix) if index < len(names) - 1 else 0) > limit:
+            break
+        kept.append(name)
+    if not kept:
+        return names[0][: limit - 1] + "…"
+    return "; ".join(kept) + f"; +{len(names) - len(kept)} más"
 
 
 def order_physicians(session: Session, order: Order) -> List[RequestingPhysician]:

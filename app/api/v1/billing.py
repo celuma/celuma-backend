@@ -5,6 +5,7 @@ from datetime import datetime
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.models.billing import Invoice, Payment, InvoiceItem
+from app.services.order_lifecycle import lock_order_for_billing
 from app.models.laboratory import Order
 from app.models.tenant import Tenant, Branch
 from app.models.user import AppUser
@@ -290,6 +291,8 @@ def create_invoice(
         raise HTTPException(404, "Order not found")
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Order does not belong to your tenant")
+    # Céluma 1.4 (#11): same lock protocol as order removal; a removed order cannot gain an invoice.
+    lock_order_for_billing(session, order.id, ctx.tenant_id, not_found="Order not found")
 
     # Check if invoice_number is unique for this branch
     existing_invoice = session.exec(
@@ -479,6 +482,9 @@ def add_invoice_item(
     
     if str(invoice.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Invoice does not belong to your tenant")
+    # Céluma 1.4 (#11): same lock protocol as order removal and payments.
+    lock_order_for_billing(session, invoice.order_id, ctx.tenant_id)
+    session.refresh(invoice)
     
     # Calculate subtotal
     subtotal = item_data.quantity * item_data.unit_price
@@ -543,6 +549,9 @@ def update_invoice_item(
     
     if str(invoice.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Invoice does not belong to your tenant")
+    # Céluma 1.4 (#11): same lock protocol as order removal and payments.
+    lock_order_for_billing(session, invoice.order_id, ctx.tenant_id)
+    session.refresh(invoice)
     
     # Get item and verify it belongs to the invoice
     item = session.get(InvoiceItem, item_id)
@@ -645,6 +654,9 @@ def create_payment(
         raise HTTPException(404, "Invoice not found")
     if str(invoice.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Invoice does not belong to your tenant")
+    # Céluma 1.4 (#11): same lock protocol as order removal; refuses the invoice of a removed capture.
+    lock_order_for_billing(session, invoice.order_id, ctx.tenant_id)
+    session.refresh(invoice)
 
     payment = Payment(
         tenant_id=payment_data.tenant_id,

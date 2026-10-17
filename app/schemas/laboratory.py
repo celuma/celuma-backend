@@ -1,4 +1,4 @@
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -103,7 +103,7 @@ class OrderCreate(_OrderRequestFields):
     branch_id: str
     patient_id: Optional[str] = None
     study_type_id: str
-    requested_by: Optional[str] = None
+    requested_by: Optional[str] = Field(default=None, max_length=255)  # legacy varchar(255): refuse, never truncate
     notes: Optional[str] = None
     created_by: Optional[str] = None
 
@@ -363,7 +363,7 @@ class OrderUnifiedCreate(_OrderRequestFields):
     branch_id: str
     patient_id: Optional[str] = None
     study_type_id: str  # Obligatorio
-    requested_by: Optional[str] = None
+    requested_by: Optional[str] = Field(default=None, max_length=255)  # legacy varchar(255): refuse, never truncate
     notes: Optional[str] = None
     created_by: Optional[str] = None
     samples: List[UnifiedSampleCreate]

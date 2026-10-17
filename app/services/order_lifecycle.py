@@ -217,3 +217,24 @@ def lock_and_guard(session: Session, order_id, tenant_id) -> Order:
     if not eligibility.allowed:
         raise LifecycleError(eligibility.blockers)
     return order
+
+
+def lock_order_for_billing(session: Session, order_id, tenant_id, *, not_found: str = "Invoice not found") -> Order:
+    """Lock protocol shared by removal and EVERY billing writer (payment, invoice creation, invoice items).
+
+    Takes the order lifecycle lock first, then re-reads the order fresh (bypassing the identity map and
+    the removed-record filter) and refuses a foreign or REMOVED order with a 404: the invoice of a
+    removed capture is hidden from billing, so no payment or item may commit against it. Because removal
+    reads payment evidence under this same lock, exactly one of {payment commits, removal commits} wins:
+    a payment already in flight makes removal wait and then refuse (`invoice_has_payments`); a removal
+    already in flight makes the payment wait and then 404. Lock order is lifecycle lock -> invoice/payment
+    rows, never the reverse, so it cannot deadlock with removal, report submission or sample creation.
+    """
+    lock_order(session, order_id)
+    order = session.exec(
+        select(Order).where(Order.id == order_id, Order.tenant_id == tenant_id)
+        .execution_options(populate_existing=True, **{INCLUDE_REMOVED: True})
+    ).first()
+    if order is None or order.removed_at is not None:
+        raise HTTPException(404, not_found)
+    return order

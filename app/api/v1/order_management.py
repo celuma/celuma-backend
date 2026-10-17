@@ -163,10 +163,11 @@ def update_order(
     fields = data.model_fields_set
 
     if "requesting_physician_ids" in fields:
-        physicians = order_management.load_physicians(session, order.tenant_id, data.requesting_physician_ids)
+        previous = order_management.order_physicians(session, order)
+        physicians = order_management.load_physicians(
+            session, order.tenant_id, data.requesting_physician_ids, keep_inactive=[p.id for p in previous])
         if not physicians and not order.patient_id:
             raise HTTPException(400, "An order without a patient needs at least one requesting physician")
-        previous = order_management.order_physicians(session, order)
         if [p.id for p in physicians] != [p.id for p in previous]:
             changes_old["requesting_physician_ids"] = [str(p.id) for p in previous]
             changes_new["requesting_physician_ids"] = [str(p.id) for p in physicians]
