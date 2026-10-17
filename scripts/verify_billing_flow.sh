@@ -88,7 +88,6 @@ ORDER_PAYLOAD='{
     "requested_by": "Dr. Test",
     "notes": "Prueba de verificación de facturación",
     "samples": [{
-        "sample_code": "TEST-'$(date +%s)'",
         "sample_type_id": "'$SAMPLE_TYPE_ID'",
         "notes": "Muestra de prueba"
     }]

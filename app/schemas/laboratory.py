@@ -1,9 +1,11 @@
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from app.schemas.report import ReportMetaResponse, ReportDetailResponse
 from app.schemas.patient import PatientFullResponse
 from app.schemas.sample_type import SampleTypeRef
+from app.services import order_management
 
 
 def _reject_retired_type_field(data):
@@ -12,6 +14,43 @@ def _reject_retired_type_field(data):
     if isinstance(data, dict) and "type" in data:
         raise ValueError("'type' was removed in Céluma 1.4; send 'sample_type_id' (an active sample type of your laboratory)")
     return data
+
+
+def _reject_typed_codes(data):
+    """Registration is automatic (Céluma 1.4): a request that still sends `order_code` or
+    `sample_code` is refused explicitly instead of silently ignored, so no client believes a code it
+    typed was used. A sample's code can only be changed afterwards through the controlled
+    correction action."""
+    if isinstance(data, dict):
+        for key in ("order_code", "sample_code"):
+            if key in data:
+                raise PydanticCustomError(
+                    "numbering_manual_code_not_supported",
+                    "'{field}' is no longer accepted: order and sample codes are generated automatically. "
+                    "Omit it; a sample code can be corrected later with POST /laboratory/samples/{{id}}/code-correction",
+                    {"field": key},
+                )
+    return data
+
+
+class _OrderRequestFields(BaseModel):
+    """Requesting physicians and expediente shared by both order-creation payloads (#16)."""
+    #: Deprecated single-physician alias of `requesting_physician_ids`.
+    requesting_physician_id: Optional[str] = None
+    #: External requesting physicians, no primary; display order only.
+    requesting_physician_ids: Optional[List[str]] = None
+    #: Optional textual request reference; leading zeroes are preserved.
+    expediente: Optional[str] = None
+
+    @field_validator("requesting_physician_ids")
+    @classmethod
+    def _physician_ids(cls, v):
+        return order_management.normalize_physician_ids(v)
+
+    @field_validator("expediente")
+    @classmethod
+    def _expediente(cls, v):
+        return order_management.normalize_expediente(v)
 
 
 # --- User Reference for Collaboration (defined early) ---
@@ -58,17 +97,20 @@ class LabelWithInheritance(BaseModel):
     inherited: bool  # True if inherited from order, False if own label
 
 
-class OrderCreate(BaseModel):
-    """Schema for creating an order"""
+class OrderCreate(_OrderRequestFields):
+    """Schema for creating an order. The order code is always generated (Céluma 1.4)."""
     tenant_id: str
     branch_id: str
     patient_id: Optional[str] = None
-    requesting_physician_id: Optional[str] = None
     study_type_id: str
-    order_code: Optional[str] = None
-    requested_by: Optional[str] = None
+    requested_by: Optional[str] = Field(default=None, max_length=255)  # legacy varchar(255): refuse, never truncate
     notes: Optional[str] = None
     created_by: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_typed_codes(cls, data):
+        return _reject_typed_codes(data)
 
 
 class OrderResponse(BaseModel):
@@ -91,7 +133,12 @@ class OrderDetailResponse(BaseModel):
     tenant_id: str
     branch_id: str
     requested_by: Optional[str] = None
+    #: Legacy single physician: filled only when exactly one physician is listed (never a "primary").
     requesting_physician: Optional[RequestingPhysicianRef] = None
+    #: Every external requesting physician of the order, in display order (no primary).
+    requesting_physicians: List[RequestingPhysicianRef] = []
+    #: Optional textual request reference (leading zeroes preserved).
+    expediente: Optional[str] = None
     notes: Optional[str] = None
     billed_lock: Optional[bool] = None
     report_id: Optional[str] = None
@@ -235,8 +282,6 @@ class SampleCreate(BaseModel):
     tenant_id: str
     branch_id: str
     order_id: str
-    #: Optional (Céluma 1.4, #8): omitted/blank = generated monthly code; supplied = manual override.
-    sample_code: Optional[str] = None
     sample_type_id: str  # required: every new sample has an active catalog type
     notes: Optional[str] = None
     collected_at: Optional[datetime] = None
@@ -245,7 +290,7 @@ class SampleCreate(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _no_legacy_type(cls, data):
-        return _reject_retired_type_field(data)
+        return _reject_typed_codes(_reject_retired_type_field(data))
 
 class SampleResponse(BaseModel):
     """Schema for sample response"""
@@ -299,9 +344,7 @@ class SampleImageUploadResponse(BaseModel):
 
 
 class UnifiedSampleCreate(BaseModel):
-    """Input schema for creating a sample as part of unified order creation."""
-    #: Optional (Céluma 1.4, #8): omitted/blank = generated monthly code; supplied = manual override.
-    sample_code: Optional[str] = None
+    """Input schema for creating a sample as part of unified order creation (its code is generated)."""
     sample_type_id: str
     notes: Optional[str] = None
     collected_at: Optional[datetime] = None
@@ -310,21 +353,25 @@ class UnifiedSampleCreate(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _no_legacy_type(cls, data):
-        return _reject_retired_type_field(data)
+        return _reject_typed_codes(_reject_retired_type_field(data))
 
 
-class OrderUnifiedCreate(BaseModel):
-    """Unified create: create lab order and one or more samples in one operation."""
+class OrderUnifiedCreate(_OrderRequestFields):
+    """Unified create: create lab order and one or more samples in one operation.
+    The order code and every sample code are generated."""
     tenant_id: str
     branch_id: str
     patient_id: Optional[str] = None
-    requesting_physician_id: Optional[str] = None
     study_type_id: str  # Obligatorio
-    order_code: Optional[str] = None  # Optional, generated automatically
-    requested_by: Optional[str] = None
+    requested_by: Optional[str] = Field(default=None, max_length=255)  # legacy varchar(255): refuse, never truncate
     notes: Optional[str] = None
     created_by: Optional[str] = None
     samples: List[UnifiedSampleCreate]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_typed_codes(cls, data):
+        return _reject_typed_codes(data)
 
 
 class OrderUnifiedResponse(BaseModel):
@@ -430,6 +477,8 @@ class OrderListItem(BaseModel):
     branch: BranchRef
     patient: Optional[PatientRef] = None
     requesting_physician: Optional[RequestingPhysicianRef] = None
+    requesting_physicians: List[RequestingPhysicianRef] = []
+    expediente: Optional[str] = None
     requested_by: Optional[str] = None
     notes: Optional[str] = None
     created_at: Optional[str] = None

@@ -32,7 +32,16 @@ class Order(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     invoice_id: Optional[UUID] = Field(foreign_key="invoice.id", default=None)  # 1-to-1 relationship with invoice
     study_type_id: Optional[UUID] = Field(foreign_key="study_type.id", default=None)
     # NOTE: assignees and reviewers columns removed - now in 'assignment' table
-    
+
+    # Céluma 1.4 (#16): optional textual request reference (e.g. an ISSSTE expediente number). A string, so
+    # leading zeroes survive; never a physician name and never an order/sample code.
+    expediente: Optional[str] = Field(max_length=100, default=None)
+    # Céluma 1.4 (#11): auditable operational removal (tombstone). A removed order keeps its row, code, ledger
+    # entry and evidence; every ordinary query hides it (see app/core/soft_removal.py).
+    removed_at: Optional[datetime] = Field(default=None)
+    removed_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
+    removal_reason: Optional[str] = Field(default=None)
+
     # Basic relationships only
     samples: List["Sample"] = Relationship(back_populates="order")
     # No Order.report relationship: use order.report_id + session.get(Report, order.report_id)
@@ -62,7 +71,12 @@ class Sample(BaseModel, TenantMixin, BranchMixin, table=True):
     received_at: Optional[datetime] = Field(default=None)
     notes: Optional[str] = Field(default=None)
     # NOTE: assignees column removed - now in 'assignment' table
-    
+
+    # Céluma 1.4 (#11): operational removal tombstone (see Order).
+    removed_at: Optional[datetime] = Field(default=None)
+    removed_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
+    removal_reason: Optional[str] = Field(default=None)
+
     # Basic relationships only
     order: "Order" = Relationship(back_populates="samples")
     images: List["SampleImage"] = Relationship(back_populates="sample")

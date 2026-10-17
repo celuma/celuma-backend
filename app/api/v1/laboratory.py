@@ -46,7 +46,7 @@ from app.services.list_pagination import (
     sort_field,
     uuid_filter,
 )
-from app.services import idempotency, numbering
+from app.services import idempotency, numbering, order_lifecycle, order_management
 from app.services.usage import UsageService
 from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from datetime import datetime
@@ -144,6 +144,11 @@ def _requesting_physician_ref(physician: Optional[RequestingPhysician]) -> Optio
         institution=physician.institution,
         email=physician.email,
     )
+
+
+def _physician_refs(session: Session, order: Order) -> List[RequestingPhysicianRef]:
+    """All requesting physicians of the order, in the display order the user chose (no primary)."""
+    return [_requesting_physician_ref(p) for p in order_management.order_physicians(session, order)]
 
 
 def _patient_ref(patient: Optional[Patient]) -> Optional[PatientRef]:
@@ -407,15 +412,13 @@ def create_order(
         original = session.get(Order, claim.receipt.resources[0]["id"])
         return idempotency.replayed(_order_response(original))
 
-    if not order_data.patient_id and not order_data.requesting_physician_id:
+    physician_ids = order_management.resolve_requested_ids(
+        order_data.requesting_physician_ids, order_data.requesting_physician_id)
+    if not order_data.patient_id and not physician_ids:
         raise HTTPException(400, "Patient or requesting physician is required")
     patient = _validate_patient(session, order_data.patient_id, order_data.tenant_id)
-    requesting_physician = _validate_requesting_physician(
-        session,
-        order_data.requesting_physician_id,
-        order_data.tenant_id,
-    )
-    
+    physicians = order_management.load_physicians(session, order_data.tenant_id, physician_ids)
+
     # Verify study_type (now required)
     from app.models.study_type import StudyType
     study_type = session.get(StudyType, order_data.study_type_id)
@@ -423,57 +426,33 @@ def create_order(
         raise HTTPException(404, "Study type not found")
     if str(study_type.tenant_id) != str(order_data.tenant_id):
         raise HTTPException(403, "Study type does not belong to this tenant")
-    
-    # Céluma 1.4 (#8): monthly code from the allocation service, or a manual
-    # override (see celuma-engineering/specs/laboratory/monthly-numbering.md).
-    order_settings = numbering.get_settings(session, tenant.id, numbering.ORDER)
-    supplied_order_code = numbering.normalize_supplied(order_data.order_code)
-    order_allocation = None
-    if numbering.check_mode(order_settings, supplied_order_code, numbering.can_enter_manual(session, user)):
-        order_allocation = numbering.allocate_batch(
-            session, tenant_id=tenant.id, instant=numbering.now(),
-            requests=[numbering.AllocationRequest(
-                "order", numbering.ORDER, study_type.id, study_type.code, branch.id, branch.code, branch.timezone)],
-            settings_by_kind={numbering.ORDER: order_settings}, actor_id=ctx.user_id,
-        )["order"]
-        order_code = order_allocation.code
-    else:
-        order_code = supplied_order_code
-        numbering.claim_manual_codes(session, tenant.id, numbering.ORDER, [order_code])
 
-    # Check if order_code is unique for this tenant
-    existing_order = session.exec(
-        select(Order).where(
-            Order.order_code == order_code,
-            Order.tenant_id == order_data.tenant_id
-        )
-    ).first()
-    
-    if existing_order:
-        raise HTTPException(400, "Order code already exists for this tenant")
-    
+    # Céluma 1.4 (#8, automatic registration): the order code is ALWAYS generated here; it is never
+    # typed (see celuma-engineering/specs/laboratory/monthly-numbering.md).
+    order_settings = numbering.get_settings(session, tenant.id, numbering.ORDER)
+    order_allocation = numbering.allocate_batch(
+        session, tenant_id=tenant.id, instant=numbering.now(),
+        requests=[numbering.AllocationRequest(
+            "order", numbering.ORDER, study_type.id, study_type.code, branch.id, branch.code, branch.timezone)],
+        settings_by_kind={numbering.ORDER: order_settings}, actor_id=ctx.user_id,
+    )["order"]
+
     order = Order(
         tenant_id=order_data.tenant_id,
         branch_id=order_data.branch_id,
         patient_id=order_data.patient_id,
-        requesting_physician_id=order_data.requesting_physician_id,
-        order_code=order_code,
-        requested_by=order_data.requested_by or (
-            requesting_physician.full_name or f"{requesting_physician.first_name} {requesting_physician.last_name}".strip()
-            if requesting_physician else None
-        ),
+        order_code=order_allocation.code,
+        requested_by=order_data.requested_by or order_management.derive_requested_by(physicians),
+        expediente=order_data.expediente,
         notes=order_data.notes,
         created_by=order_data.created_by,
         study_type_id=order_data.study_type_id
     )
-    
+
     session.add(order)
     session.flush()  # Get order.id before creating invoice
-    if order_allocation:
-        numbering.attach_entity(session, order_allocation, order.id)
-    else:
-        numbering.audit_manual_code(session, tenant_id=tenant.id, user_id=user.id, kind=numbering.ORDER,
-                                    entity_id=order.id, code=order.order_code)
+    numbering.attach_entity(session, order_allocation, order.id)
+    order_management.set_order_physicians(session, order, physicians)
 
     _materialize_default_reviewer(session, order)
 
@@ -494,6 +473,45 @@ def create_order(
     session.commit()
     return response
 
+def _order_detail_response(session: Session, order: Order, tenant_id: str) -> OrderDetailResponse:
+    """The order detail representation (shared by the read endpoint and the edit endpoints)."""
+    requesting_physician = session.get(RequestingPhysician, order.requesting_physician_id) if order.requesting_physician_id else None
+
+    # Get assignees from Assignment table
+    assignee_users = _get_order_assignees(session, order.id, tenant_id)
+
+    # Get reviewers with status from Assignment + ReportReview tables
+    reviewers_with_status = _get_order_reviewers_with_status(session, order.id, tenant_id)
+
+    # Get labels
+    label_ids = session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == order.id)).all()
+    labels = []
+    if label_ids:
+        labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
+
+    return OrderDetailResponse(
+        id=str(order.id),
+        order_code=order.order_code,
+        status=order.status,
+        patient_id=str(order.patient_id) if order.patient_id else None,
+        requesting_physician_id=str(order.requesting_physician_id) if order.requesting_physician_id else None,
+        tenant_id=str(order.tenant_id),
+        branch_id=str(order.branch_id),
+        requested_by=order.requested_by,
+        requesting_physicians=_physician_refs(session, order),
+        expediente=order.expediente,
+        requesting_physician=_requesting_physician_ref(requesting_physician),
+        notes=order.notes,
+        billed_lock=order.billed_lock,
+        report_id=str(order.report_id) if order.report_id else None,
+        invoice_id=str(order.invoice_id) if order.invoice_id else None,
+        study_type_id=str(order.study_type_id) if order.study_type_id else None,
+        assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
+        reviewers=reviewers_with_status,
+        labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
+    )
+
+
 @router.get("/orders/{order_id}", response_model=OrderDetailResponse)
 def get_order(
     order_id: str,
@@ -508,39 +526,7 @@ def get_order(
         raise HTTPException(404, "Order not found")
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Order not found")
-    requesting_physician = session.get(RequestingPhysician, order.requesting_physician_id) if order.requesting_physician_id else None
-    
-    # Get assignees from Assignment table
-    assignee_users = _get_order_assignees(session, order.id, ctx.tenant_id)
-    
-    # Get reviewers with status from Assignment + ReportReview tables
-    reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
-    
-    # Get labels
-    label_ids = session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == order_id)).all()
-    labels = []
-    if label_ids:
-        labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
-    
-    return OrderDetailResponse(
-        id=str(order.id),
-        order_code=order.order_code,
-        status=order.status,
-        patient_id=str(order.patient_id) if order.patient_id else None,
-        requesting_physician_id=str(order.requesting_physician_id) if order.requesting_physician_id else None,
-        tenant_id=str(order.tenant_id),
-        branch_id=str(order.branch_id),
-        requested_by=order.requested_by,
-        requesting_physician=_requesting_physician_ref(requesting_physician),
-        notes=order.notes,
-        billed_lock=order.billed_lock,
-        report_id=str(order.report_id) if order.report_id else None,
-        invoice_id=str(order.invoice_id) if order.invoice_id else None,
-        study_type_id=str(order.study_type_id) if order.study_type_id else None,
-        assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
-        reviewers=reviewers_with_status,
-        labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
-    )
+    return _order_detail_response(session, order, ctx.tenant_id)
 
 
 @router.patch("/orders/{order_id}/notes", response_model=OrderDetailResponse)
@@ -551,22 +537,27 @@ def update_order_notes(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Update the notes/description of an order (requires lab:update_order)."""
+    """Update the notes/description of an order (requires lab:update_order).
+
+    Céluma 1.4 (#9): notes are part of the basic-edit allowlist, so this older endpoint follows the
+    SAME rule as `PATCH /laboratory/orders/{id}` (Reception through Diagnosis, no review/approval/
+    signing/publication evidence, checked under the order lock). A form-only restriction would leave
+    this route as a bypass.
+    """
     _require(user.id, "lab:update_order", session)
-    order = session.get(Order, order_id)
-    if not order:
+    probe = session.get(Order, order_id)
+    if not probe or str(probe.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Order not found")
-    if str(order.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Order not found")
-    
+    order = order_lifecycle.lock_and_guard(session, order_id, ctx.tenant_id)
+
     old_notes = order.notes
     new_notes = notes_data.notes
-    
+
     # Only update and create event if notes actually changed
     if old_notes != new_notes:
         order.notes = new_notes
         session.add(order)
-        
+
         # Create timeline event for notes update
         event = OrderEvent(
             tenant_id=order.tenant_id,
@@ -584,40 +575,9 @@ def update_order_notes(
             created_by=user.id,
         )
         session.add(event)
-        session.commit()
-        session.refresh(order)
-    
-    # Get assignees from Assignment table
-    assignee_users = _get_order_assignees(session, order.id, ctx.tenant_id)
-    
-    # Get reviewers with status from Assignment + ReportReview tables
-    reviewers_with_status = _get_order_reviewers_with_status(session, order.id, ctx.tenant_id)
-    
-    # Get labels
-    label_ids = session.exec(select(OrderLabel.label_id).where(OrderLabel.order_id == order_id)).all()
-    labels = []
-    if label_ids:
-        labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
-    
-    return OrderDetailResponse(
-        id=str(order.id),
-        order_code=order.order_code,
-        status=order.status,
-        patient_id=str(order.patient_id) if order.patient_id else None,
-        requesting_physician_id=str(order.requesting_physician_id) if order.requesting_physician_id else None,
-        tenant_id=str(order.tenant_id),
-        branch_id=str(order.branch_id),
-        requested_by=order.requested_by,
-        requesting_physician=_requesting_physician_ref(session.get(RequestingPhysician, order.requesting_physician_id) if order.requesting_physician_id else None),
-        notes=order.notes,
-        billed_lock=order.billed_lock,
-        report_id=str(order.report_id) if order.report_id else None,
-        invoice_id=str(order.invoice_id) if order.invoice_id else None,
-        study_type_id=str(order.study_type_id) if order.study_type_id else None,
-        assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
-        reviewers=reviewers_with_status,
-        labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
-    )
+    session.commit()
+    session.refresh(order)
+    return _order_detail_response(session, order, ctx.tenant_id)
 
 
 # --- Order Comments Endpoints ---
@@ -1319,43 +1279,29 @@ def create_sample(
         idempotency.verify_resources(session, claim)
         return idempotency.replayed(_sample_response(session, session.get(Sample, claim.receipt.resources[0]["id"])))
 
+    # Céluma 1.4 (#11): same order lock as removal, edit and review submission, so a sample can never be
+    # added to an order that is being removed (taken after the idempotency lock, before any counter).
+    order_lifecycle.lock_and_refresh_order(session, order)
+
     # Céluma 1.4 (#17): a new sample requires an active type of THIS tenant.
     sample_type = require_active_sample_types(session, ctx.tenant_id, [sample_data.sample_type_id])[
         sample_data.sample_type_id
     ]
 
-    # Céluma 1.4 (#8): monthly code per sample type, or a manual override.
+    # Céluma 1.4 (#8, automatic registration): the sample code is ALWAYS generated, per sample type.
     sample_settings = numbering.get_settings(session, tenant.id, numbering.SAMPLE)
-    supplied_sample_code = numbering.normalize_supplied(sample_data.sample_code)
-    sample_allocation = None
-    if numbering.check_mode(sample_settings, supplied_sample_code, numbering.can_enter_manual(session, user)):
-        sample_allocation = numbering.allocate_batch(
-            session, tenant_id=tenant.id, instant=numbering.now(),
-            requests=[numbering.AllocationRequest(
-                "sample", numbering.SAMPLE, sample_type.id, sample_type.code, branch.id, branch.code, branch.timezone)],
-            settings_by_kind={numbering.SAMPLE: sample_settings}, actor_id=ctx.user_id,
-        )["sample"]
-        sample_code = sample_allocation.code
-    else:
-        sample_code = supplied_sample_code
-        numbering.claim_manual_codes(session, tenant.id, numbering.SAMPLE, [sample_code])
+    sample_allocation = numbering.allocate_batch(
+        session, tenant_id=tenant.id, instant=numbering.now(),
+        requests=[numbering.AllocationRequest(
+            "sample", numbering.SAMPLE, sample_type.id, sample_type.code, branch.id, branch.code, branch.timezone)],
+        settings_by_kind={numbering.SAMPLE: sample_settings}, actor_id=ctx.user_id,
+    )["sample"]
 
-    # Check if sample_code is unique for this order
-    existing_sample = session.exec(
-        select(Sample).where(
-            Sample.sample_code == sample_code,
-            Sample.order_id == sample_data.order_id
-        )
-    ).first()
-    
-    if existing_sample:
-        raise HTTPException(400, "Sample code already exists for this order")
-    
     sample = Sample(
         tenant_id=sample_data.tenant_id,
         branch_id=sample_data.branch_id,
         order_id=sample_data.order_id,
-        sample_code=sample_code,
+        sample_code=sample_allocation.code,
         sample_type_id=sample_type.id,
         notes=sample_data.notes,
         collected_at=sample_data.collected_at,
@@ -1364,11 +1310,7 @@ def create_sample(
     
     session.add(sample)
     session.flush()  # Get sample.id for event
-    if sample_allocation:
-        numbering.attach_entity(session, sample_allocation, sample.id)
-    else:
-        numbering.audit_manual_code(session, tenant_id=tenant.id, user_id=user.id, kind=numbering.SAMPLE,
-                                    entity_id=sample.id, code=sample.sample_code)
+    numbering.attach_entity(session, sample_allocation, sample.id)
     
     # Create SAMPLE_CREATED event
     sample_created_event = OrderEvent(
@@ -1455,9 +1397,8 @@ def create_order_with_samples(
 ):
     """Create a new laboratory order and multiple samples in one operation (requires lab:create_order and lab:create_sample).
 
-    - Validates tenant, branch, and patient
-    - Generates order_code automatically if not provided
-    - Ensures `order_code` uniqueness per tenant
+    - Validates tenant, branch, patient and the requesting physicians (a set, no primary)
+    - Generates the order code and every sample code automatically (none is accepted from the client)
     - Creates order and all samples atomically
     - Idempotent: `Idempotency-Key` is required (428 without it); see `create_order`
     """
@@ -1488,14 +1429,11 @@ def create_order_with_samples(
             session, session.get(Order, claim.receipt.resources[0]["id"]),
             [session.get(Sample, r["id"]) for r in claim.receipt.resources[1:]],
         ))
-    if not payload.patient_id and not payload.requesting_physician_id:
+    physician_ids = order_management.resolve_requested_ids(payload.requesting_physician_ids, payload.requesting_physician_id)
+    if not payload.patient_id and not physician_ids:
         raise HTTPException(400, "Patient or requesting physician is required")
     patient = _validate_patient(session, payload.patient_id, payload.tenant_id)
-    requesting_physician = _validate_requesting_physician(
-        session,
-        payload.requesting_physician_id,
-        payload.tenant_id,
-    )
+    physicians = order_management.load_physicians(session, payload.tenant_id, physician_ids)
 
     # Verify study_type (now required)
     from app.models.study_type import StudyType
@@ -1511,96 +1449,53 @@ def create_order_with_samples(
         session, ctx.tenant_id, [s.sample_type_id for s in payload.samples]
     )
 
-    # Céluma 1.4 (#8): decide, before anything is written, which codes are
-    # generated and which are manual overrides, then allocate everything in
-    # one deterministic order (order scope first, then sample scopes by id).
+    # Céluma 1.4 (#8, automatic registration): the order code and EVERY sample code are generated,
+    # allocated in one deterministic order (order first, then sample counters by type id), so
+    # concurrent unified requests cannot deadlock on counters.
     order_settings = numbering.get_settings(session, tenant.id, numbering.ORDER)
     sample_settings = numbering.get_settings(session, tenant.id, numbering.SAMPLE)
-    supplied_order_code = numbering.normalize_supplied(payload.order_code)
-    supplied_sample_codes = [numbering.normalize_supplied(s.sample_code) for s in payload.samples]
-    requests: list = []
-    permitted = numbering.can_enter_manual(session, user)
-    if numbering.check_mode(order_settings, supplied_order_code, permitted):
+    requests: list = [numbering.AllocationRequest(
+        "order", numbering.ORDER, study_type.id, study_type.code, branch.id, branch.code, branch.timezone)]
+    for idx, s in enumerate(payload.samples):
+        st = sample_types[s.sample_type_id]
         requests.append(numbering.AllocationRequest(
-            "order", numbering.ORDER, study_type.id, study_type.code, branch.id, branch.code, branch.timezone))
-    manual_sample_codes: set[str] = set()
-    for idx, (s, supplied) in enumerate(zip(payload.samples, supplied_sample_codes)):
-        if numbering.check_mode(sample_settings, supplied, permitted):
-            st = sample_types[s.sample_type_id]
-            requests.append(numbering.AllocationRequest(
-                ("sample", idx), numbering.SAMPLE, st.id, st.code, branch.id, branch.code, branch.timezone))
-        else:
-            # Prevent duplicate manual sample_code within this unified request
-            if supplied in manual_sample_codes:
-                raise HTTPException(400, f"Duplicate sample_code in request: {supplied}")
-            manual_sample_codes.add(supplied)
-    if supplied_order_code:
-        numbering.claim_manual_codes(session, tenant.id, numbering.ORDER, [supplied_order_code])
-    numbering.claim_manual_codes(session, tenant.id, numbering.SAMPLE, manual_sample_codes)
+            ("sample", idx), numbering.SAMPLE, st.id, st.code, branch.id, branch.code, branch.timezone))
     allocations = numbering.allocate_batch(
         session, tenant_id=tenant.id, instant=numbering.now(), requests=requests,
         settings_by_kind={numbering.ORDER: order_settings, numbering.SAMPLE: sample_settings},
         actor_id=ctx.user_id,
-    ) if requests else {}
-    order_allocation = allocations.get("order")
-    order_code = order_allocation.code if order_allocation else supplied_order_code
-
-    # Ensure order_code unique per tenant
-    existing = session.exec(
-        select(Order).where(
-            Order.order_code == order_code,
-            Order.tenant_id == payload.tenant_id,
-        )
-    ).first()
-    if existing:
-        raise HTTPException(400, "Order code already exists for this tenant")
+    )
+    order_allocation = allocations["order"]
 
     # Create order
     order = Order(
         tenant_id=payload.tenant_id,
         branch_id=payload.branch_id,
         patient_id=payload.patient_id,
-        requesting_physician_id=payload.requesting_physician_id,
-        order_code=order_code,
-        requested_by=payload.requested_by or (
-            requesting_physician.full_name or f"{requesting_physician.first_name} {requesting_physician.last_name}".strip()
-            if requesting_physician else None
-        ),
+        order_code=order_allocation.code,
+        requested_by=payload.requested_by or order_management.derive_requested_by(physicians),
+        expediente=payload.expediente,
         notes=payload.notes,
         created_by=payload.created_by,
         study_type_id=payload.study_type_id,
     )
     session.add(order)
     session.flush()  # get order.id for samples
-    if order_allocation:
-        numbering.attach_entity(session, order_allocation, order.id)
-    else:
-        numbering.audit_manual_code(session, tenant_id=tenant.id, user_id=user.id, kind=numbering.ORDER,
-                                    entity_id=order.id, code=order.order_code)
+    numbering.attach_entity(session, order_allocation, order.id)
+    order_management.set_order_physicians(session, order, physicians)
 
     _materialize_default_reviewer(session, order)
 
     # Create samples
     created_samples: list[Sample] = []
     for idx, s in enumerate(payload.samples):
-        sample_allocation = allocations.get(("sample", idx))
-        sample_code = sample_allocation.code if sample_allocation else supplied_sample_codes[idx]
-
-        # Ensure sample_code unique for this order
-        existing_sample = session.exec(
-            select(Sample).where(
-                Sample.sample_code == sample_code,
-                Sample.order_id == order.id,
-            )
-        ).first()
-        if existing_sample:
-            raise HTTPException(400, f"Sample code already exists for this order: {sample_code}")
+        sample_allocation = allocations[("sample", idx)]
 
         sample = Sample(
             tenant_id=payload.tenant_id,
             branch_id=payload.branch_id,
             order_id=order.id,
-            sample_code=sample_code,
+            sample_code=sample_allocation.code,
             sample_type_id=sample_types[s.sample_type_id].id,
             notes=s.notes,
             collected_at=s.collected_at,
@@ -1608,11 +1503,7 @@ def create_order_with_samples(
         )
         session.add(sample)
         session.flush()  # Get sample.id for event
-        if sample_allocation:
-            numbering.attach_entity(session, sample_allocation, sample.id)
-        else:
-            numbering.audit_manual_code(session, tenant_id=tenant.id, user_id=user.id, kind=numbering.SAMPLE,
-                                        entity_id=sample.id, code=sample.sample_code)
+        numbering.attach_entity(session, sample_allocation, sample.id)
         
         # Create SAMPLE_CREATED event for each sample
         sample_created_event = OrderEvent(
@@ -2185,6 +2076,8 @@ def build_order_full_detail(
         tenant_id=str(order.tenant_id),
         branch_id=str(order.branch_id),
         requested_by=order.requested_by,
+        requesting_physicians=_physician_refs(session, order),
+        expediente=order.expediente,
         requesting_physician=_requesting_physician_ref(requesting_physician),
         notes=order.notes,
         billed_lock=order.billed_lock,
@@ -2931,6 +2824,8 @@ def update_order_assignees(
         tenant_id=str(order.tenant_id),
         branch_id=str(order.branch_id),
         requested_by=order.requested_by,
+        requesting_physicians=_physician_refs(session, order),
+        expediente=order.expediente,
         notes=order.notes,
         billed_lock=order.billed_lock,
         report_id=str(order.report_id) if order.report_id else None,
@@ -3049,6 +2944,8 @@ def update_order_reviewers(
         tenant_id=str(order.tenant_id),
         branch_id=str(order.branch_id),
         requested_by=order.requested_by,
+        requesting_physicians=_physician_refs(session, order),
+        expediente=order.expediente,
         notes=order.notes,
         billed_lock=order.billed_lock,
         report_id=str(order.report_id) if order.report_id else None,
@@ -3164,6 +3061,8 @@ def update_order_labels(
         tenant_id=str(order.tenant_id),
         branch_id=str(order.branch_id),
         requested_by=order.requested_by,
+        requesting_physicians=_physician_refs(session, order),
+        expediente=order.expediente,
         notes=order.notes,
         billed_lock=order.billed_lock,
         report_id=str(order.report_id) if order.report_id else None,

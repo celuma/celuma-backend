@@ -10,6 +10,9 @@ requires the generated report to show:
     delivery_date            the report's signature date — unavailable until
                              the report is actually signed
 
+Céluma 1.4 (#16) adds a fourth server-owned key, `expediente` (the order's optional request
+reference), under exactly the same rules, and makes `requesting_physician` a list of names.
+
 These are NOT a parallel metadata representation: they are ordinary entries
 in `ReportContent.base` (`docs/celuma-1.3.1/...`; see
 `celuma-frontend/src/models/report.ts` `ReportBaseFieldConfig`), the same
@@ -52,7 +55,7 @@ from sqlmodel import Session, select
 
 from app.models.laboratory import Order, Sample
 from app.models.report import ReportVersion
-from app.models.requesting_physician import RequestingPhysician
+from app.services import order_management
 from app.models.storage import StorageObject
 from app.models.user import AppUser
 from app.services.s3 import S3Service
@@ -65,11 +68,15 @@ DELIVERY_DATE_BASE_KEY = "delivery_date"
 # The canonical existing key — see module docstring on why this is not a new
 # "physician_name" field.
 PHYSICIAN_NAME_BASE_KEY = "requesting_physician"
+# Céluma 1.4 (#16): the order's optional textual request reference. A separate key — it is never a
+# physician name and never an order/sample code.
+EXPEDIENTE_BASE_KEY = "expediente"
 
 #: The three server-owned fields, in the order `DEFAULT_BASE_FIELDS` declares
 #: them (report.ts) and `v1_3_1` §3b writes them.
 _SYSTEM_METADATA_KEYS = (
     PHYSICIAN_NAME_BASE_KEY,
+    EXPEDIENTE_BASE_KEY,
     RECEPTION_DATE_BASE_KEY,
     DELIVERY_DATE_BASE_KEY,
 )
@@ -104,20 +111,21 @@ def resolve_reception_date(session: Session, order_id) -> str:
 
 
 def resolve_requesting_physician_name(session: Session, order: Order) -> str:
-    """The order's requesting/referring physician. Catalog entry first
-    (`Order.requesting_physician_id` -> `RequestingPhysician`, the modern,
-    searchable-selector-backed relationship); the legacy free-text
-    `Order.requested_by` only when no catalog entry is linked — the same
-    fallback chain the report editor already uses client-side, now
-    authoritative server-side. Tenant-scoped: a catalog row from another
-    tenant (which should never happen, since the order itself is
-    tenant-scoped, but checked defensively) is treated as absent rather than
-    leaked."""
-    if order.requesting_physician_id:
-        physician = session.get(RequestingPhysician, order.requesting_physician_id)
-        if physician is not None and str(physician.tenant_id) == str(order.tenant_id):
-            return physician.full_name or f"{physician.first_name} {physician.last_name}".strip()
+    """The order's external requesting physicians, as one line. Céluma 1.4 (#16): an order has a SET
+    of physicians (no primary), listed in the order the user chose and joined with "; ". Catalog entries
+    first (the join table, with the pre-1.4 single column as fallback inside
+    `order_management.order_physicians`); the legacy free-text `Order.requested_by` only when no
+    catalog entry is linked. Tenant-scoped: a catalog row from another tenant is treated as absent
+    rather than leaked. An expediente is NOT part of this line (see `resolve_expediente`)."""
+    physicians = order_management.order_physicians(session, order)
+    if physicians:
+        return "; ".join(order_management.physician_name(p) for p in physicians)
     return order.requested_by or ""
+
+
+def resolve_expediente(order: Order) -> str:
+    """The order's textual request reference, verbatim (leading zeroes preserved), or empty."""
+    return order.expediente or ""
 
 
 def declared_base_fields(template: Optional[dict]) -> dict:
@@ -177,6 +185,7 @@ def apply_authoritative_report_metadata(
         PHYSICIAN_NAME_BASE_KEY: lambda: resolve_requesting_physician_name(
             session, order
         ),
+        EXPEDIENTE_BASE_KEY: lambda: resolve_expediente(order),
         # Not a fact until the report is signed — see the module docstring.
         DELIVERY_DATE_BASE_KEY: lambda: "",
     }

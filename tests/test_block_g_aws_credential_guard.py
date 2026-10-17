@@ -137,9 +137,22 @@ def test_non_production_environments_may_use_explicit_credentials(env_value):
     assert settings.aws_secret_access_key == SECRET_KEY
 
 
-def test_the_default_environment_is_not_guarded():
+def test_the_default_environment_is_not_guarded(monkeypatch):
     # `env` defaults to "dev"; local development must not require the change.
+    # The suite itself runs with ENV=test (and CI/dev shells may export ENV), and BaseSettings reads the REAL
+    # process environment, so "the variable is absent" must be made true here rather than assumed.
+    for name in ("ENV", "env"):
+        monkeypatch.delenv(name, raising=False)
     settings = build_settings(aws_access_key_id=ACCESS_KEY)
 
     assert settings.env == "dev"
     assert settings.aws_access_key_id == ACCESS_KEY
+
+
+def test_the_process_environment_variable_is_what_selects_the_environment(monkeypatch):
+    # The counterpart of the test above: an exported ENV is honoured, so the isolation above is not a no-op.
+    monkeypatch.setenv("ENV", "test")
+    assert build_settings(aws_access_key_id=ACCESS_KEY).env == "test"
+    monkeypatch.setenv("ENV", "prod")
+    with pytest.raises(ValueError):
+        build_settings(aws_access_key_id=ACCESS_KEY)

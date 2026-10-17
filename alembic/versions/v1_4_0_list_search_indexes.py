@@ -136,6 +136,45 @@ discarded enum assignments cannot be reconstructed from NULL, and catalog
 assignments made after the upgrade are lost with the table. The only way to get
 the real 1.3.x assignments back is a backup/snapshot taken before the upgrade
 (`celuma-engineering/runbooks/migrations.md`, "Sample-type catalog").
+
+===========================================================================
+§4 — Order/sample management: edits, code correction, removal, physicians
+===========================================================================
+
+Specification: `celuma-engineering/specs/laboratory/order-sample-management.md`;
+decision record: `celuma-engineering/adr/0015-order-sample-management.md`.
+Issues #9, #10, #11 and #16.
+
+**§4a — `order.expediente`.** Nullable `varchar(100)`: the optional textual
+request reference (a string, so leading zeroes survive). Existing rows get NULL.
+
+**§4b — `order_requesting_physician`.** The duplicate-free, same-tenant set of
+external requesting physicians of an order (`position` is display order only; no
+primary). **Backfill:** each existing order that has `requesting_physician_id`
+gets exactly one row (position 0) when the physician is of the same tenant, so
+nothing is lost and no primary is invented. `order.requesting_physician_id` and
+`order.requested_by` are NOT modified: they remain the legacy single-physician /
+free-text fallback and are only mirrored by the application when exactly one
+physician is listed.
+
+**§4c — tombstone columns.** `removed_at`, `removed_by`, `removal_reason` on
+`order` and `sample`, and `removed_at` on `report` (all nullable, metadata-only
+`ADD COLUMN`; nothing is rewritten). A tombstoned row keeps its identifiers.
+
+**§4d — `sample_code_correction`.** Audit trail and retirement record of
+sample-code corrections (empty).
+
+**§4e — event types and permission.** `ALTER TYPE eventtype ADD VALUE` for
+`ORDER_UPDATED`, `ORDER_REMOVED`, `SAMPLE_CODE_CORRECTED`, `SAMPLE_REMOVED`; and
+the permission `lab:remove_capture`, granted to `admin` and `superuser` only.
+
+**Downgrade of §4.** REFUSED while any order, sample or report is tombstoned: a
+1.3.1 application would show the erroneous captures again. Restore from a
+pre-upgrade snapshot instead (runbook). Otherwise it drops the new columns and
+tables (the expediente and every physician beyond the legacy single one are
+lost), deletes the timeline/audit rows of the four new event types and removes
+the permission. PostgreSQL cannot drop enum values, so the four values stay in
+`eventtype` (harmless: no row uses them after the downgrade).
 """
 from typing import Sequence, Union
 
@@ -163,6 +202,11 @@ LIST_INDEXES = (
 
 #: Capability to type a code while numbering is active (§3e).
 MANUAL_CODE_PERMISSION = "lab:enter_manual_code"
+
+#: Capability to remove an erroneous capture (§4e).
+REMOVE_CAPTURE_PERMISSION = "lab:remove_capture"
+#: Event types added by §4e (PostgreSQL cannot drop enum values, so the downgrade keeps them).
+MANAGEMENT_EVENT_TYPES = ("ORDER_UPDATED", "ORDER_REMOVED", "SAMPLE_CODE_CORRECTED", "SAMPLE_REMOVED")
 
 #: Values of the retired `sampletype` enum; only the downgrade recreates it.
 RETIRED_SAMPLE_TYPE_VALUES = ("SANGRE", "BIOPSIA", "LAMINILLA", "TEJIDO", "OTRO")
@@ -305,6 +349,71 @@ def upgrade() -> None:
     op.execute("CREATE INDEX ix_numbering_allocation_entity ON public.numbering_allocation USING btree (entity_id)")
     op.execute('CREATE INDEX ix_order_tenant_order_code ON public."order" USING btree (tenant_id, order_code)')
     op.execute("CREATE INDEX ix_sample_tenant_sample_code ON public.sample USING btree (tenant_id, sample_code)")
+    # §4a-§4e — order/sample management (#9, #10, #11, #16). Nullable columns and empty tables, plus a
+    # one-row-per-order backfill into the new physician table; no existing order/sample value changes.
+    op.execute('ALTER TABLE public."order" ADD COLUMN expediente character varying(100)')
+    for table in ('public."order"', "public.sample"):
+        op.execute(f"ALTER TABLE {table} ADD COLUMN removed_at timestamp without time zone")
+        op.execute(f"ALTER TABLE {table} ADD COLUMN removed_by uuid")
+        op.execute(f"ALTER TABLE {table} ADD COLUMN removal_reason text")
+    op.execute('ALTER TABLE public."order" ADD CONSTRAINT order_removed_by_fkey FOREIGN KEY (removed_by) REFERENCES public.app_user(id)')
+    op.execute("ALTER TABLE public.sample ADD CONSTRAINT sample_removed_by_fkey FOREIGN KEY (removed_by) REFERENCES public.app_user(id)")
+    op.execute("ALTER TABLE public.report ADD COLUMN removed_at timestamp without time zone")
+    op.execute("""
+        CREATE TABLE public.order_requesting_physician (
+            order_id                uuid NOT NULL,
+            requesting_physician_id uuid NOT NULL,
+            tenant_id               uuid NOT NULL,
+            position                integer NOT NULL,
+            created_at              timestamp without time zone NOT NULL,
+            CONSTRAINT order_requesting_physician_pkey PRIMARY KEY (order_id, requesting_physician_id),
+            CONSTRAINT uq_order_requesting_physician_position UNIQUE (order_id, position),
+            CONSTRAINT order_requesting_physician_order_id_fkey FOREIGN KEY (order_id) REFERENCES public."order"(id),
+            CONSTRAINT order_requesting_physician_physician_fkey FOREIGN KEY (requesting_physician_id) REFERENCES public.requesting_physician(id),
+            CONSTRAINT order_requesting_physician_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenant(id),
+            CONSTRAINT ck_order_requesting_physician_position CHECK (position >= 0)
+        )
+    """)
+    op.execute("CREATE INDEX ix_order_requesting_physician_tenant_id ON public.order_requesting_physician USING btree (tenant_id)")
+    op.execute("CREATE INDEX ix_order_requesting_physician_physician ON public.order_requesting_physician USING btree (requesting_physician_id)")
+    op.execute("""
+        INSERT INTO public.order_requesting_physician (order_id, requesting_physician_id, tenant_id, position, created_at)
+        SELECT o.id, o.requesting_physician_id, o.tenant_id, 0, now()
+        FROM public."order" o
+        JOIN public.requesting_physician p ON p.id = o.requesting_physician_id AND p.tenant_id = o.tenant_id
+        WHERE o.requesting_physician_id IS NOT NULL
+    """)
+    op.execute("""
+        CREATE TABLE public.sample_code_correction (
+            id            uuid NOT NULL,
+            tenant_id     uuid NOT NULL,
+            sample_id     uuid NOT NULL,
+            order_id      uuid NOT NULL,
+            old_code      character varying(100) NOT NULL,
+            new_code      character varying(100) NOT NULL,
+            reason        text NOT NULL,
+            corrected_by  uuid,
+            corrected_at  timestamp without time zone NOT NULL,
+            CONSTRAINT sample_code_correction_pkey PRIMARY KEY (id),
+            CONSTRAINT sample_code_correction_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenant(id),
+            CONSTRAINT sample_code_correction_corrected_by_fkey FOREIGN KEY (corrected_by) REFERENCES public.app_user(id)
+        )
+    """)
+    op.execute("CREATE INDEX ix_sample_code_correction_tenant_id ON public.sample_code_correction USING btree (tenant_id)")
+    op.execute("CREATE INDEX ix_sample_code_correction_sample_id ON public.sample_code_correction USING btree (sample_id)")
+    op.execute("CREATE INDEX ix_sample_code_correction_tenant_old_code ON public.sample_code_correction USING btree (tenant_id, old_code)")
+    for value in MANAGEMENT_EVENT_TYPES:
+        op.execute(f"ALTER TYPE public.eventtype ADD VALUE IF NOT EXISTS '{value}'")
+    op.execute(f"""
+        INSERT INTO public.permission (id, code, domain, display_name, description)
+        VALUES (gen_random_uuid(), '{REMOVE_CAPTURE_PERMISSION}', 'lab', 'Retirar capturas erróneas',
+                'Retirar una orden o muestra capturada por error antes de la revisión del reporte')
+    """)
+    op.execute(f"""
+        INSERT INTO public.role_permission (role_id, permission_id)
+        SELECT r.id, p.id FROM public.role r CROSS JOIN public.permission p
+        WHERE r.code IN ('admin', 'superuser') AND p.code = '{REMOVE_CAPTURE_PERMISSION}'
+    """)
 
 
 def downgrade() -> None:
@@ -315,7 +424,38 @@ def downgrade() -> None:
     extension is dropped as well: the 1.3.1 schema did not have it, and
     nothing but the 1.4 list search uses it.
     """
-    # §3 first (reverse order): counters and ledger are lost (see §3).
+    # §4 first (reverse order). Refused while tombstones exist: a 1.3.1 application would show the
+    # erroneous captures again. See the module docstring.
+    bind = op.get_bind()
+    removed = bind.exec_driver_sql(
+        'SELECT (SELECT count(*) FROM public."order" WHERE removed_at IS NOT NULL) + '
+        "(SELECT count(*) FROM public.sample WHERE removed_at IS NOT NULL) + "
+        "(SELECT count(*) FROM public.report WHERE removed_at IS NOT NULL)"
+    ).scalar()
+    if removed:
+        raise RuntimeError(
+            f"Downgrade refused: {removed} removed order/sample/report record(s) would reappear in 1.3.1. "
+            "Restore from a pre-upgrade snapshot instead (celuma-engineering/runbooks/migrations.md)."
+        )
+    op.execute(f"""
+        DELETE FROM public.role_permission WHERE permission_id IN
+            (SELECT id FROM public.permission WHERE code = '{REMOVE_CAPTURE_PERMISSION}')
+    """)
+    op.execute(f"DELETE FROM public.permission WHERE code = '{REMOVE_CAPTURE_PERMISSION}'")
+    values = ", ".join(f"'{v}'" for v in MANAGEMENT_EVENT_TYPES)
+    op.execute(f"DELETE FROM public.order_event WHERE event_type IN ({values})")
+    op.execute(f"DELETE FROM public.audit_log WHERE event_type IN ({values})")
+    op.execute("DROP TABLE public.sample_code_correction")
+    op.execute("DROP TABLE public.order_requesting_physician")
+    op.execute("ALTER TABLE public.report DROP COLUMN removed_at")
+    op.execute("ALTER TABLE public.sample DROP CONSTRAINT sample_removed_by_fkey")
+    op.execute('ALTER TABLE public."order" DROP CONSTRAINT order_removed_by_fkey')
+    for table in ('public."order"', "public.sample"):
+        op.execute(f"ALTER TABLE {table} DROP COLUMN removal_reason")
+        op.execute(f"ALTER TABLE {table} DROP COLUMN removed_by")
+        op.execute(f"ALTER TABLE {table} DROP COLUMN removed_at")
+    op.execute('ALTER TABLE public."order" DROP COLUMN expediente')
+    # §3 next: counters and ledger are lost (see §3).
     op.execute("DROP INDEX IF EXISTS public.ix_sample_tenant_sample_code")
     op.execute("DROP INDEX IF EXISTS public.ix_order_tenant_order_code")
     op.execute("DROP TABLE public.idempotency_receipt")

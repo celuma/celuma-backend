@@ -116,60 +116,24 @@ class TestPeriod:
         assert n.period_for(self.branch("UTC")) == n.Period(2026, 3)
 
 
-class TestModes:
-    """The decision matrix: activation x policy x capability (the tenant policy AND the caller's own permission)."""
+class TestRegistrationModes:
+    """Registration is always automatic: only activation chooses the scheme; the retired manual policy has no say."""
 
-    def settings(self, kind="order", **over):
-        return n.NumberingSettings(kind, active=True, **over)
+    @pytest.mark.parametrize("kind", ["order", "sample"])
+    @pytest.mark.parametrize("policy", ["allowed", "forbidden", "required"])
+    def test_scheme_depends_only_on_activation(self, kind, policy):
+        assert n.NumberingSettings(kind, active=True, manual_policy=policy).scheme == n.SCHEME_MONTHLY
+        assert n.NumberingSettings(kind, active=False, manual_policy=policy).scheme == n.SCHEME_LEGACY
 
-    def test_active_allowed_generates_when_blank_and_accepts_manual_only_with_the_capability(self):
-        s = self.settings(manual_policy="allowed")
-        assert n.check_mode(s, None, True) is True and n.check_mode(s, None, False) is True
-        assert n.check_mode(s, "MAN-1", True) is False
-        with pytest.raises(HTTPException) as exc:
-            n.check_mode(s, "MAN-1", False)
-        assert exc.value.status_code == 403 and exc.value.detail["code"] == "numbering_manual_code_forbidden"
+    def test_no_manual_registration_helpers_survive(self):
+        for gone in ("check_mode", "normalize_supplied", "manual_entry_for", "claim_manual_codes", "audit_manual_code"):
+            assert not hasattr(n, gone), gone
 
-    def test_forbidden_refuses_a_supplied_code_whoever_asks(self):
-        s = self.settings(manual_policy="forbidden")
-        assert n.check_mode(s, None, True) is True
-        for permitted in (True, False):
-            with pytest.raises(HTTPException) as exc:
-                n.check_mode(s, "MAN-1", permitted)
-            assert exc.value.status_code == 422 and exc.value.detail["code"] == "numbering_manual_code_not_allowed"
+    def test_the_capability_constant_remains_for_the_correction_action(self):
+        assert n.MANUAL_CODE_PERMISSION == "lab:enter_manual_code"
 
-    def test_required_demands_a_code_and_says_403_when_the_caller_cannot_type_one(self):
-        s = self.settings(manual_policy="required")
-        assert n.check_mode(s, "MAN-1", True) is False
-        with pytest.raises(HTTPException) as exc:
-            n.check_mode(s, None, True)
-        assert exc.value.status_code == 422 and exc.value.detail["code"] == "numbering_code_required"
-        with pytest.raises(HTTPException) as exc:
-            n.check_mode(s, None, False)
-        assert exc.value.status_code == 403
-
-    def test_inactive_keeps_the_pre_numbering_behaviour_with_no_capability_gate(self):
-        order, sample = n.NumberingSettings("order"), n.NumberingSettings("sample")
-        assert n.check_mode(order, None, False) is True and n.check_mode(order, "X", False) is False
-        assert n.check_mode(sample, "X", False) is False
-        with pytest.raises(HTTPException) as exc:
-            n.check_mode(sample, None, True)
-        assert exc.value.detail["code"] == "numbering_code_required"
-
-    def test_blank_and_whitespace_mean_not_supplied(self):
-        assert n.normalize_supplied(None) is None
-        assert n.normalize_supplied("   ") is None
-        assert n.normalize_supplied("  X1 ") == "X1"
-
-    @pytest.mark.parametrize("kind,active,policy,permitted,expected", [
-        ("order", False, "allowed", False, "optional"), ("sample", False, "allowed", False, "required"),
-        ("order", True, "allowed", True, "optional"), ("order", True, "allowed", False, "hidden"),
-        ("order", True, "forbidden", True, "hidden"), ("order", True, "required", True, "required"),
-        ("order", True, "required", False, "blocked"),
-    ])
-    def test_what_the_form_is_told(self, kind, active, policy, permitted, expected):
-        s = n.NumberingSettings(kind, active=active, manual_policy=policy)
-        assert n.manual_entry_for(s, permitted) == expected
+    def test_legacy_sources_cover_both_kinds(self):
+        assert set(n._LEGACY_SOURCE) == {n.ORDER, n.SAMPLE}
 
 
 class TestBranchToken:

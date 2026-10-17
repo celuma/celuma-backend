@@ -58,10 +58,9 @@ class Lab:
         }
 
     def unified(self, sample_codes=("BX",), study_type=None, **extra) -> dict:
-        samples = [
-            {"sample_type_id": str(self.sample_types[c].id), **({"sample_code": m} if m else {})}
-            for c, m in ((c if isinstance(c, tuple) else (c, None)) for c in sample_codes)
-        ]
+        """A unified registration payload. `sample_codes` are the sample TYPE codes of the samples (the
+        codes themselves are always generated; registration accepts none)."""
+        samples = [{"sample_type_id": str(self.sample_types[c].id)} for c in sample_codes]
         return {**self.order_payload(study_type), "samples": samples, **extra}
 
     def sample_payload(self, order_id, type_code="BX", **extra) -> dict:
