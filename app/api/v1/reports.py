@@ -23,6 +23,7 @@ from app.core.rbac import has_permission
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
 from app.services.s3 import S3Service
+from app.services import order_lifecycle
 from app.services.managed_tenant_image_service import (
     ManagedTenantImageService,
     InvalidImageError,
@@ -403,6 +404,9 @@ def create_report(
     # Verify order belongs to the tenant
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Order does not belong to your tenant")
+
+    # Céluma 1.4 (#11): same order lock as removal/edit; a removed order cannot gain a report.
+    order_lifecycle.lock_and_refresh_order(session, order)
 
     # Check if report already exists for this order
     existing_report = session.exec(
@@ -2709,6 +2713,12 @@ def submit_report(
     
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
+
+    # Céluma 1.4 (#9/#10/#11): entering review is what closes the window for direct order/sample
+    # edits and erroneous-capture removal. Take the SAME order lock those operations take, then
+    # re-read the report, so a concurrent edit/removal either completes first (and this sees its
+    # data) or waits and then sees the review evidence.
+    order_lifecycle.lock_report_order(session, report)
     
     if report.status != ReportStatus.DRAFT:
         raise HTTPException(400, f"Cannot submit report in {report.status} status")

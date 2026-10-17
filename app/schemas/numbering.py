@@ -8,6 +8,8 @@ class NumberingConfigResponse(BaseModel):
     entity_kind: str
     #: Deliberate activation; false = compatibility behaviour (orders `<code>-<n>`, samples typed by hand).
     active: bool
+    #: Legacy manual-code policy, kept readable. Since Céluma 1.4 registration is automatic and this
+    #: value no longer affects it (see `registration` and `manual_policy_in_effect`).
     manual_policy: str
     format: str
     sequence_min_width: int
@@ -17,8 +19,12 @@ class NumberingConfigResponse(BaseModel):
     timezone: str
     #: true when the tenant has no stored row (never configured, therefore not activated).
     is_default: bool
-    #: How the CALLER should be offered the code input: optional | required | hidden | blocked.
-    manual_entry: str
+    #: Always "automatic": no registration form or route accepts a typed order/sample code.
+    registration: str = "automatic"
+    #: Always false: the stored manual policy has no effect on registration any more.
+    manual_policy_in_effect: bool = False
+    #: True when the stored policy is the retired `required` (kept untouched; shown so an administrator can see it).
+    legacy_manual_policy: bool = False
     activated_at: Optional[str] = None
 
 
@@ -29,7 +35,9 @@ class NumberingConfigsResponse(BaseModel):
 
 class NumberingConfigUpdate(BaseModel):
     active: bool
-    manual_policy: str
+    #: Optional since 1.4: omitted keeps the stored value. `required` can no longer be newly set (registration
+    #: cannot demand a typed code that no longer exists); an already stored `required` is preserved untouched.
+    manual_policy: Optional[str] = None
     format: str
     sequence_min_width: StrictInt
     start_value: StrictInt = 1

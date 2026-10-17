@@ -51,6 +51,9 @@ class EventType(str, Enum):
     ORDER_CANCELLED = "ORDER_CANCELLED"
     ORDER_STATUS_CHANGED = "ORDER_STATUS_CHANGED"
     ORDER_NOTES_UPDATED = "ORDER_NOTES_UPDATED"
+    # Céluma 1.4 (#9/#11): controlled basic edit and erroneous-capture removal.
+    ORDER_UPDATED = "ORDER_UPDATED"
+    ORDER_REMOVED = "ORDER_REMOVED"
     
     # Sample events
     SAMPLE_CREATED = "SAMPLE_CREATED"
@@ -60,6 +63,9 @@ class EventType(str, Enum):
     SAMPLE_NOTES_UPDATED = "SAMPLE_NOTES_UPDATED"
     SAMPLE_DAMAGED = "SAMPLE_DAMAGED"
     SAMPLE_CANCELLED = "SAMPLE_CANCELLED"
+    # Céluma 1.4 (#10/#11): narrow code correction and erroneous-capture removal.
+    SAMPLE_CODE_CORRECTED = "SAMPLE_CODE_CORRECTED"
+    SAMPLE_REMOVED = "SAMPLE_REMOVED"
     
     # Image events
     IMAGE_UPLOADED = "IMAGE_UPLOADED"

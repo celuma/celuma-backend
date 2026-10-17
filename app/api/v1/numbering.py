@@ -54,12 +54,12 @@ def _kind(value: str) -> str:
     return value
 
 
-def _response(settings: numbering.NumberingSettings, permitted: bool, activated_at=None) -> NumberingConfigResponse:
+def _response(settings: numbering.NumberingSettings, activated_at=None) -> NumberingConfigResponse:
     return NumberingConfigResponse(
         entity_kind=settings.entity_kind, active=settings.active, manual_policy=settings.manual_policy,
         format=settings.format, sequence_min_width=settings.sequence_min_width, start_value=settings.start_value,
         scope=settings.scope, timezone=settings.timezone, is_default=settings.is_default,
-        manual_entry=numbering.manual_entry_for(settings, permitted),
+        legacy_manual_policy=settings.manual_policy == numbering.POLICY_REQUIRED,
         activated_at=activated_at.isoformat() if activated_at else None,
     )
 
@@ -85,14 +85,13 @@ def get_numbering_config(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Effective configuration of both entity kinds (inactive defaults when unset), with how the
-    caller should be offered the code input."""
+    """Effective configuration of both entity kinds (inactive defaults when unset). Registration is
+    automatic for both: no form offers a code input."""
     _require(user, "lab:read", session)
-    permitted = numbering.can_enter_manual(session, user)
     return NumberingConfigsResponse(
-        order=_response(numbering.get_settings(session, ctx.tenant_id, numbering.ORDER), permitted,
+        order=_response(numbering.get_settings(session, ctx.tenant_id, numbering.ORDER),
                         _activated_at(session, ctx.tenant_id, numbering.ORDER)),
-        sample=_response(numbering.get_settings(session, ctx.tenant_id, numbering.SAMPLE), permitted,
+        sample=_response(numbering.get_settings(session, ctx.tenant_id, numbering.SAMPLE),
                          _activated_at(session, ctx.tenant_id, numbering.SAMPLE)),
     )
 
@@ -116,12 +115,20 @@ def update_numbering_config(
     _require(user, "admin:manage_catalog", session)
     kind = _kind(entity_kind)
     problems = _problems(body.format, body.sequence_min_width, body.start_value, body.scope, body.timezone)
-    if body.manual_policy not in numbering.MANUAL_POLICIES:
+    before = numbering.get_settings(session, ctx.tenant_id, kind)
+    policy = body.manual_policy if body.manual_policy is not None else before.manual_policy
+    if policy not in numbering.MANUAL_POLICIES:
         problems.append("manual_policy must be one of: " + ", ".join(numbering.MANUAL_POLICIES))
+    elif policy == numbering.POLICY_REQUIRED and before.manual_policy != numbering.POLICY_REQUIRED:
+        # Registration is automatic: a policy that demands a typed code would make creation impossible.
+        raise HTTPException(422, {
+            "code": "numbering_manual_policy_unsupported",
+            "message": "A manual-code policy of 'required' cannot be set: order and sample codes are generated "
+                       "automatically and registration no longer accepts a typed code",
+        })
     if problems:
         raise HTTPException(422, {"code": "numbering_invalid_config", "message": "; ".join(problems)})
 
-    before = numbering.get_settings(session, ctx.tenant_id, kind)
     row = session.exec(
         select(NumberingConfig).where(NumberingConfig.tenant_id == ctx.tenant_id, NumberingConfig.entity_kind == kind)
     ).first()
@@ -131,7 +138,7 @@ def update_numbering_config(
     now = datetime.utcnow()
     if body.active and not row.activated_at:
         row.activated_at = now
-    row.active, row.manual_policy, row.format = body.active, body.manual_policy, body.format
+    row.active, row.manual_policy, row.format = body.active, policy, body.format
     row.sequence_min_width, row.start_value, row.scope = body.sequence_min_width, body.start_value, body.scope
     row.timezone = body.timezone
     row.updated_at, row.updated_by = now, user.id
@@ -147,12 +154,11 @@ def update_numbering_config(
         entity_type="numbering_config", entity_id=ctx.tenant_id,
         description=f"Numbering configuration updated ({kind})",
         old_values={**snap(before), "is_default": before.is_default},
-        new_values=snap(body),
+        new_values=snap(row),
         metadata={"entity_kind": kind, "activated": bool(body.active and not before.active)},
     )
     session.commit()
-    return _response(numbering.get_settings(session, ctx.tenant_id, kind), numbering.can_enter_manual(session, user),
-                     row.activated_at)
+    return _response(numbering.get_settings(session, ctx.tenant_id, kind), row.activated_at)
 
 
 @router.post("/preview", response_model=NumberingPreviewResponse)

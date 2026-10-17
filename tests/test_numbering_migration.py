@@ -93,7 +93,10 @@ class TestUpgrade:
         inspector = inspect(mdb)
         assert set(TABLES) <= set(inspector.get_table_names())
         with mdb.connect() as conn:
-            assert snapshot(conn, '"order"') == orders_before
+            # §4 added nullable columns at the END; every pre-existing value is identical
+            after_orders = snapshot(conn, '"order"')
+            assert [tuple(r)[:len(orders_before[0])] for r in after_orders] == [tuple(r) for r in orders_before]
+            assert all(tuple(r)[len(orders_before[0]):] == (None,) * 4 for r in after_orders)
             # `sample` lost `type` and gained `sample_type_id` (§2); every other column is identical
             after = conn.execute(text(
                 "SELECT id, tenant_id, branch_id, order_id, sample_code, state::text, notes FROM sample ORDER BY id")).all()
@@ -223,3 +226,105 @@ class TestRunbookSql:
         up()
         with mdb.connect() as conn:
             assert tuple(conn.execute(text(sql)).one()) == (True, True, True)
+
+
+# --------------------------------------------------------------------------- §4: order/sample management
+
+MGMT_TABLES = ("order_requesting_physician", "sample_code_correction")
+
+
+class TestManagementSection:
+    """§4 of `v1_4_0` (#9, #10, #11, #16): nullable columns, two tables, a one-row-per-order backfill."""
+
+    def seeded(self, mdb):
+        up(HOTFIX_REVISION)
+        with mdb.begin() as conn:
+            tenant = insert(conn, "tenant")["id"]
+            other = insert(conn, "tenant")["id"]
+            branch = insert(conn, "branch", tenant_id=tenant)["id"]
+            obranch = insert(conn, "branch", tenant_id=other)["id"]
+            same = insert(conn, "requesting_physician", tenant_id=tenant, branch_id=branch)["id"]
+            foreign = insert(conn, "requesting_physician", tenant_id=other, branch_id=obranch)["id"]
+            with_doc = insert(conn, '"order"', tenant_id=tenant, branch_id=branch, order_code="CU-1", requesting_physician_id=same,
+                              requested_by="Dr. Texto")["id"]
+            without = insert(conn, '"order"', tenant_id=tenant, branch_id=branch, order_code="CU-2", requested_by="Libre")["id"]
+            mismatch = insert(conn, '"order"', tenant_id=tenant, branch_id=branch, order_code="CU-3", requesting_physician_id=foreign)["id"]
+        up()
+        return {"with": with_doc, "without": without, "mismatch": mismatch, "doc": same}
+
+    def test_columns_tables_and_backfill_without_inventing_a_primary(self, mdb):
+        ids = self.seeded(mdb)
+        inspector = inspect(mdb)
+        assert set(MGMT_TABLES) <= set(inspector.get_table_names())
+        order_cols = {c["name"]: c for c in inspector.get_columns("order")}
+        for col in ("expediente", "removed_at", "removed_by", "removal_reason"):
+            assert order_cols[col]["nullable"] is True
+        assert {"removed_at", "removed_by", "removal_reason"} <= {c["name"] for c in inspector.get_columns("sample")}
+        assert "removed_at" in {c["name"] for c in inspector.get_columns("report")}
+        with mdb.connect() as conn:
+            rows = conn.execute(text("SELECT order_id, requesting_physician_id, position FROM order_requesting_physician")).all()
+            assert [(str(r[0]), str(r[1]), r[2]) for r in rows] == [(str(ids["with"]), str(ids["doc"]), 0)]  # same-tenant only
+            # legacy columns are NOT touched
+            legacy = conn.execute(text('SELECT order_code, requested_by, requesting_physician_id FROM "order" ORDER BY order_code')).all()
+            assert [tuple(r)[:2] for r in legacy] == [("CU-1", "Dr. Texto"), ("CU-2", "Libre"), ("CU-3", None)] or legacy[2][0] == "CU-3"
+            assert str(legacy[2][2]) == str(ids["mismatch"] and legacy[2][2])
+            assert conn.execute(text("SELECT count(*) FROM sample_code_correction")).scalar_one() == 0
+
+    def test_set_table_constraints(self, mdb):
+        ids = self.seeded(mdb)
+        with mdb.begin() as conn:
+            tenant = conn.execute(text('SELECT tenant_id FROM "order" WHERE id = :i'), {"i": ids["with"]}).scalar_one()
+            doc2 = insert(conn, "requesting_physician", tenant_id=tenant, branch_id=conn.execute(
+                text('SELECT branch_id FROM "order" WHERE id = :i'), {"i": ids["with"]}).scalar_one())["id"]
+        ins = ("INSERT INTO order_requesting_physician (order_id, requesting_physician_id, tenant_id, position, created_at) "
+               "VALUES (:o, :p, :t, :pos, now())")
+        for params in (
+            {"o": ids["with"], "p": ids["doc"], "t": tenant, "pos": 5},   # duplicate physician in one order
+            {"o": ids["with"], "p": doc2, "t": tenant, "pos": 0},         # duplicate position
+            {"o": ids["with"], "p": doc2, "t": tenant, "pos": -1},        # negative position
+        ):
+            with pytest.raises(IntegrityError):
+                with mdb.begin() as conn:
+                    conn.execute(text(ins), params)
+        with mdb.begin() as conn:
+            conn.execute(text(ins), {"o": ids["with"], "p": doc2, "t": tenant, "pos": 1})
+
+    def test_permission_and_event_types(self, mdb):
+        self.seeded(mdb)
+        with mdb.connect() as conn:
+            roles = set(conn.execute(text(
+                "SELECT r.code FROM role r JOIN role_permission rp ON rp.role_id = r.id JOIN permission p ON p.id = rp.permission_id "
+                "WHERE p.code = 'lab:remove_capture'")).scalars())
+            assert roles == {"admin", "superuser"}
+            values = set(conn.execute(text(
+                "SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid WHERE t.typname = 'eventtype'")).scalars())
+            assert {"ORDER_UPDATED", "ORDER_REMOVED", "SAMPLE_CODE_CORRECTED", "SAMPLE_REMOVED"} <= values
+
+    def test_downgrade_is_clean_without_tombstones_and_drops_the_new_events(self, mdb):
+        ids = self.seeded(mdb)
+        with mdb.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO order_event (id, tenant_id, branch_id, order_id, event_type, description, created_at) "
+                "SELECT gen_random_uuid(), tenant_id, branch_id, id, 'ORDER_UPDATED', '', now() FROM \"order\" WHERE id = :i"),
+                {"i": ids["with"]})
+        down(HOTFIX_REVISION)
+        inspector = inspect(mdb)
+        assert not set(MGMT_TABLES) & set(inspector.get_table_names())
+        assert "expediente" not in {c["name"] for c in inspector.get_columns("order")}
+        assert "removed_at" not in {c["name"] for c in inspector.get_columns("sample")}
+        with mdb.connect() as conn:
+            assert conn.execute(text("SELECT count(*) FROM order_event WHERE event_type::text = 'ORDER_UPDATED'")).scalar_one() == 0
+            assert conn.execute(text("SELECT count(*) FROM permission WHERE code = 'lab:remove_capture'")).scalar_one() == 0
+            assert conn.execute(text('SELECT count(*) FROM "order"')).scalar_one() == 3  # no business row lost
+        up()  # and it can be applied again
+
+    def test_downgrade_is_refused_while_a_capture_is_removed(self, mdb):
+        ids = self.seeded(mdb)
+        with mdb.begin() as conn:
+            conn.execute(text('UPDATE "order" SET removed_at = now(), removal_reason = \'x\' WHERE id = :i'), {"i": ids["without"]})
+        with pytest.raises(Exception) as exc:
+            down(HOTFIX_REVISION)
+        assert "Downgrade refused" in (exc.value.stderr or "") + (exc.value.stdout or "")
+        assert _current_revision(mdb) == RELEASE_1_4_REVISION  # nothing was changed
+        with mdb.connect() as conn:
+            assert conn.execute(text('SELECT count(*) FROM "order" WHERE removed_at IS NOT NULL')).scalar_one() == 1

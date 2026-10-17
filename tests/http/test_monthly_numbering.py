@@ -112,8 +112,8 @@ class TestStandaloneRoutes:
         s = client.post(SAMPLES, json=lab.sample_payload(r.json()["id"]), headers=lab.headers)
         assert s.status_code == 200, s.text
         assert s.json()["sample_code"] == "BX011026"
-        s2 = client.post(SAMPLES, json=lab.sample_payload(r.json()["id"], sample_code="  "), headers=lab.headers)
-        assert s2.json()["sample_code"] == "BX021026"  # blank = not supplied
+        s2 = client.post(SAMPLES, json=lab.sample_payload(r.json()["id"]), headers=lab.headers)
+        assert s2.json()["sample_code"] == "BX021026"
 
     def test_standalone_and_unified_share_the_same_counters(self, client, lab):
         client.post(ORDERS, json=lab.order_payload(), headers=lab.headers)
@@ -342,135 +342,101 @@ class TestRollback:
         assert [s["sample_code"] for s in ok.json()["samples"]] == ["BX011026", "TJ011026"]
 
 
-class TestManualOverride:
-    def test_a_manual_code_is_used_and_consumes_no_counter(self, client, session, lab):
-        body = make_order(client, lab, sample_codes=(("BX", "MAN-S1"),), order_code="MAN-O1")
-        assert body["order"]["order_code"] == "MAN-O1" and body["samples"][0]["sample_code"] == "MAN-S1"
-        assert counter_rows(session) == 0 and ledger_rows(session) == 0
-        nxt = make_order(client, lab)
-        assert nxt["order"]["order_code"] == "CU011026"
-
-    def test_mixed_manual_and_generated_samples(self, client, lab):
-        body = make_order(client, lab, sample_codes=(("BX", "MAN-1"), "BX", "TJ"))
-        assert [s["sample_code"] for s in body["samples"]] == ["MAN-1", "BX011026", "TJ011026"]
-
-    def test_manual_duplicates_keep_their_old_errors(self, client, lab):
-        make_order(client, lab, order_code="MAN-O1")
-        r = client.post(UNIFIED, json=lab.unified(order_code="MAN-O1"), headers=lab.headers)
-        assert r.status_code == 400 and "Order code already exists" in r.json()["detail"]
-        r = client.post(UNIFIED, json=lab.unified(sample_codes=(("BX", "DUP"), ("TJ", "DUP"))), headers=lab.headers)
-        assert r.status_code == 400 and "Duplicate sample_code" in r.json()["detail"]
-
-    def test_a_manual_code_may_reuse_a_code_that_exists_on_another_order_as_before(self, client, session, lab):
-        order = create_order(session, lab.tenant, lab.branch, order_code="LEG-1")
-        create_sample(session, lab.tenant, lab.branch, order, sample_code="SHARED")
-        r = client.post(UNIFIED, json=lab.unified(sample_codes=(("BX", "SHARED"),)), headers=lab.headers)
-        assert r.status_code == 200  # sample codes remain unique only per order (not tightened)
-
-    def test_a_manual_code_equal_to_a_retired_generated_code_is_refused(self, client, session, lab):
-        first = make_order(client, lab, sample_codes=("BX",))
-        delete_order_and_samples(session, first["order"]["id"])
-        r = client.post(UNIFIED, json=lab.unified(order_code="CU011026"), headers=lab.headers)
-        assert r.status_code == 400 and r.json()["detail"]["code"] == "numbering_code_already_issued"
-        r = client.post(UNIFIED, json=lab.unified(sample_codes=(("BX", "BX011026"),)), headers=lab.headers)
-        assert r.status_code == 400 and r.json()["detail"]["code"] == "numbering_code_already_issued"
-
-    def test_a_manual_code_that_a_later_generation_would_produce_is_skipped_over(self, client, lab):
-        make_order(client, lab, order_code="CU011026")
-        assert make_order(client, lab)["order"]["order_code"] == "CU021026"
-
-    def test_manual_codes_are_per_tenant(self, client, lab, other):
-        make_order(client, lab, order_code="SAME")
-        r = client.post(UNIFIED, json=other.unified(order_code="SAME"), headers=other.headers)
-        assert r.status_code == 200
-
-    def test_standalone_manual_sample_code_keeps_its_per_order_rule(self, client, lab):
-        order = client.post(ORDERS, json=lab.order_payload(order_code="MAN-O"), headers=lab.headers).json()["id"]
-        ok = client.post(SAMPLES, json=lab.sample_payload(order, sample_code="M1"), headers=lab.headers)
-        dup = client.post(SAMPLES, json=lab.sample_payload(order, sample_code="M1"), headers=lab.headers)
-        assert ok.status_code == 200 and dup.status_code == 400
-
-
 def put_config(client, headers, kind="order", **body):
     payload = {"active": True, "manual_policy": "allowed", "format": "{BASE}{SEQ}{MM}{YY}", "sequence_min_width": 2,
                "start_value": 1, "scope": "tenant", **body}
     return client.put(f"{NUMBERING}/config/{kind}", json=payload, headers=headers)
 
 
-class TestManualPolicyAndCapability:
-    """Manual entry needs the tenant policy AND the caller's own capability (never inferred from admin status)."""
+class TestRegistrationIsAutomatic:
+    """Céluma 1.4 (owner, 2026-10-16): no registration route accepts a typed order or sample code."""
 
-    def test_forbidden_policy_rejects_manual_codes_even_for_those_with_the_capability(self, client, session, lab):
-        configure(session, lab, manual_policy="forbidden")
-        r = client.post(UNIFIED, json=lab.unified(order_code="X"), headers=lab.headers)
-        assert r.status_code == 422 and r.json()["detail"]["code"] == "numbering_manual_code_not_allowed"
-        r = client.post(UNIFIED, json=lab.unified(sample_codes=(("BX", "X"),)), headers=lab.headers)
-        assert r.status_code == 422
-        assert make_order(client, lab)["order"]["order_code"] == "CU011026"
+    @pytest.mark.parametrize("route", ["order", "sample", "unified_order", "unified_sample"])
+    def test_a_typed_code_is_refused_explicitly_and_nothing_is_created_or_consumed(self, client, session, lab, route):
+        existing = client.post(ORDERS, json=lab.order_payload(), headers=lab.headers).json()["id"]
+        counters, ledger = counter_rows(session), ledger_rows(session)
+        orders = order_codes(session, lab)
+        if route == "order":
+            res = client.post(ORDERS, json=lab.order_payload(order_code="MAN-1"), headers=lab.headers)
+        elif route == "sample":
+            res = client.post(SAMPLES, json=lab.sample_payload(existing, sample_code="MAN-S"), headers=lab.headers)
+        elif route == "unified_order":
+            res = client.post(UNIFIED, json=lab.unified(order_code="MAN-1"), headers=lab.headers)
+        else:
+            payload = lab.unified()
+            payload["samples"][0]["sample_code"] = "MAN-S"
+            res = client.post(UNIFIED, json=payload, headers=lab.headers)
+        assert res.status_code == 422, res.text
+        assert res.json()["detail"][0]["type"] == "numbering_manual_code_not_supported"
+        assert "generated automatically" in res.json()["detail"][0]["msg"]
+        assert (counter_rows(session), ledger_rows(session), order_codes(session, lab)) == (counters, ledger, orders)
 
-    def test_required_policy_demands_a_code_and_generates_nothing(self, client, session, lab):
-        configure(session, lab, "order", manual_policy="required")
-        r = client.post(UNIFIED, json=lab.unified(), headers=lab.headers)
-        assert r.status_code == 422 and r.json()["detail"]["code"] == "numbering_code_required"
-        ok = client.post(UNIFIED, json=lab.unified(order_code="MAN-1"), headers=lab.headers)
-        assert ok.status_code == 200 and ok.json()["order"]["order_code"] == "MAN-1"
-        assert ok.json()["samples"][0]["sample_code"] == "BX011026"  # the sample kind is configured independently
-        assert counter_rows(session) == 1
+    def test_a_blank_typed_code_is_refused_too_not_silently_ignored(self, client, lab):
+        res = client.post(UNIFIED, json=lab.unified(order_code=""), headers=lab.headers)
+        assert res.status_code == 422
 
-    def test_policies_are_per_entity_kind(self, client, session, lab):
-        configure(session, lab, "sample", manual_policy="required")
-        assert client.post(UNIFIED, json=lab.unified(), headers=lab.headers).status_code == 422
-        ok = client.post(UNIFIED, json=lab.unified(sample_codes=(("BX", "S-1"),)), headers=lab.headers)
-        assert ok.json()["order"]["order_code"] == "CU011026"
-
-    def test_allowed_policy_is_not_enough_a_user_without_the_permission_cannot_type_a_code(self, client, session, lab):
-        assistant = lab.headers_for("assistant")  # can create orders and samples; has NOT lab:enter_manual_code
-        r = client.post(UNIFIED, json=lab.unified(order_code="MAN-1"), headers=assistant)
-        assert r.status_code == 403 and r.json()["detail"]["code"] == "numbering_manual_code_forbidden"
-        r = client.post(UNIFIED, json=lab.unified(sample_codes=(("BX", "MAN-S"),)), headers=assistant)
-        assert r.status_code == 403
-        assert order_codes(session, lab) == [] and ledger_rows(session) == 0
-        # automatic registration is open to the same user
+    def test_no_capability_is_needed_to_register(self, client, session, lab):
+        assistant = lab.headers_for("assistant")  # creates orders and samples; does NOT hold lab:enter_manual_code
         ok = client.post(UNIFIED, json=lab.unified(), headers=assistant)
         assert ok.status_code == 200 and ok.json()["order"]["order_code"] == "CU011026"
 
-    def test_the_permission_is_granted_per_role_and_enabling_the_policy_authorizes_nobody(self, client, session, lab):
-        assistant = lab.headers_for("assistant")
-        assert client.post(UNIFIED, json=lab.unified(order_code="A"), headers=assistant).status_code == 403
-        grant_manual_permission(session, "assistant")
-        assert client.post(UNIFIED, json=lab.unified(order_code="A"), headers=assistant).status_code == 200
-        tech = lab.headers_for("lab_tech")  # a different role is still not authorized
-        order = client.post(ORDERS, json=lab.order_payload(), headers=lab.headers).json()["id"]
-        r = client.post(SAMPLES, json=lab.sample_payload(order, sample_code="T-1"), headers=tech)
-        assert r.status_code == 403
+    def test_the_capability_still_exists_for_admin_and_superuser_only(self, session):
+        rows = set(session.execute(text(
+            "SELECT r.code FROM role r JOIN role_permission rp ON rp.role_id = r.id "
+            "JOIN permission p ON p.id = rp.permission_id WHERE p.code = 'lab:enter_manual_code'")).scalars())
+        assert rows == {"admin", "superuser"}  # it now authorizes only the controlled sample-code correction
 
-    def test_admin_and_superuser_hold_the_capability_by_the_migration_and_others_do_not(self, session):
-        rows = dict(session.execute(text(
-            "SELECT r.code, true FROM role r JOIN role_permission rp ON rp.role_id = r.id "
-            "JOIN permission p ON p.id = rp.permission_id WHERE p.code = 'lab:enter_manual_code'")).all())
-        assert set(rows) == {"admin", "superuser"}
+    @pytest.mark.parametrize("policy", ["allowed", "forbidden", "required"])
+    @pytest.mark.parametrize("active", [True, False])
+    def test_the_retired_manual_policy_never_blocks_or_changes_registration(self, client, session, lab, policy, active):
+        configure(session, lab, manual_policy=policy, active=active)
+        body = make_order(client, lab, sample_codes=("BX", "BX", "TJ"))
+        codes = [body["order"]["order_code"]] + [s["sample_code"] for s in body["samples"]]
+        expected = ["CU011026", "BX011026", "BX021026", "TJ011026"] if active else ["CU-1", "BX-1", "BX-2", "TJ-1"]
+        assert codes == expected
+        standalone = client.post(SAMPLES, json=lab.sample_payload(body["order"]["id"]), headers=lab.headers)
+        assert standalone.status_code == 200
+        assert standalone.json()["sample_code"] == ("BX031026" if active else "BX-3")
+        # the stored value is never rewritten by registering
+        assert session.execute(text("SELECT manual_policy FROM numbering_config WHERE entity_kind = 'order'")).scalar() == policy
 
-    def test_required_policy_for_a_user_without_the_capability_is_refused_not_silently_generated(self, client, session, lab):
+    def test_a_laboratory_with_no_configuration_registers_orders_and_samples(self, client, session, monkeypatch):
+        freeze(monkeypatch)
+        fresh = Lab(session, "SinConfig", sample_types=("BX",))  # no numbering_config row at all
+        assert session.execute(text("SELECT count(*) FROM numbering_config")).scalar() == 0
+        body = client.post(UNIFIED, json=fresh.unified(("BX", "BX")), headers=fresh.headers).json()
+        assert body["order"]["order_code"] == "CU-1"
+        assert [s["sample_code"] for s in body["samples"]] == ["BX-1", "BX-2"]
+        assert session.execute(text("SELECT count(*) FROM numbering_config")).scalar() == 0  # nothing activated silently
+
+    def test_the_config_endpoint_reports_automatic_registration_and_no_input_hints(self, client, session, lab):
+        cfg = client.get(f"{NUMBERING}/config", headers=lab.headers).json()
+        for kind in ("order", "sample"):
+            assert cfg[kind]["registration"] == "automatic" and cfg[kind]["legacy_manual_policy"] is False
+            assert "manual_entry" not in cfg[kind]
         configure(session, lab, "order", manual_policy="required")
-        r = client.post(UNIFIED, json=lab.unified(), headers=lab.headers_for("assistant"))
-        assert r.status_code == 403 and r.json()["detail"]["code"] == "numbering_manual_code_forbidden"
+        cfg = client.get(f"{NUMBERING}/config", headers=lab.headers).json()
+        assert cfg["order"]["legacy_manual_policy"] is True and cfg["order"]["manual_policy"] == "required"
 
-    def test_a_manual_code_is_audited_with_actor_and_code_and_a_generated_one_is_not(self, client, session, lab):
-        order = make_order(client, lab, order_code="MAN-O1", sample_codes=(("BX", "MAN-S1"), "BX"))
-        rows = session.exec(select(AuditLog).where(AuditLog.action == "NUMBERING.MANUAL_CODE_USED")).all()
-        assert sorted((r.entity_type, r.event_metadata["code"]) for r in rows) == [("order", "MAN-O1"), ("sample", "MAN-S1")]
-        assert {r.actor_user_id for r in rows} == {lab.user.id}
-        assert {str(r.entity_id) for r in rows} >= {order["order"]["id"], order["samples"][0]["id"]}
-
-    def test_the_config_endpoint_tells_each_caller_how_to_see_the_input(self, client, session, lab):
-        get = lambda headers: client.get(f"{NUMBERING}/config", headers=headers).json()  # noqa: E731
-        assert get(lab.headers)["order"]["manual_entry"] == "optional"
-        assert get(lab.headers_for("assistant"))["order"]["manual_entry"] == "hidden"  # allowed, but no capability
+    def test_a_manual_policy_of_required_cannot_be_newly_set_but_a_stored_one_is_preserved(self, client, session, lab):
+        res = put_config(client, lab.headers, "order", manual_policy="required")
+        assert res.status_code == 422 and res.json()["detail"]["code"] == "numbering_manual_policy_unsupported"
         configure(session, lab, "order", manual_policy="required")
-        assert get(lab.headers)["order"]["manual_entry"] == "required"
-        assert get(lab.headers_for("assistant"))["order"]["manual_entry"] == "blocked"
-        configure(session, lab, "order", manual_policy="forbidden")
-        assert get(lab.headers)["order"]["manual_entry"] == "hidden"
+        no_policy = {"active": True, "format": "{BASE}{SEQ}{MM}{YY}", "sequence_min_width": 3, "start_value": 1, "scope": "tenant"}
+        res = client.put(f"{NUMBERING}/config/order", json=no_policy, headers=lab.headers)
+        assert res.status_code == 200 and res.json()["manual_policy"] == "required"  # omitted = untouched
+        assert make_order(client, lab)["order"]["order_code"] == "CU0011026"
+        # an administrator may still move the retired value away from `required`
+        assert put_config(client, lab.headers, "order", manual_policy="allowed").json()["manual_policy"] == "allowed"
+        assert put_config(client, lab.headers, "order", manual_policy="bogus").status_code == 422
+
+    def test_activation_is_still_deliberate_and_per_kind(self, client, session, monkeypatch):
+        freeze(monkeypatch)
+        legacy = Lab(session, "Legacy2", sample_types=("BX",))
+        put_config(client, legacy.headers, "sample")
+        body = client.post(UNIFIED, json=legacy.unified(), headers=legacy.headers).json()
+        assert body["order"]["order_code"] == "CU-1"  # orders stayed inactive
+        assert body["samples"][0]["sample_code"] == "BX011026"  # only samples were activated
 
 
 class TestActivationAndCompatibility:
@@ -485,7 +451,7 @@ class TestActivationAndCompatibility:
         cfg = client.get(f"{NUMBERING}/config", headers=legacy.headers).json()
         for kind in ("order", "sample"):
             assert cfg[kind]["active"] is False and cfg[kind]["is_default"] is True
-        assert cfg["order"]["manual_entry"] == "optional" and cfg["sample"]["manual_entry"] == "required"
+        assert cfg["order"]["registration"] == cfg["sample"]["registration"] == "automatic"
         assert session.execute(text("SELECT count(*) FROM numbering_config")).scalar() == 0
 
     def test_inactive_orders_keep_the_old_shape_from_a_race_safe_counter(self, client, session, legacy):
@@ -509,17 +475,35 @@ class TestActivationAndCompatibility:
         create_order(session, legacy.tenant, legacy.branch, order_code="CU-1")  # not linked to the study type
         assert client.post(ORDERS, json=legacy.order_payload(), headers=legacy.headers).json()["order_code"] == "CU-2"
 
-    def test_inactive_samples_stay_manual(self, client, session, legacy):
+    def test_inactive_samples_are_generated_by_the_compatibility_allocator_too(self, client, session, legacy):
         order = client.post(ORDERS, json=legacy.order_payload(), headers=legacy.headers).json()["id"]
-        r = client.post(SAMPLES, json=legacy.sample_payload(order), headers=legacy.headers)
-        assert r.status_code == 422 and r.json()["detail"]["code"] == "numbering_code_required"
-        ok = client.post(SAMPLES, json=legacy.sample_payload(order, sample_code="M-1"), headers=legacy.headers)
-        assert ok.status_code == 200 and ok.json()["sample_code"] == "M-1"
+        codes = [client.post(SAMPLES, json=legacy.sample_payload(order), headers=legacy.headers).json()["sample_code"]
+                 for _ in range(3)]
+        assert codes == ["BX-1", "BX-2", "BX-3"]  # the same type twice in one order is fine
+        rows = session.execute(text(
+            "SELECT scheme, period_year, period_month FROM numbering_allocation WHERE entity_kind = 'sample'")).all()
+        assert set(rows) == {("legacy", 0, 0)}
 
-    def test_inactive_manual_codes_need_no_new_capability(self, client, session, legacy):
-        r = client.post(UNIFIED, json=legacy.unified(order_code="MAN-1", sample_codes=(("BX", "S-1"),)),
-                        headers=legacy.headers_for("assistant"))
-        assert r.status_code == 200 and r.json()["order"]["order_code"] == "MAN-1"
+    def test_the_sample_compatibility_counter_follows_existing_codes_and_never_rewinds(self, client, session, legacy):
+        order = create_order(session, legacy.tenant, legacy.branch, order_code="OLD-1")
+        for code in ("BX-7", "BX-x", "M1", "BX-50"):
+            create_sample(session, legacy.tenant, legacy.branch, order, sample_code=code, sample_type=legacy.sample_types["BX"])
+        first = client.post(UNIFIED, json=legacy.unified(("BX",)), headers=legacy.headers).json()
+        assert first["samples"][0]["sample_code"] == "BX-51"  # highest valid legacy sequence + 1, irregular shapes ignored
+        delete_order_and_samples(session, first["order"]["id"])
+        again = client.post(UNIFIED, json=legacy.unified(("BX",)), headers=legacy.headers).json()
+        assert again["samples"][0]["sample_code"] == "BX-52"  # a deletion never lowers it
+        assert {c for c in sample_codes(session, legacy)} >= {"BX-7", "BX-x", "M1", "BX-50"}  # old codes untouched
+
+    def test_sample_and_order_counters_stay_independent_when_inactive(self, client, session, legacy):
+        body = client.post(UNIFIED, json=legacy.unified(("BX", "BX")), headers=legacy.headers).json()
+        assert body["order"]["order_code"] == "CU-1"
+        assert [s["sample_code"] for s in body["samples"]] == ["BX-1", "BX-2"]
+        assert client.post(UNIFIED, json=legacy.unified(("BX",)), headers=legacy.headers).json()["order"]["order_code"] == "CU-2"
+
+    def test_inactive_registration_needs_no_capability(self, client, session, legacy):
+        r = client.post(UNIFIED, json=legacy.unified(), headers=legacy.headers_for("assistant"))
+        assert r.status_code == 200 and r.json()["order"]["order_code"] == "CU-1"
 
     def test_activation_is_a_deliberate_audited_act_and_only_for_the_chosen_kind(self, client, session, legacy):
         r = put_config(client, legacy.headers, "order")
@@ -619,10 +603,9 @@ class TestCompatibilitySeed:
         self.add(session, legacy, "CU-1")
         assert self.next_code(client, legacy) == "CU-2"
 
-    def test_a_manual_code_typed_later_moves_the_counter_forward(self, client, session, legacy):
+    def test_a_legacy_code_that_appears_later_moves_the_counter_forward(self, client, session, legacy):
         assert self.next_code(client, legacy) == "CU-1"
-        manual = client.post(ORDERS, json=legacy.order_payload(order_code="CU-80"), headers=legacy.headers)
-        assert manual.status_code == 200
+        self.add(session, legacy, "CU-80")  # e.g. imported or restored after the first allocation
         assert self.next_code(client, legacy) == "CU-81"
 
     def test_an_occupied_code_is_still_skipped_by_the_ledger_and_live_rows(self, client, session, legacy):
@@ -952,7 +935,9 @@ class TestStructuralGuards:
     def test_both_creation_routes_use_the_allocation_service(self):
         src = self.source()
         assert src.count("numbering.allocate_batch(") == 3  # create_order, create_sample, unified
-        assert src.count("numbering.claim_manual_codes(") >= 4
+        # registration never types a code: no manual-code path survives in the routes
+        for gone in ("claim_manual_codes", "audit_manual_code", "check_mode", "normalize_supplied", "supplied_"):
+            assert gone not in src, gone
 
     def test_every_creation_route_requires_a_key_and_claims_before_doing_any_work(self):
         src = self.source()

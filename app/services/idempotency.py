@@ -120,15 +120,16 @@ _RESOURCE_TABLES = {"order": '"order"', "sample": "sample"}
 def verify_resources(session: Session, claim: Claim) -> None:
     """Replay guard: what the original request created must still exist.
 
-    A deleted resource is refused explicitly (410): the retry must never be
-    answered by quietly creating a second record, nor by pointing at nothing.
+    A deleted OR removed (Céluma 1.4, #11 tombstone) resource is refused explicitly (410): the retry
+    must never be answered by quietly creating a second record, by resurrecting a removed capture, nor
+    by pointing at nothing. Raw SQL on purpose: the ORM's removed-record filter is not the check here.
     """
     receipt = claim.receipt
     assert receipt is not None
     for resource in receipt.resources:
         table = _RESOURCE_TABLES[resource["kind"]]
         exists = session.execute(
-            text(f"SELECT EXISTS (SELECT 1 FROM {table} WHERE id = :i AND tenant_id = :t)"),
+            text(f"SELECT EXISTS (SELECT 1 FROM {table} WHERE id = :i AND tenant_id = :t AND removed_at IS NULL)"),
             {"i": resource["id"], "t": str(claim.tenant_id)},
         ).scalar()
         if not exists:
