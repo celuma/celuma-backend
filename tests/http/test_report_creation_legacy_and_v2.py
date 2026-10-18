@@ -42,61 +42,48 @@ def _minimal_report_content() -> dict:
     }
 
 
-class TestLegacyCreationUnaffected:
-    def test_flag_off_creates_legacy_report(self, client, session):
-        tenant = create_tenant(session, reports_v2_enabled=False)
+class TestLegacyCreationIsRetired:
+    """Céluma 1.4 (#22). These were `TestLegacyCreationUnaffected`: with the
+    flag off, or with it on but no template sent, creation produced a legacy
+    report. Reports V2 is now the only path and the tenant flag is not read
+    (full matrix in `test_reports_v2_only.py`)."""
+
+    def _post(self, client, session, *, stored_flag, **extra):
+        tenant = create_tenant(session, reports_v2_enabled=stored_flag)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
         user = create_user(session, tenant, email="admin@t1.example")
-
-        resp = client.post(
+        return tenant, user, client.post(
             "/api/v1/reports/",
             json={
                 "tenant_id": str(tenant.id),
                 "branch_id": str(branch.id),
                 "order_id": str(order.id),
                 "report": _minimal_report_content(),
+                **extra,
             },
             headers=auth_headers(user),
         )
-        assert resp.status_code == 200, resp.text
-        report_id = resp.json()["id"]
 
-        detail = client.get(f"/api/v1/reports/{report_id}", headers=auth_headers(user)).json()
-        assert detail["schema_version"] is None
-        assert detail["template_version_id"] is None
-        assert detail["generated_by_renderer_version"] is None
-        assert "schema_version" not in detail["report"]
-        assert "rendering_snapshot" not in detail["report"]
+    def test_flag_off_without_a_template_is_refused(self, client, session):
+        _, _, resp = self._post(client, session, stored_flag=False)
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "reports_v2_template_required"
 
-    def test_flag_on_without_template_version_id_still_creates_legacy_report(self, client, session):
-        tenant = create_tenant(session, reports_v2_enabled=True)
-        branch = create_branch(session, tenant)
-        order = create_order(session, tenant, branch)
-        user = create_user(session, tenant, email="admin@t1.example")
+    def test_flag_on_without_a_template_is_refused_too(self, client, session):
+        _, _, resp = self._post(client, session, stored_flag=True)
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "reports_v2_template_required"
 
-        resp = client.post(
-            "/api/v1/reports/",
-            json={
-                "tenant_id": str(tenant.id),
-                "branch_id": str(branch.id),
-                "order_id": str(order.id),
-                "report": _minimal_report_content(),
-            },
-            headers=auth_headers(user),
-        )
-        assert resp.status_code == 200, resp.text
-        detail = client.get(
-            f"/api/v1/reports/{resp.json()['id']}", headers=auth_headers(user)
-        ).json()
-        assert detail["schema_version"] is None
-
-    def test_flag_off_rejects_explicit_template_version_id(self, client, session):
+    def test_flag_off_no_longer_blocks_an_explicit_template_version_id(
+        self, client, session
+    ):
         tenant = create_tenant(session, reports_v2_enabled=False)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
         user = create_user(session, tenant, email="admin@t1.example")
         template = _create_template(session, tenant)
+        create_default_letterhead(session, tenant)
         version = _publish_version(client, auth_headers(user), template.id)
 
         resp = client.post(
@@ -110,7 +97,11 @@ class TestLegacyCreationUnaffected:
             },
             headers=auth_headers(user),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 200, resp.text
+        detail = client.get(
+            f"/api/v1/reports/{resp.json()['id']}", headers=auth_headers(user)
+        ).json()
+        assert detail["schema_version"] == 2
 
 
 class TestV2Creation:

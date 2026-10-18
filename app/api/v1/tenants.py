@@ -28,15 +28,15 @@ class TenantUpdate(BaseModel):
     name: Optional[str] = None
     legal_name: Optional[str] = None
     tax_id: Optional[str] = None
-    # Céluma 1.3 Phase 2, Block D, Story D9: exposed here rather than a
-    # dedicated endpoint, following the same "reuse the tenant update
-    # pattern" recommendation as the other tenant-wide settings above.
-    # Reuses the same admin:manage_tenant gate as the rest of this endpoint
-    # (see block-c-dependencies.md — this was the open question it left for
-    # Block D: reuse admin:manage_tenant vs. a new permission).
+    # Céluma 1.4 (#22): RETIRED. Reports V2 is the only authoring path, so
+    # there is nothing left to toggle. The field is still parsed so that an
+    # older client gets a precise answer instead of a silent no-op:
+    # `true` is accepted and ignored (it is already the effective policy);
+    # `false` is refused with 409 `reports_v2_flag_retired`. Neither value is
+    # persisted. See specs/reports/reports-v2-only.md.
     reports_v2_enabled: Optional[bool] = None
-    # Céluma 1.3.1 Block D (CEL-131-06): same "reuse the tenant update
-    # pattern" precedent as reports_v2_enabled above. `None` means "not
+    # Céluma 1.3.1 Block D (CEL-131-06): tenant-wide setting on the same
+    # "reuse the tenant update pattern". `None` means "not
     # submitted" (leave unchanged) for BOTH of these fields — so clearing the
     # default reviewer needs its own explicit flag, since a plain `null` is
     # indistinguishable from "omitted" once Pydantic parses the body. See
@@ -53,7 +53,7 @@ def list_tenants(
     # By default, restrict to the current tenant only to avoid data leakage.
     tenants = session.exec(select(Tenant).where(Tenant.id == ctx.tenant_id)).all()
     return [
-        {"id": str(t.id), "name": t.name, "legal_name": t.legal_name, "reports_v2_enabled": t.reports_v2_enabled}
+        {"id": str(t.id), "name": t.name, "legal_name": t.legal_name, "reports_v2_enabled": True}
         for t in tenants
     ]
 
@@ -83,7 +83,9 @@ def _build_tenant_detail_response(session: Session, tenant: Tenant) -> TenantDet
         name=tenant.name,
         legal_name=tenant.legal_name,
         tax_id=tenant.tax_id,
-        reports_v2_enabled=tenant.reports_v2_enabled,
+        # Céluma 1.4 (#22): constant compatibility value; the stored column is
+        # no longer read. Older clients that branch on it stay on the V2 path.
+        reports_v2_enabled=True,
         default_reviewer_id=(
             str(tenant.default_reviewer_id) if tenant.default_reviewer_id else None
         ),
@@ -162,6 +164,18 @@ def update_tenant(
     if str(tenant.id) != ctx.tenant_id:
         raise HTTPException(403, "Cannot update different tenant")
     
+    if tenant_data.reports_v2_enabled is False:
+        raise HTTPException(
+            409,
+            {
+                "code": "reports_v2_flag_retired",
+                "message": (
+                    "Los reportes V2 son la única forma de crear reportes y ya "
+                    "no se pueden desactivar por laboratorio."
+                ),
+            },
+        )
+
     # Update fields
     if tenant_data.name is not None:
         tenant.name = tenant_data.name
@@ -170,13 +184,6 @@ def update_tenant(
     if tenant_data.tax_id is not None:
         tenant.tax_id = tenant_data.tax_id
 
-    reports_v2_flag_changed = (
-        tenant_data.reports_v2_enabled is not None
-        and tenant_data.reports_v2_enabled != tenant.reports_v2_enabled
-    )
-    previous_reports_v2_enabled = tenant.reports_v2_enabled
-    if tenant_data.reports_v2_enabled is not None:
-        tenant.reports_v2_enabled = tenant_data.reports_v2_enabled
 
     # Céluma 1.3.1 Block D (CEL-131-06): tenant-level default reviewer.
     # `clear_default_reviewer` wins over `default_reviewer_id` so a caller
@@ -225,23 +232,6 @@ def update_tenant(
             "updated_by": str(user.id),
         },
     )
-
-    if reports_v2_flag_changed:
-        # Céluma 1.3 Phase 2, Block D, Story D9: separate audit line — this
-        # flag controls creation of new V2 reports (never reading/rendering
-        # existing ones), so a distinct, greppable event is worth having
-        # beyond the generic "tenant.updated" line above.
-        logger.info(
-            f"Tenant {tenant.name} reports_v2_enabled changed: "
-            f"{previous_reports_v2_enabled} -> {tenant.reports_v2_enabled}",
-            extra={
-                "event": "tenant.reports_v2_enabled_changed",
-                "tenant_id": str(tenant.id),
-                "previous_value": previous_reports_v2_enabled,
-                "new_value": tenant.reports_v2_enabled,
-                "updated_by": str(user.id),
-            },
-        )
 
     if default_reviewer_changed:
         # Céluma 1.3.1 Block D: a distinct, greppable line — this is a

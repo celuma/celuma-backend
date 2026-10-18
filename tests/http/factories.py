@@ -539,8 +539,14 @@ def create_report(
     authored_by: Optional[AppUser] = None,
     version_no: int = 1,
     pdf_generation_status: Optional[str] = None,
+    schema_version: Optional[int] = 2,
 ):
     """A Report plus its current ReportVersion, at an arbitrary status.
+
+    Céluma 1.4 (#22): the version is a V2 one by default, with a stored body
+    carrying a valid `rendering_snapshot` (so submit-for-review and signing
+    behave as they do for a real V2 report). Pass `schema_version=None` to
+    build a historical LEGACY version, which the authoring routes now refuse.
 
     Distinct from `create_published_v2_report_directly`, which needs a
     template version and exists for the V2 status-guard tests. Block F's
@@ -565,7 +571,24 @@ def create_report(
         is_current=True,
         authored_by=(authored_by.id if authored_by is not None else None),
         pdf_generation_status=pdf_generation_status,
+        schema_version=schema_version,
     )
+    if schema_version == 2:
+        import json
+
+        from .conftest import FakeS3Service
+
+        body_key = f"reports/{tenant.id}/{branch.id}/{report.id}/versions/{version_no}/report.json"
+        FakeS3Service.store[body_key] = json.dumps(
+            {
+                "schema_version": 2,
+                "base": {},
+                "sections": {},
+                "rendering_snapshot": valid_rendering_snapshot(),
+            }
+        ).encode("utf-8")
+        body_storage = create_storage_object(session, key=body_key, tenant=tenant)
+        version.json_storage_id = body_storage.id
     if pdf_generation_status == "READY":
         # `ck_report_version_pdf_ready_requires_artifact` (v1_3_0) is the
         # database-level statement of Block E's core invariant: no READY

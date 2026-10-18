@@ -161,30 +161,21 @@ class TestV2ContentEditPreservesSnapshot:
             != "Nombre Falsificado Por El Cliente"
         )
 
-    def test_legacy_report_new_version_is_unaffected(self, client, session):
-        """Story B9's TestLegacyCreationUnaffected equivalent for
-        new_version: a legacy report's content-only save must behave exactly
-        as before this fix — no schema_version/rendering_snapshot appears."""
+    def test_legacy_report_new_version_is_refused_and_creates_no_version(self, client, session):
+        """Céluma 1.4 (#22): a legacy report's content save used to be
+        "unaffected" (no snapshot appeared). Legacy authoring is retired, so it
+        is refused with 409 and no new version or stored body is created."""
+        from .factories import create_report
+
         tenant = create_tenant(session, reports_v2_enabled=False)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
         user = create_user(session, tenant, email="admin@t1.example")
         headers = auth_headers(user)
-
-        create_resp = client.post(
-            "/api/v1/reports/",
-            json={
-                "tenant_id": str(tenant.id),
-                "branch_id": str(branch.id),
-                "order_id": str(order.id),
-                "report": _minimal_report_content(),
-            },
-            headers=headers,
-        )
-        report_id = create_resp.json()["id"]
+        report, _ = create_report(session, tenant, branch, order, schema_version=None)
 
         new_version_resp = client.post(
-            f"/api/v1/reports/{report_id}/new_version",
+            f"/api/v1/reports/{report.id}/new_version",
             json={
                 "tenant_id": str(tenant.id),
                 "branch_id": str(branch.id),
@@ -193,10 +184,9 @@ class TestV2ContentEditPreservesSnapshot:
             },
             headers=headers,
         )
-        assert new_version_resp.status_code == 200, new_version_resp.text
-        assert new_version_resp.json()["schema_version"] is None
-        assert new_version_resp.json()["template_version_id"] is None
+        assert new_version_resp.status_code == 409, new_version_resp.text
+        assert new_version_resp.json()["detail"]["code"] == "legacy_report_authoring_retired"
 
-        reread = client.get(f"/api/v1/reports/{report_id}", headers=headers).json()
+        reread = client.get(f"/api/v1/reports/{report.id}", headers=headers).json()
         assert reread["schema_version"] is None
-        assert "rendering_snapshot" not in reread["report"]
+        assert reread["version_no"] == 1

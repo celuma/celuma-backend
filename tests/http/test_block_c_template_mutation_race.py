@@ -245,6 +245,18 @@ def _stored_body(session, report_id) -> dict:
 # 1. What each side actually contributes
 # ---------------------------------------------------------------------------
 
+
+def _assert_nothing_was_created(session):
+    """No Report, ReportVersion or stored report body survives a refusal."""
+    from app.models.report import Report
+    from app.models.storage import StorageObject
+
+    session.expire_all()
+    assert session.exec(select(Report)).first() is None
+    assert session.exec(select(ReportVersion)).first() is None
+    assert session.exec(select(StorageObject)).first() is None
+
+
 class TestTheTokenShipsWithTheStructure:
     """The contract at t0: the token and the structure it describes come back
     together, from one read, in one response."""
@@ -959,8 +971,12 @@ class TestTheGuardDoesNotLeakOntoOtherPaths:
     nothing else — the most likely way a concurrency guard goes wrong is by
     quietly becoming mandatory somewhere it has no meaning."""
 
-    def test_legacy_creation_needs_no_token(self, client, session):
-        """No selector at all: still Legacy, still accepted, no token."""
+    def test_a_request_with_no_selector_is_refused_not_created_as_legacy(self, client, session):
+        """Céluma 1.4 (#22). Formerly `test_legacy_creation_needs_no_token`: no
+        selector used to create a Legacy report without a token. Legacy
+        authoring is retired, so the request is refused with
+        `reports_v2_template_required` and nothing is persisted. The hash guard
+        is still not demanded of a request that names no template."""
         lab = _lab(session)
         author = _author(session, lab)
         order = create_order(
@@ -980,18 +996,18 @@ class TestTheGuardDoesNotLeakOntoOtherPaths:
             headers=auth_headers(author),
         )
 
-        assert resp.status_code == 200, resp.text
-        created = session.exec(
-            select(ReportVersion).where(
-                ReportVersion.report_id == uuid.UUID(resp.json()["id"])
-            )
-        ).first()
-        assert created.schema_version is None
-        assert created.template_version_id is None
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "reports_v2_template_required"
+        _assert_nothing_was_created(session)
 
-    def test_a_legacy_request_carrying_a_token_is_still_legacy(self, client, session):
-        """A stray token on a request with no selector must not turn it into a V2
-        report, and must not be validated against anything."""
+    def test_a_stray_token_without_a_selector_is_still_refused_and_not_validated(
+        self, client, session
+    ):
+        """Céluma 1.4 (#22). Formerly
+        `test_a_legacy_request_carrying_a_token_is_still_legacy`. A stray
+        `template_hash` on a request with no selector must neither turn it into
+        a V2 report nor be validated against anything: it gets the same
+        `reports_v2_template_required` refusal, with no side effects."""
         lab = _lab(session)
         author = _author(session, lab)
         order = create_order(
@@ -1012,13 +1028,9 @@ class TestTheGuardDoesNotLeakOntoOtherPaths:
             headers=auth_headers(author),
         )
 
-        assert resp.status_code == 200, resp.text
-        created = session.exec(
-            select(ReportVersion).where(
-                ReportVersion.report_id == uuid.UUID(resp.json()["id"])
-            )
-        ).first()
-        assert created.schema_version is None
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "reports_v2_template_required"
+        _assert_nothing_was_created(session)
 
     def test_editing_an_existing_report_needs_no_token(self, client, session):
         """`POST /{id}/new_version` never reads the template — it re-attaches the

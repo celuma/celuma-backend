@@ -45,6 +45,7 @@ from .factories import (
     create_patient,
     create_tenant,
     create_user,
+    valid_rendering_snapshot,
 )
 from .test_block_a_reviewer_authorization import _store_body
 
@@ -304,7 +305,10 @@ class TestExplicitAssignmentWins:
 
         # And submitting later does not bring the default back.
         report = _draft_report(session, lab, order["id"])
-        client.post(SUBMIT.format(report.id), json={}, headers=auth_headers(lab["author"]))
+        resp = client.post(
+            SUBMIT.format(report.id), json={}, headers=auth_headers(lab["author"])
+        )
+        assert resp.status_code == 200, resp.text
         rows = _reviews(session, order["id"])
         assert [r.reviewer_user_id for r in rows] == [explicit.id]
 
@@ -476,20 +480,26 @@ def _draft_report(session: Session, lab, order_id):
     )
     session.add(report)
     session.flush()
-    version = ReportVersion(report_id=report.id, version_no=1, is_current=True)
+    version = ReportVersion(report_id=report.id, version_no=1, is_current=True, schema_version=2)
     session.add(version)
     session.commit()
     session.refresh(report)
     session.refresh(version)
     # The presentation route rewrites the current version's stored JSON, so a
     # version with no body is refused (409) before authorization is relevant.
+    # Céluma 1.4 (#22): the body is a V2 one, with the frozen
+    # `rendering_snapshot` that `POST /reports/` always writes — submission
+    # validates its applied letterhead (409 without one) BEFORE the reviewer
+    # gate these tests are about.
     _store_body(
         session,
         version,
         lab["tenant"],
         {
+            "schema_version": 2,
             "base": {},
             "sections": [],
+            "rendering_snapshot": valid_rendering_snapshot(),
             "signatureMetadata": {
                 "show_signature_section": False,
                 "require_digital_signature": False,

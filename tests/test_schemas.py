@@ -32,18 +32,20 @@ class TestTenantSchemas:
         assert tenant_response.id == "test-id"
         assert tenant_response.name == "Test Tenant"
 
-    def test_tenant_response_reports_v2_enabled_defaults_false(self):
-        """Céluma 1.3 Phase 2, Block A / Story A6."""
+    def test_tenant_response_reports_v2_enabled_defaults_true(self):
+        """Céluma 1.4 (#22): the flag is retired and reads as `true`, so an
+        older client that branches on it stays on the V2 path."""
         tenant_response = TenantResponse(id="test-id", name="Test Tenant")
-        assert tenant_response.reports_v2_enabled is False
+        assert tenant_response.reports_v2_enabled is True
 
     def test_tenant_response_reports_v2_enabled_explicit_true(self):
         tenant_response = TenantResponse(id="test-id", name="Test Tenant", reports_v2_enabled=True)
         assert tenant_response.reports_v2_enabled is True
 
-    def test_tenant_detail_response_reports_v2_enabled_defaults_false(self):
+    def test_tenant_detail_response_reports_v2_enabled_defaults_true(self):
+        """Céluma 1.4 (#22): same retired-flag compatibility value."""
         detail = TenantDetailResponse(id="test-id", name="Test Tenant")
-        assert detail.reports_v2_enabled is False
+        assert detail.reports_v2_enabled is True
 
 class TestBranchSchemas:
     """Test Branch schema validation"""

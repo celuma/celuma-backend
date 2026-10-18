@@ -886,32 +886,30 @@ class TestTheHistoricalSelectorIsRetained:
             HISTORICAL_TEMPLATE_JSON
         )
 
-    def test_legacy_creation_is_untouched(self, client, session):
-        """Neither selector sent: still a Legacy report, byte-for-byte the old
-        behaviour, with no snapshot and no V2 metadata."""
+    def test_neither_selector_is_refused_not_a_legacy_report(self, client, session):
+        """Céluma 1.4 (#22). This was `test_legacy_creation_is_untouched`: with
+        neither selector the old code produced a Legacy report. That path is
+        retired; the request is refused and nothing is created."""
         lab = _lab(session)
         author = _author(session, lab)
 
         resp, _ = _create_v2(client, lab, author, session, selector="none")
 
-        assert resp.status_code == 200, resp.text
-        created = session.exec(
-            select(ReportVersion).where(ReportVersion.report_id == resp.json()["id"])
-        ).first()
-        assert created.schema_version is None
-        assert created.template_version_id is None
-        assert _frozen_snapshot(session, resp.json()["id"]) is None
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "reports_v2_template_required"
+        assert session.exec(select(ReportVersion)).first() is None
 
-    def test_a_legacy_tenant_cannot_use_the_new_selector(self, client, session):
-        """`reports_v2_enabled=false` still gates V2 entirely. `template_id`
-        is not a way around the flag."""
+    def test_a_stored_false_flag_no_longer_gates_the_new_selector(self, client, session):
+        """Céluma 1.4 (#22): `reports_v2_enabled` is a retired column nothing
+        reads. This was `test_a_legacy_tenant_cannot_use_the_new_selector`
+        (403 "not enabled"); a tenant with a stored `false` now creates V2
+        reports exactly like any other."""
         lab = _lab(session, v2=False)
         author = _author(session, lab)
 
         resp, _ = _create_v2(client, lab, author, session)
 
-        assert resp.status_code == 403, resp.text
-        assert "not enabled" in resp.json()["detail"]
+        assert resp.status_code == 200, resp.text
 
 
 # ---------------------------------------------------------------------------

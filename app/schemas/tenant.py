@@ -12,7 +12,8 @@ class TenantResponse(BaseModel):
     id: str
     name: str
     legal_name: Optional[str] = None
-    reports_v2_enabled: bool = False
+    # Céluma 1.4 (#22): retired; always true. Kept for older clients.
+    reports_v2_enabled: bool = True
 
 class DefaultReviewerRef(BaseModel):
     """Céluma 1.3.1 Block D (CEL-131-06): display-only reference to the
@@ -28,7 +29,8 @@ class TenantDetailResponse(BaseModel):
     name: str
     legal_name: Optional[str] = None
     tax_id: Optional[str] = None
-    reports_v2_enabled: bool = False
+    # Céluma 1.4 (#22): retired; always true. Kept for older clients.
+    reports_v2_enabled: bool = True
     default_reviewer_id: Optional[str] = None
     default_reviewer: Optional[DefaultReviewerRef] = None
 

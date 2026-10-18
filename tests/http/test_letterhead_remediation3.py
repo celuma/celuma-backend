@@ -133,6 +133,20 @@ def _import_envelope(client, user, envelope: dict, filename: str = "membrete.cel
 # Problem A — import/export `.cell` loses logo and style
 # ===========================================================================
 
+
+def _legacy_adapter_envelope() -> dict:
+    """The legacy-parity `.cell` envelope, built in-process.
+
+    Céluma 1.4 (#22) retired `GET /report-letterheads/legacy/export`, but the
+    adapter stays as the reference that supported V2 import/export is checked
+    against (legacy parity of historical reports)."""
+    import json as _json
+
+    from app.services.legacy_letterhead_adapter import build_legacy_letterhead_export
+
+    return _json.loads(build_legacy_letterhead_export().model_dump_json())
+
+
 class TestProblemAImportExportFidelity:
     def test_imported_letterhead_has_an_active_version(self, client, session):
         """ROOT of problem A: import created the version as PUBLISHED, so
@@ -280,11 +294,7 @@ class TestProblemAImportExportFidelity:
         tenant = create_tenant(session)
         user = create_user(session, tenant, email="admin@a.example")
 
-        resp = client.get(
-            "/api/v1/report-letterheads/legacy/export", headers=auth_headers(user)
-        )
-        assert resp.status_code == 200, resp.text
-        envelope = resp.json()
+        envelope = _legacy_adapter_envelope()
         assert "footer_logo" in envelope["assets"], "el logo Legacy vive en el pie"
         presentation = envelope["letterhead"]["presentation"]
         assert presentation["style"]["primary_color"] == "#002060"
@@ -295,9 +305,7 @@ class TestProblemAImportExportFidelity:
     def test_legacy_import_lands_active_with_footer_logo(self, client, session):
         tenant = create_tenant(session)
         user = create_user(session, tenant, email="admin@a.example")
-        envelope = client.get(
-            "/api/v1/report-letterheads/legacy/export", headers=auth_headers(user)
-        ).json()
+        envelope = _legacy_adapter_envelope()
 
         imported = _import_envelope(client, user, envelope, filename="legacy.cell")
         assert imported.status_code == 200, imported.text

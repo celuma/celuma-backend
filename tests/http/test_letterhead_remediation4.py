@@ -66,6 +66,20 @@ def _import_envelope(client, user, envelope: dict, filename: str = "membrete.cel
 # Observation 2 — optional description
 # ===========================================================================
 
+
+def _legacy_adapter_envelope() -> dict:
+    """The legacy-parity `.cell` envelope, built in-process.
+
+    Céluma 1.4 (#22) retired `GET /report-letterheads/legacy/export`, but the
+    adapter stays as the reference that supported V2 import/export is checked
+    against (legacy parity of historical reports)."""
+    import json as _json
+
+    from app.services.legacy_letterhead_adapter import build_legacy_letterhead_export
+
+    return _json.loads(build_legacy_letterhead_export().model_dump_json())
+
+
 class TestOptionalDescriptionNormalization:
     """The shared normalizer is the only place that decides what "empty"
     means; create/update/import/export reuse it."""
@@ -498,12 +512,7 @@ class TestLegacyExportImportRoundTrip:
         tenant = create_tenant(session)
         user = create_user(session, tenant, email="admin@a.example")
 
-        exported = client.get(
-            "/api/v1/report-letterheads/legacy/export",
-            headers=auth_headers(user),
-        )
-        assert exported.status_code == 200, exported.text
-        envelope = exported.json()
+        envelope = _legacy_adapter_envelope()
 
         imported = _import_envelope(client, user, envelope, filename="legado.cell")
         assert imported.status_code == 200, imported.text
@@ -535,10 +544,7 @@ class TestLegacyExportImportRoundTrip:
         tenant = create_tenant(session)
         user = create_user(session, tenant, email="admin@a.example")
 
-        envelope = client.get(
-            "/api/v1/report-letterheads/legacy/export",
-            headers=auth_headers(user),
-        ).json()
+        envelope = _legacy_adapter_envelope()
         # The logotype travels as a FOOTER asset; if the repo does not
         # ship the bitmap, export omits it and this check does not apply.
         if "footer_logo" not in envelope.get("assets", {}):

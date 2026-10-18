@@ -59,7 +59,6 @@ from app.services.letterhead_portability import (
     import_letterhead_version,
     CelumaPortabilityError,
 )
-from app.services.legacy_letterhead_adapter import build_legacy_letterhead_export
 from app.services.letterhead_resources import resolve_letterhead_resources
 from app.services.usage import UsageService
 from app.services.usage_thresholds import record_storage_delta_with_thresholds
@@ -1046,25 +1045,27 @@ def export_letterhead_version_endpoint(
     )
 
 
-@router.get("/legacy/export", response_model=CelumaLetterheadEnvelope)
+@router.get("/legacy/export", include_in_schema=False)
 def export_legacy_letterhead_endpoint(
     session: Session = Depends(get_session),
     user: AppUser = Depends(current_user),
 ):
-    """Export the frozen Legacy renderer's letterhead as a portable
-    `.cell` file (requires reports:manage_templates). Deterministic —
-    never reads or modifies Legacy. See legacy-parity-contract.md."""
+    """RETIRED (Céluma 1.4, #22): the legacy letterhead export is gone.
+
+    Kept as an explicit 410 (after authentication and the original
+    `reports:manage_templates` check) so a direct or old-client request gets a
+    clear answer instead of being routed to a letterhead-id handler. Supported
+    V2 letterhead export (`/{letterhead_id}/export`) and import are unchanged."""
     _require(user.id, "reports:manage_templates", session)
-    envelope = build_legacy_letterhead_export()
-
-    logger.info(
-        "Legacy letterhead exported as .cell",
-        extra={"event": "legacy_letterhead.exported", "user_id": str(user.id)},
-    )
-
-    return JSONResponse(
-        content=json.loads(envelope.model_dump_json()),
-        headers={"Content-Disposition": 'attachment; filename="legacy-ambassador-letterhead.cell"'},
+    raise HTTPException(
+        410,
+        {
+            "code": "legacy_letterhead_export_retired",
+            "message": (
+                "La exportación del membrete del formato anterior fue retirada. "
+                "Crea o importa un membrete V2 desde Configuración → Membretes."
+            ),
+        },
     )
 
 

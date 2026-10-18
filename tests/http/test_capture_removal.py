@@ -341,14 +341,29 @@ class TestRemovalRaces:
         assert count(session, "SELECT count(*) FROM audit_log WHERE action = 'ORDER.REMOVED'") == 1
 
     def test_removal_racing_report_creation_is_serialized(self, fresh_client, session, lab):
+        from app.models.report import ReportTemplate
+        from app.services.report_template_hash import hash_clinical_template_block
+        from .factories import create_default_letterhead, valid_rendering_snapshot
+
+        # Céluma 1.4 (#22): only a V2 request creates a report. A selector-less body is refused (409
+        # `reports_v2_template_required`) whichever side wins, which would leave nothing racing the removal.
+        template = ReportTemplate(tenant_id=lab.tenant.id, name="Plantilla", template_json=valid_rendering_snapshot()["template"])
+        session.add(template)
+        session.commit()
+        create_default_letterhead(session, lab.tenant)
         reg = register(fresh_client, lab, ("BX",))
-        body = {"tenant_id": str(lab.tenant.id), "branch_id": str(lab.branch.id), "order_id": reg["order_id"]}
+        body = {
+            "tenant_id": str(lab.tenant.id), "branch_id": str(lab.branch.id), "order_id": reg["order_id"],
+            "template_id": str(template.id), "template_hash": hash_clinical_template_block(template.template_json),
+            "report": {"base": {}, "sections": {}},
+        }
         results = run_parallel([
             lambda c: remove_order(c, lab, reg["order_id"]),
             lambda c: c.post(f"{API}/reports/", json=body, headers=lab.headers),
         ])
         assert not any(isinstance(r, Exception) for r in results), results
         assert results[0].status_code in (200, 409)
+        assert results[1].status_code in (200, 404), results[1].text
         # either the report was created first (a DRAFT, removable: hidden with the order) or the order was
         # removed first (404); never a visible report of a removed order
         removed = count(session, 'SELECT count(*) FROM "order" WHERE id = :i AND removed_at IS NOT NULL', i=reg["order_id"])

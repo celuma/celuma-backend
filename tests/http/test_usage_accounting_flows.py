@@ -32,6 +32,7 @@ from tests.http.factories import (
     create_tenant,
     create_user,
 )
+from tests.http.test_block_c_v2_template_version_independence import _create_v2, _lab
 
 
 def _jpeg_bytes(color=(200, 50, 50), size=(64, 64)) -> bytes:
@@ -246,28 +247,22 @@ class TestLegacyPdfAccounting:
 
 class TestReportJsonAccounting:
     def test_create_report_populates_tenant_id_and_increments(self, client, session):
-        tenant = create_tenant(session, name="T")
-        branch = create_branch(session, tenant)
-        order = create_order(session, tenant, branch)
+        # Céluma 1.4 (#22): creation is V2-only, so the laboratory needs its
+        # template and default letterhead. Neither is a storage object, so the
+        # report JSON stays the only billable write of this flow.
+        lab = _lab(session, name="T")
+        tenant = lab["tenant"]
         user = create_user(session, tenant, email="u@t.example")
         _init_usage(session, tenant.id)
 
-        resp = client.post(
-            "/api/v1/reports/",
-            json={
-                "tenant_id": str(tenant.id),
-                "branch_id": str(branch.id),
-                "order_id": str(order.id),
-                "report": {"foo": "bar"},
-            },
-            headers=auth_headers(user),
-        )
+        resp, _ = _create_v2(client, lab, user, session)
         assert resp.status_code == 200, resp.text
         report_id = resp.json()["id"]
 
         version = session.exec(
             select(ReportVersion).where(ReportVersion.report_id == report_id)
         ).first()
+        assert version.schema_version == 2
         storage = session.get(StorageObject, version.json_storage_id)
         assert storage.tenant_id == tenant.id
         assert _usage(session, tenant.id) == storage.size_bytes
