@@ -5,7 +5,9 @@ via `ReportDetailResponse.resolved_resources`, without ever writing that URL
 back into the snapshot, and without ever exposing a cross-tenant object.
 """
 import json
+from datetime import datetime
 
+from app.models.enums import ReportStatus
 from app.models.report import Report, ReportTemplate, ReportVersion
 
 from .conftest import FakeS3Service
@@ -130,27 +132,42 @@ class TestLogoResolutionOnRead:
         assert detail["resolved_resources"] is None
 
     def test_legacy_report_has_no_resolved_resources(self, client, session):
+        """Céluma 1.4 (#22): no route creates a legacy report any more, so the
+        historical record is seeded the way the retired legacy creation path
+        stored it — content without a `rendering_snapshot`, no V2 marker."""
         tenant = create_tenant(session, reports_v2_enabled=False)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
         user = create_user(session, tenant, email="admin@t1.example")
         headers = auth_headers(user)
 
-        create_resp = client.post(
-            "/api/v1/reports/",
-            json={
-                "tenant_id": str(tenant.id),
-                "branch_id": str(branch.id),
-                "order_id": str(order.id),
-                "report": _minimal_report_content(),
-            },
-            headers=headers,
+        report = Report(
+            tenant_id=tenant.id,
+            branch_id=branch.id,
+            order_id=order.id,
+            status=ReportStatus.PUBLISHED,
+            published_at=datetime.utcnow(),
         )
-        assert create_resp.status_code == 200, create_resp.text
+        session.add(report)
+        session.flush()
+        json_key = f"reports/{tenant.id}/{branch.id}/{report.id}/versions/1/report.json"
+        FakeS3Service.store[json_key] = json.dumps(_minimal_report_content()).encode("utf-8")
+        json_storage = create_storage_object(session, key=json_key, tenant=tenant)
+        session.add(
+            ReportVersion(
+                report_id=report.id,
+                version_no=1,
+                json_storage_id=json_storage.id,
+                is_current=True,
+            )
+        )
+        session.commit()
 
-        detail = client.get(
-            f"/api/v1/reports/{create_resp.json()['id']}", headers=headers
-        ).json()
+        resp = client.get(f"/api/v1/reports/{report.id}", headers=headers)
+        assert resp.status_code == 200, resp.text
+        detail = resp.json()
+        assert detail["schema_version"] is None
+        assert detail["report"] == _minimal_report_content()
         assert detail["resolved_resources"] is None
 
     def test_no_unnecessary_s3_public_url_call_without_logo(self, client, session, monkeypatch):
