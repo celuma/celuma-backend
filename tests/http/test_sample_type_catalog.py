@@ -58,7 +58,7 @@ class Lab:
     def sample_payload(self, order: Order, sample_type_id, code="S-1", **extra) -> dict:
         return {
             "tenant_id": str(self.tenant.id), "branch_id": str(self.branch.id), "order_id": str(order.id),
-            "sample_code": code, "sample_type_id": str(sample_type_id), **extra,
+            "sample_type_id": str(sample_type_id), **extra,
         }
 
     def unified_payload(self, samples: list[dict], **extra) -> dict:
@@ -284,14 +284,14 @@ class TestRequiredTypeOnCreation:
             return client.post(UNIFIED, json=lab.unified_payload(samples, patient_id=patient["id"]),
                                headers=lab.headers)
 
-        good = {"sample_code": "A-1", "sample_type_id": str(active.id)}
+        good = {"sample_type_id": str(active.id)}
         for bad in (
-            {"sample_code": "A-2"},
-            {"sample_code": "A-2", "sample_type_id": None},
-            {"sample_code": "A-2", "type": "BIOPSIA"},
-            {"sample_code": "A-2", "sample_type_id": str(uuid.uuid4())},
-            {"sample_code": "A-2", "sample_type_id": str(foreign.id)},
-            {"sample_code": "A-2", "sample_type_id": str(inactive.id)},
+            {},
+            {"sample_type_id": None},
+            {"type": "BIOPSIA"},
+            {"sample_type_id": str(uuid.uuid4())},
+            {"sample_type_id": str(foreign.id)},
+            {"sample_type_id": str(inactive.id)},
         ):
             # One good sample next to a bad one: NOTHING is created.
             response = post([good, bad])
@@ -299,7 +299,7 @@ class TestRequiredTypeOnCreation:
         session.expire_all()
         assert session.exec(select(Order)).all() == [] and session.exec(select(Sample)).all() == []
 
-        ok = post([good, {"sample_code": "A-3", "sample_type_id": str(active.id)}])
+        ok = post([good, {"sample_type_id": str(active.id)}])
         assert ok.status_code == 200, ok.text
         assert [s["sample_type"]["code"] for s in ok.json()["samples"]] == ["ACT", "ACT"]
         assert {s.sample_type_id for s in session.exec(select(Sample)).all()} == {active.id}

@@ -138,8 +138,7 @@ def _create_order_with_sample(client, lab, *, sample_code: str = "M-1") -> tuple
         json=_order_payload(
             lab,
             patient_id=patient["id"],
-            order_code=f"ORD-{sample_code}",
-            samples=[{"sample_code": sample_code, "sample_type_id": str(lab["sample_type"].id)}],
+            samples=[{"sample_type_id": str(lab["sample_type"].id)}],
         ),
         headers=lab["headers"],
     )
@@ -227,7 +226,6 @@ class TestOrderAndSampleWorkflow:
                 "tenant_id": str(lab["tenant"].id),
                 "branch_id": str(lab["branch"].id),
                 "order_id": order_body["id"],
-                "sample_code": "M-1",
                 "sample_type_id": str(lab["sample_type"].id),
             },
             headers=lab["headers"],
@@ -297,8 +295,8 @@ class TestOrderAndSampleWorkflow:
                 lab,
                 patient_id=patient["id"],
                 samples=[
-                    {"sample_code": "M-1", "sample_type_id": str(lab["sample_type"].id)},
-                    {"sample_code": "M-2", "sample_type_id": str(lab["sample_type"].id)},
+                    {"sample_type_id": str(lab["sample_type"].id)},
+                    {"sample_type_id": str(lab["sample_type"].id)},
                 ],
             ),
             headers=lab["headers"],
@@ -312,7 +310,7 @@ class TestOrderAndSampleWorkflow:
         stored = session.exec(
             select(Sample).where(Sample.order_id == uuid.UUID(body["order"]["id"]))
         ).all()
-        assert {s.sample_code for s in stored} == {"M-1", "M-2"}
+        assert {s.sample_code for s in stored} == {"BIOPSIA-1", "BIOPSIA-2"}  # generated, never typed (Céluma 1.4)
 
     def test_samples_list_is_scoped_to_the_callers_tenant(
         self, client, session: Session, lab, other_lab
@@ -324,7 +322,7 @@ class TestOrderAndSampleWorkflow:
                 json=_order_payload(
                     context,
                     patient_id=patient["id"],
-                    samples=[{"sample_code": "M-1", "sample_type_id": str(lab["sample_type"].id)}],
+                    samples=[{"sample_type_id": str(lab["sample_type"].id)}],
                 ),
                 headers=context["headers"],
             )
@@ -496,7 +494,7 @@ class TestClinicalRoleAuthorization:
         seeded_patient = _create_patient_via_api(client, lab, patient_code=f"SEED-{role}")
         order_response = client.post(
             "/api/v1/laboratory/orders/",
-            json=_order_payload(lab, patient_id=seeded_patient["id"], order_code=f"ORD-{role}"),
+            json=_order_payload(lab, patient_id=seeded_patient["id"]),
             headers=headers,
         )
         assert (order_response.status_code == 200) is can_create_order, order_response.text
@@ -504,7 +502,7 @@ class TestClinicalRoleAuthorization:
         seeded_order = client.post(
             "/api/v1/laboratory/orders/",
             json=_order_payload(
-                lab, patient_id=seeded_patient["id"], order_code=f"SEEDORD-{role}"
+                lab, patient_id=seeded_patient["id"]
             ),
             headers=lab["headers"],
         )
@@ -515,7 +513,6 @@ class TestClinicalRoleAuthorization:
                 "tenant_id": str(lab["tenant"].id),
                 "branch_id": str(lab["branch"].id),
                 "order_id": seeded_order.json()["id"],
-                "sample_code": f"M-{role}",
                 "sample_type_id": str(lab["sample_type"].id),
             },
             headers=headers,
@@ -602,7 +599,7 @@ class TestClinicalTenantIsolation:
             json=_order_payload(
                 other_lab,
                 patient_id=patient["id"],
-                samples=[{"sample_code": "M-1", "sample_type_id": str(other_lab["sample_type"].id)}],
+                samples=[{"sample_type_id": str(other_lab["sample_type"].id)}],
             ),
             headers=other_lab["headers"],
         )
@@ -684,7 +681,6 @@ class TestClinicalTenantIsolation:
                 "tenant_id": str(other_lab["tenant"].id),
                 "branch_id": str(other_lab["branch"].id),
                 "order_id": foreign_order.json()["id"],
-                "sample_code": "INTRUSO-1",
                 "sample_type_id": str(other_lab["sample_type"].id),
             },
             headers=lab["headers"],
@@ -707,7 +703,7 @@ class TestClinicalTenantIsolation:
             json=_order_payload(
                 other_lab,
                 patient_id=foreign_patient["id"],
-                samples=[{"sample_code": "INTRUSO-U1", "sample_type_id": str(other_lab["sample_type"].id)}],
+                samples=[{"sample_type_id": str(other_lab["sample_type"].id)}],
             ),
             headers=lab["headers"],
         )

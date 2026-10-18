@@ -140,23 +140,24 @@ class TestReplay:
         b = client.post(UNIFIED, json=lab.unified(), headers=h(lab)).json()["order"]["order_code"]
         assert (a, b) == ("CU011026", "CU021026")
 
-    def test_a_manual_code_replays_without_a_second_audit_row(self, client, session, lab):
+    def test_a_replay_writes_no_second_audit_ledger_or_counter_row(self, client, session, lab):
         headers = h(lab)
-        payload = lab.unified(order_code="MAN-1", sample_codes=(("BX", "S-1"),))
-        client.post(UNIFIED, json=payload, headers=headers)
-        audits = session.execute(text("SELECT count(*) FROM audit_log WHERE action = 'NUMBERING.MANUAL_CODE_USED'")).scalar()
-        assert audits == 2
-        client.post(UNIFIED, json=payload, headers=headers)
-        assert session.execute(text("SELECT count(*) FROM audit_log WHERE action = 'NUMBERING.MANUAL_CODE_USED'")).scalar() == 2
-
-    def test_a_manual_code_retry_is_replayed_not_rejected_as_a_duplicate(self, client, lab):
-        headers = h(lab)
-        payload = lab.unified(order_code="MAN-DUP")
-        assert client.post(UNIFIED, json=payload, headers=headers).status_code == 200
+        payload = lab.unified(sample_codes=("BX", "BX"))
+        first = client.post(UNIFIED, json=payload, headers=headers).json()
+        before = counts(session)
+        ledger = session.execute(text("SELECT count(*) FROM numbering_allocation")).scalar()
+        audits = session.execute(text("SELECT count(*) FROM audit_log")).scalar()
         again = client.post(UNIFIED, json=payload, headers=headers)
-        assert again.status_code == 200 and again.headers["Idempotent-Replayed"] == "true"
-        # whereas a NEW submission with the same manual code is a genuine duplicate
-        assert client.post(UNIFIED, json=payload, headers=h(lab)).status_code == 400
+        assert again.status_code == 200 and again.headers["Idempotent-Replayed"] == "true" and again.json() == first
+        assert counts(session) == before
+        assert session.execute(text("SELECT count(*) FROM numbering_allocation")).scalar() == ledger == 3
+        assert session.execute(text("SELECT count(*) FROM audit_log")).scalar() == audits
+
+    def test_a_typed_code_is_refused_even_with_a_key_and_is_never_remembered(self, client, session, lab):
+        headers = h(lab)
+        assert client.post(UNIFIED, json=lab.unified(order_code="MAN-DUP"), headers=headers).status_code == 422
+        assert counts(session)["receipts"] == 0
+        assert client.post(UNIFIED, json=lab.unified(), headers=headers).status_code == 200  # the key carries a corrected request
 
 
 class TestPayloadMismatch:
@@ -170,7 +171,7 @@ class TestPayloadMismatch:
 
     @pytest.mark.parametrize("change", [
         lambda p: p.update(notes="otra"), lambda p: p["samples"][0].update(notes="x"),
-        lambda p: p.update(order_code="M-1"), lambda p: p["samples"].append(dict(p["samples"][0])),
+        lambda p: p.update(expediente="E-1"), lambda p: p["samples"].append(dict(p["samples"][0])),
     ])
     def test_any_field_changes_the_fingerprint(self, client, session, lab, change):
         headers = h(lab)
@@ -189,13 +190,13 @@ class TestPayloadMismatch:
         assert again.status_code == 200 and again.json() == first
 
     def test_only_a_hash_of_the_request_is_stored(self, client, session, lab):
-        payload = lab.unified(notes="texto-sensible-del-caso", sample_codes=(("BX", "M-SECRET"),))
+        payload = lab.unified(notes="texto-sensible-del-caso", expediente="EXP-SECRETO")
         client.post(UNIFIED, json=payload, headers=h(lab))
         row = session.execute(text("SELECT request_fingerprint, result::text, resources::text FROM idempotency_receipt")).one()
         assert len(row[0]) == 64 and int(row[0], 16) >= 0
         stored = " ".join(row)
-        assert "texto-sensible-del-caso" not in stored and "Dr. Sintético" not in stored
-        assert "M-SECRET" in row[1]  # the code a key produced is the one thing kept, with ids
+        assert "texto-sensible-del-caso" not in stored and "Dr. Sintético" not in stored and "EXP-SECRETO" not in stored
+        assert "BX011026" in row[1]  # the code a key produced is the one thing kept, with ids
 
 
 class TestIsolation:
@@ -296,13 +297,14 @@ class TestRollbackAndRetry:
         assert counts(session)["receipts"] == 0 and counts(session)["counter"] == 0
         assert fresh_client.post(UNIFIED, json=lab.unified(), headers=headers).status_code == 200
 
-    def test_a_manual_code_rejection_is_not_remembered_either(self, fresh_client, session, lab):
-        fresh_client.post(UNIFIED, json=lab.unified(order_code="TAKEN"), headers=h(lab))
+    def test_a_rejected_request_is_not_remembered_either(self, fresh_client, session, lab):
         headers = h(lab)
-        assert fresh_client.post(UNIFIED, json=lab.unified(order_code="TAKEN"), headers=headers).status_code == 400
-        assert counts(session)["receipts"] == 1  # only the first, successful one
-        # the rejected attempt left nothing behind, so that key can carry a corrected submission
-        assert fresh_client.post(UNIFIED, json=lab.unified(order_code="FREE"), headers=headers).status_code == 200
+        bad = lab.unified()
+        bad["samples"][0]["sample_type_id"] = "00000000-0000-0000-0000-000000000000"
+        assert fresh_client.post(UNIFIED, json=bad, headers=headers).status_code in (400, 404)
+        assert counts(session)["receipts"] == 0  # the rejected attempt left nothing behind
+        # so that key can carry a corrected submission
+        assert fresh_client.post(UNIFIED, json=lab.unified(), headers=headers).status_code == 200
 
 
 class TestResponseLostAfterCommit:
@@ -458,24 +460,22 @@ class TestConcurrentSameKey:
         assert all(not isinstance(r, Exception) and r.status_code == 200 for r in results)
         assert counts(session)["orders"] == 6 and counts(session)["samples"] == 12
 
-    def test_manual_and_generated_submissions_with_retries_never_duplicate_a_code(self, fresh_client, session, lab):
-        fresh_client.post(ORDERS, json=lab.order_payload(), headers=h(lab))  # counter at 1 -> next CU021026
-        manual_key, gen_key = f"m-{uuid.uuid4().hex}", f"g-{uuid.uuid4().hex}"
-        jobs = [lambda c: c.post(UNIFIED, json=lab.unified(order_code="CU021026"), headers=h(lab, manual_key)) for _ in range(2)]
-        jobs += [lambda c: c.post(UNIFIED, json=lab.unified(), headers=h(lab, gen_key)) for _ in range(2)]
+    def test_distinct_and_retried_submissions_never_duplicate_a_code(self, fresh_client, session, lab):
+        keys = [f"k-{uuid.uuid4().hex}" for _ in range(3)]
+        jobs = [lambda c, k=k: c.post(UNIFIED, json=lab.unified(), headers=h(lab, k)) for k in keys for _ in range(3)]
         results = run_parallel(jobs)
-        assert not [r for r in results if isinstance(r, Exception)]
-        assert all(r.status_code in (200, 400) for r in results), [r.text for r in results]
+        assert all(not isinstance(r, Exception) and r.status_code == 200 for r in results), results
         codes = order_codes(session, lab)
-        assert len(codes) == len(set(codes)) and codes.count("CU021026") <= 1
+        assert len(codes) == len(set(codes)) == 3
+        assert sorted(r.headers.get("Idempotent-Replayed") == "true" for r in results).count(True) == 6
 
 
 class TestAuditedAndLogs:
     def test_a_replay_writes_no_audit_and_the_key_is_not_in_audit_rows(self, client, session, lab):
         headers = h(lab, "very-private-key-123")
-        client.post(UNIFIED, json=lab.unified(order_code="M-1"), headers=headers)
+        client.post(UNIFIED, json=lab.unified(notes="n"), headers=headers)
         n = session.execute(text("SELECT count(*) FROM audit_log")).scalar()
-        client.post(UNIFIED, json=lab.unified(order_code="M-1"), headers=headers)
+        client.post(UNIFIED, json=lab.unified(notes="n"), headers=headers)
         assert session.execute(text("SELECT count(*) FROM audit_log")).scalar() == n
         dumped = " ".join(str(r.event_metadata) + str(r.new_values) for r in session.exec(select(AuditLog)).all())
         assert "very-private-key-123" not in dumped

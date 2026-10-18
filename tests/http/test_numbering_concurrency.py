@@ -81,21 +81,21 @@ def test_scopes_that_render_the_same_string_never_duplicate(fresh_client, sessio
     assert len(set(order_codes(session, lab))) == 12
 
 
-@pytest.mark.parametrize("round_no", range(4))
-def test_manual_and_generated_codes_cannot_both_take_the_same_string(fresh_client, session, lab, round_no):
-    fresh_client.post(ORDERS, json=lab.order_payload(), headers=lab.headers)  # counter at 1, next is CU021026
-    manual_code = "CU021026"
-    jobs = [
-        lambda c: c.post(UNIFIED, json=lab.unified(order_code=manual_code), headers=lab.headers),
-        lambda c: c.post(UNIFIED, json=lab.unified(), headers=lab.headers),
-        lambda c: c.post(UNIFIED, json=lab.unified(), headers=lab.headers),
-    ]
+@pytest.mark.parametrize("round_no", range(2))
+def test_inactive_samples_use_the_compatibility_allocator_atomically(fresh_client, session, monkeypatch, round_no):
+    """Never-activated laboratories: concurrent sample registrations of one type get unique, contiguous `<code>-<n>`."""
+    freeze(monkeypatch)
+    legacy = Lab(session, f"Legacy{round_no}", sample_types=("BX", "TJ"))  # no numbering configuration at all
+    order = fresh_client.post(ORDERS, json=legacy.order_payload(), headers=legacy.headers).json()["id"]
+    jobs = [lambda c: c.post(SAMPLES, json=legacy.sample_payload(order), headers=legacy.headers) for _ in range(10)]
+    jobs += [lambda c: c.post(UNIFIED, json=legacy.unified(sample_codes=("BX", "TJ")), headers=legacy.headers) for _ in range(5)]
     results = run_parallel(jobs)
-    assert not [r for r in results if isinstance(r, Exception)]
-    assert all(r.status_code in (200, 400) for r in results), [r.text for r in results]
-    codes = order_codes(session, lab)
-    assert len(codes) == len(set(codes)), codes  # nobody holds a duplicate, whoever won
-    assert codes.count(manual_code) <= 1
+    all_ok(results)
+    codes = sample_codes(session, legacy)
+    assert len(codes) == len(set(codes)) == 20
+    assert sorted(c for c in codes if c.startswith("BX-")) == sorted(f"BX-{n}" for n in range(1, 16))
+    assert sorted(c for c in codes if c.startswith("TJ-")) == sorted(f"TJ-{n}" for n in range(1, 6))
+    assert sorted(order_codes(session, legacy)) == sorted(f"CU-{n}" for n in range(1, 7))
 
 
 def test_parallel_requests_across_tenants_are_isolated(fresh_client, session, lab):

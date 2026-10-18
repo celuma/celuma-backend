@@ -5779,7 +5779,10 @@ class TestListSearchAndIndexesMigration:
 
         _alembic(RELEASE_1_4_REVISION)
         after = set(inspect(migration_db).get_table_names())
-        assert after - before == {"sample_type", "numbering_config", "numbering_counter", "numbering_allocation", "idempotency_receipt"}
+        assert after - before == {
+            "sample_type", "numbering_config", "numbering_counter", "numbering_allocation", "idempotency_receipt",
+            "order_requesting_physician", "sample_code_correction",  # §4 (#9/#10/#11/#16)
+        }
         assert before - after == set(), "the revision must not remove an existing table"
 
         _alembic(HOTFIX_REVISION, command="downgrade")

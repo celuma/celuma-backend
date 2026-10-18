@@ -19,7 +19,10 @@ class Report(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     template: Optional[Dict[str, Any]] = Field(sa_type=JSON, default=None)
     published_at: Optional[datetime] = Field(default=None)
     created_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
-    
+    # Céluma 1.4 (#11): set only when the report's order is removed as an erroneous capture (a DRAFT with no
+    # review evidence). The report is retained but hidden with its order (see app/core/soft_removal.py).
+    removed_at: Optional[datetime] = Field(default=None)
+
     # Basic relationships only
     versions: List["ReportVersion"] = Relationship(back_populates="report")
     # No Report.order relationship: use Report.order_id + session.get(Order, report.order_id)

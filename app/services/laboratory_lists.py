@@ -26,6 +26,7 @@ from sqlmodel import Session, select
 from app.models.assignment import Assignment
 from app.models.enums import OrderStatus, SampleState
 from app.models.laboratory import Label, Order, OrderLabel, Sample, SampleLabel
+from app.models.order_management import OrderRequestingPhysician
 from app.models.patient import Patient
 from app.models.requesting_physician import RequestingPhysician
 from app.models.sample_type import SampleType
@@ -44,6 +45,7 @@ from app.schemas.laboratory import (
     SampleListItem,
     UserRef,
 )
+from app.services import order_management
 from app.services.list_search import SearchSpec, search_condition, sort_key
 from app.services.sample_types import UNTYPED_FILTER_VALUE, sample_type_refs
 
@@ -389,7 +391,6 @@ def order_list_statement(
     stmt = (
         select(Order)
         .outerjoin(Patient, Patient.id == Order.patient_id)
-        .outerjoin(RequestingPhysician, RequestingPhysician.id == Order.requesting_physician_id)
         .where(Order.tenant_id == tenant_id, *extra_where)
     )
     if statuses:
@@ -397,7 +398,12 @@ def order_list_statement(
     if patient_ids:
         stmt = stmt.where(Order.patient_id.in_(_uuid_list(patient_ids)))
     if physician_ids:
-        stmt = stmt.where(Order.requesting_physician_id.in_(_uuid_list(physician_ids)))
+        wanted = _uuid_list(physician_ids)
+        stmt = stmt.where(or_(
+            Order.id.in_(sa_select(OrderRequestingPhysician.order_id).where(
+                OrderRequestingPhysician.requesting_physician_id.in_(wanted))),
+            Order.requesting_physician_id.in_(wanted),  # legacy single column (pre-1.4 rows not in the set table)
+        ))
     if has_report is not None:
         stmt = stmt.where(Order.report_id.is_not(None) if has_report else Order.report_id.is_(None))
     if has_invoice is not None:
@@ -414,11 +420,15 @@ def order_list_statement(
         scalars=(
             Order.order_code,
             Order.requested_by,
+            Order.expediente,
             Order.notes,
         ),
         related=(
             lambda pred: Order.patient_id.in_(patients_matching(tenant_id, pred)),
             lambda pred: Order.requesting_physician_id.in_(physicians_matching(tenant_id, pred)),
+            lambda pred: Order.id.in_(
+                sa_select(OrderRequestingPhysician.order_id).where(
+                    OrderRequestingPhysician.requesting_physician_id.in_(physicians_matching(tenant_id, pred)))),
             lambda pred: Order.id.in_(_labelled_matching(OrderLabel, OrderLabel.order_id, tenant_id, pred)),
             lambda pred: Order.id.in_(_assigned_matching("lab_order", tenant_id, pred)),
         ),
@@ -429,9 +439,19 @@ def order_list_statement(
     key = {
         "order_code": sort_key(Order.order_code),
         "patient": sort_key(patient_sort_expr()),
+        # Several physicians, no primary: sort by the alphabetically first name (deterministic, no hierarchy).
         "requester": sort_key(func.coalesce(
-            func.nullif(RequestingPhysician.full_name, ""),
-            func.nullif(func.concat_ws(" ", RequestingPhysician.first_name, RequestingPhysician.last_name), ""),
+            sa_select(func.min(physician_name_expr()))
+            .select_from(OrderRequestingPhysician)
+            .join(RequestingPhysician, RequestingPhysician.id == OrderRequestingPhysician.requesting_physician_id)
+            .where(OrderRequestingPhysician.order_id == Order.id)
+            .correlate(Order)
+            .scalar_subquery(),
+            sa_select(func.min(physician_name_expr()))
+            .select_from(RequestingPhysician)
+            .where(RequestingPhysician.id == Order.requesting_physician_id)
+            .correlate(Order)
+            .scalar_subquery(),
             Order.requested_by,
         )),
         "status": cast(Order.status, String).collate("C"),
@@ -444,7 +464,7 @@ def build_order_items(session: Session, orders: Sequence[Order]) -> list[OrderLi
     ids = [o.id for o in orders]
     branches = _by_id(session, Branch, (o.branch_id for o in orders))
     patients = _by_id(session, Patient, (o.patient_id for o in orders))
-    physicians = _by_id(session, RequestingPhysician, (o.requesting_physician_id for o in orders))
+    physician_sets = order_management.physicians_by_order(session, orders)
     sample_counts = dict(session.exec(
         select(Sample.order_id, func.count()).where(Sample.order_id.in_(ids)).group_by(Sample.order_id)
     ).all()) if ids else {}
@@ -464,7 +484,10 @@ def build_order_items(session: Session, orders: Sequence[Order]) -> list[OrderLi
             tenant_id=str(o.tenant_id),
             branch=_branch_ref(o.branch_id, branches),
             patient=patient_ref(patients.get(o.patient_id)),
-            requesting_physician=physician_ref(physicians.get(o.requesting_physician_id)),
+            requesting_physician=(
+                physician_ref(physician_sets[o.id][0]) if len(physician_sets[o.id]) == 1 else None),
+            requesting_physicians=[physician_ref(p) for p in physician_sets[o.id]],
+            expediente=o.expediente,
             requested_by=o.requested_by,
             notes=o.notes,
             created_at=str(o.created_at) if getattr(o, "created_at", None) else None,
@@ -494,7 +517,10 @@ def order_filter_options(session: Session, tenant_id) -> OrderFilterOptionsRespo
     physicians = session.exec(
         sa_select(RequestingPhysician.id, physician_name_expr())
         .where(RequestingPhysician.tenant_id == tenant_id,
-               exists(sa_select(1).where(Order.requesting_physician_id == RequestingPhysician.id, in_tenant)))
+               or_(exists(sa_select(1).where(Order.requesting_physician_id == RequestingPhysician.id, in_tenant)),
+                   exists(sa_select(1).select_from(OrderRequestingPhysician)
+                          .join(Order, Order.id == OrderRequestingPhysician.order_id)
+                          .where(OrderRequestingPhysician.requesting_physician_id == RequestingPhysician.id, in_tenant))))
         .order_by(sort_key(physician_name_expr()), RequestingPhysician.id)
     ).all()
     labels = session.exec(
@@ -515,7 +541,8 @@ def order_filter_options(session: Session, tenant_id) -> OrderFilterOptionsRespo
     has_requester = session.exec(
         select(exists(sa_select(1).where(
             in_tenant,
-            Order.requesting_physician_id.is_not(None) | (func.coalesce(Order.requested_by, "") != ""),
+            Order.requesting_physician_id.is_not(None) | (func.coalesce(Order.requested_by, "") != "")
+            | exists(sa_select(1).where(OrderRequestingPhysician.order_id == Order.id)),
         )))
     ).one()
     return OrderFilterOptionsResponse(
