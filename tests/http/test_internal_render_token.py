@@ -17,7 +17,7 @@ def _create_report(session, tenant, branch, order):
     report = Report(tenant_id=tenant.id, branch_id=branch.id, order_id=order.id, status=ReportStatus.DRAFT)
     session.add(report)
     session.flush()
-    version = ReportVersion(report_id=report.id, version_no=1, is_current=True)
+    version = ReportVersion(report_id=report.id, version_no=1, is_current=True, schema_version=2)
     session.add(version)
     session.commit()
     session.refresh(report)

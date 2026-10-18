@@ -514,36 +514,31 @@ class TestPresentationFreezesAtApproval:
         assert _get(client, v2_world)["status"] == ReportStatus.IN_REVIEW
 
 
-class TestLegacyUnaffected:
-    def test_legacy_report_also_refuses_a_letterhead_change(self, client, session):
-        """§14 updated. A Legacy report has no `presentation` to replace, so
-        remediation 5 ignored the field silently. 1.3.1 refuses it instead:
-        the rule is about WHO may change a letterhead, and that does not vary
-        by schema version. No real client sends it — the selector is not
-        rendered for authors — so this only closes a direct-call path."""
-        tenant = create_tenant(session)  # reports_v2_enabled=False
+class TestLegacyDraftsAreBlockedBeforeAnyLetterheadRule:
+    """§14 as of Céluma 1.4 (#22). A legacy report has no `presentation` to
+    replace, and legacy authoring is retired: every content save is refused
+    with 409 `legacy_report_authoring_retired`, whether or not it carries a
+    letterhead. (Before 1.4 these were `403` for a letterhead change and `200`
+    for a plain save; the full legacy matrix lives in
+    `test_reports_v2_only.py`.)"""
+
+    def _legacy_draft(self, session, email):
+        from .factories import create_report
+
+        tenant = create_tenant(session)
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
-        user = create_user(session, tenant, email="legacy@t1.example")
-        headers = auth_headers(user)
+        user = create_user(session, tenant, email=email)
+        report, _ = create_report(session, tenant, branch, order, schema_version=None)
+        return tenant, branch, order, report, user
+
+    def test_a_legacy_save_carrying_a_letterhead_is_refused(self, client, session):
+        tenant, branch, order, report, user = self._legacy_draft(session, "legacy@t1.example")
         letterhead = create_letterhead(session, tenant, name="Irrelevante")
         version = create_letterhead_version(session, tenant, letterhead, status="ACTIVE")
 
-        created = client.post(
-            "/api/v1/reports/",
-            json={
-                "tenant_id": str(tenant.id),
-                "branch_id": str(branch.id),
-                "order_id": str(order.id),
-                "report": _content(),
-            },
-            headers=headers,
-        )
-        assert created.status_code == 200, created.text
-        report_id = created.json()["id"]
-
         resp = client.post(
-            f"/api/v1/reports/{report_id}/new_version",
+            f"/api/v1/reports/{report.id}/new_version",
             json={
                 "tenant_id": str(tenant.id),
                 "branch_id": str(branch.id),
@@ -551,42 +546,23 @@ class TestLegacyUnaffected:
                 "report": _content("Actualizado"),
                 "letterhead_version_id": str(version.id),
             },
-            headers=headers,
+            headers=auth_headers(user),
         )
-        assert resp.status_code == 403, resp.text
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "legacy_report_authoring_retired"
 
-    def test_a_legacy_content_save_without_a_letterhead_still_works(self, client, session):
-        tenant = create_tenant(session)
-        branch = create_branch(session, tenant)
-        order = create_order(session, tenant, branch)
-        user = create_user(session, tenant, email="legacy2@t1.example")
-        headers = auth_headers(user)
-
-        created = client.post(
-            "/api/v1/reports/",
-            json={
-                "tenant_id": str(tenant.id),
-                "branch_id": str(branch.id),
-                "order_id": str(order.id),
-                "report": _content(),
-            },
-            headers=headers,
-        )
-        assert created.status_code == 200, created.text
-        report_id = created.json()["id"]
+    def test_a_legacy_content_save_without_a_letterhead_is_refused_too(self, client, session):
+        tenant, branch, order, report, user = self._legacy_draft(session, "legacy2@t1.example")
 
         resp = client.post(
-            f"/api/v1/reports/{report_id}/new_version",
+            f"/api/v1/reports/{report.id}/new_version",
             json={
                 "tenant_id": str(tenant.id),
                 "branch_id": str(branch.id),
                 "order_id": str(order.id),
                 "report": _content("Actualizado"),
             },
-            headers=headers,
+            headers=auth_headers(user),
         )
-        assert resp.status_code == 200, resp.text
-        detail = client.get(f"/api/v1/reports/{report_id}", headers=headers).json()
-        assert detail["schema_version"] is None
-        assert detail["letterhead_version_id"] is None
-        assert detail["report"]["base"]["diagnosis"]["value"] == "Actualizado"
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "legacy_report_authoring_retired"

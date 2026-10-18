@@ -257,15 +257,29 @@ class TestImportValidation:
         assert resp.status_code == 403
 
 
-class TestLegacyExport:
+def _legacy_adapter_envelope() -> dict:
+    """The legacy-parity `.cell` envelope, built in-process.
+
+    Céluma 1.4 (#22) retired `GET /report-letterheads/legacy/export`, but the
+    adapter stays as the reference that supported V2 import/export is checked
+    against (legacy parity of historical reports)."""
+    import json as _json
+
+    from app.services.legacy_letterhead_adapter import build_legacy_letterhead_export
+
+    return _json.loads(build_legacy_letterhead_export().model_dump_json())
+
+
+class TestLegacyAdapterEnvelope:
+    """The legacy-parity envelope (no longer served over HTTP, see #22) stays
+    deterministic, free of clinical data, and importable."""
+
+
     def test_legacy_export_is_deterministic_and_matches_frozen_constants(self, client, session):
         tenant = create_tenant(session)
         user = create_user(session, tenant, email="admin@t1.example")
 
-        resp1 = client.get("/api/v1/report-letterheads/legacy/export", headers=auth_headers(user))
-        resp2 = client.get("/api/v1/report-letterheads/legacy/export", headers=auth_headers(user))
-        assert resp1.status_code == 200
-        body1, body2 = resp1.json(), resp2.json()
+        body1, body2 = _legacy_adapter_envelope(), _legacy_adapter_envelope()
 
         # Verbatim copy of legacy_letterhead_config.ts constants (see
         # legacy_letterhead_adapter.py module docstring).
@@ -283,8 +297,7 @@ class TestLegacyExport:
         tenant = create_tenant(session)
         user = create_user(session, tenant, email="admin@t1.example")
 
-        resp = client.get("/api/v1/report-letterheads/legacy/export", headers=auth_headers(user))
-        raw = json.dumps(resp.json()).lower()
+        raw = json.dumps(_legacy_adapter_envelope()).lower()
         for forbidden in ("patient", "paciente", "diagnos", "template"):
             assert forbidden not in raw
 
@@ -292,9 +305,7 @@ class TestLegacyExport:
         tenant = create_tenant(session)
         user = create_user(session, tenant, email="admin@t1.example")
 
-        exported = client.get(
-            "/api/v1/report-letterheads/legacy/export", headers=auth_headers(user)
-        ).json()
+        exported = _legacy_adapter_envelope()
         imported = client.post(
             "/api/v1/report-letterheads/import",
             files={

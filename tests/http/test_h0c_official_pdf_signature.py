@@ -104,7 +104,8 @@ def _approved_report(session, tenant, branch, order, *, show=True, require_digit
     session.add(report)
     session.flush()
     version = ReportVersion(
-        report_id=report.id, version_no=1, is_current=True, json_storage_id=storage.id
+        report_id=report.id, version_no=1, is_current=True, json_storage_id=storage.id,
+        schema_version=2,
     )
     session.add(version)
     session.commit()

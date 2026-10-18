@@ -773,6 +773,7 @@ Headers: `Authorization: Bearer <token>`
 **Notes:**
 - All fields are optional; only provided fields are updated
 - `admin:manage_tenant` permission required
+- **Céluma 1.4 (#22):** `reports_v2_enabled` is retired. `true` is accepted and ignored, `false` returns **409** `{"detail": {"code": "reports_v2_flag_retired", ...}}` before any other field is applied, and responses (here, `GET /tenants/` and `GET /tenants/{id}`) always report `true` for older clients.
 - Can only update own tenant
 - **`default_reviewer_id` (Céluma 1.3.1, CEL-131-06):** the tenant-level
   default reviewer — a fallback, never a role or permission grant. The
@@ -1737,6 +1738,8 @@ Headers: `Authorization: Bearer <token>`
 ### POST /api/v1/reports/
 **Create a new report**
 
+> **Céluma 1.4 (issue #22) — Reports V2 only.** Every new report is a V2 report. The request must send `template_id` + `template_hash` (the token returned with the template's `template_json`) or an explicit historical `template_version_id`, plus `report` content; without a template selector the call returns **409** `{"detail": {"code": "reports_v2_template_required", ...}}` and creates nothing. The tenant column `reports_v2_enabled` is no longer read. Setup problems keep their actionable errors: 404 foreign/unknown template, 409 inactive/changed template, 409 no resolvable default letterhead. Contract: `celuma-engineering/specs/reports/reports-v2-only.md`.
+
 **Request Body:**
 ```json
 {
@@ -1842,6 +1845,8 @@ Returns `reports` array with enriched `branch`, `order`, and `patient` objects p
 
 ### POST /api/v1/reports/{report_id}/new_version
 **Create a new version for an existing report**
+
+> **Céluma 1.4 (#22):** an unsigned report whose current version is not V2 (a historical legacy draft) is refused with **409** `{"detail": {"code": "legacy_report_authoring_retired", ...}}`; the same code is returned by `submit`, `versions/{n}/generate-pdf`, `sign` and `sign-and-publish` for such reports. Reading, verdicts, reopen and PDF download are unchanged.
 
 Path param:
 - `report_id`: UUID of the report
@@ -3653,3 +3658,6 @@ Contract: `celuma-engineering/specs/laboratory/order-sample-management.md`. Allo
 | `POST /api/v1/laboratory/samples/{id}/removal` | `lab:remove_capture` | `{reason}`; blocked for the order's last sample; retry answers `already_removed` |
 
 Order responses add `requesting_physicians[]` and `expediente`; `requesting_physician` is set only when exactly one physician is listed. Creation bodies accept `requesting_physician_ids[]` and `expediente` (the old `requesting_physician_id` remains a one-element alias).
+
+### GET /api/v1/report-letterheads/legacy/export
+**Retired (Céluma 1.4, #22).** Returns **410** `{"detail": {"code": "legacy_letterhead_export_retired", ...}}` after authentication and the `reports:manage_templates` check. V2 letterhead export (`GET /report-letterheads/{letterhead_id}/versions/{version_id}/export`) and `POST /report-letterheads/import` are unchanged.

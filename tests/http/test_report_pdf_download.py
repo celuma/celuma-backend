@@ -20,7 +20,8 @@ def _create_report(session: Session, tenant, branch, order, status=ReportStatus.
     report = Report(tenant_id=tenant.id, branch_id=branch.id, order_id=order.id, status=status)
     session.add(report)
     session.flush()
-    version = ReportVersion(report_id=report.id, version_no=1, is_current=True)
+    # Céluma 1.4 (#22): official PDF generation is V2-only for unsigned reports.
+    version = ReportVersion(report_id=report.id, version_no=1, is_current=True, schema_version=2)
     session.add(version)
     session.commit()
     session.refresh(report)

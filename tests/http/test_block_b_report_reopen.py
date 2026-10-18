@@ -674,12 +674,18 @@ class TestReopenedReportCannotSkipReview:
         )
         assert resp.status_code == 403, resp.text
 
-    def test_a_reopened_report_does_not_reopen_the_presentation_window(
+    def test_a_reopened_report_stays_in_authoring_until_it_is_resubmitted(
         self, client, session, lab
     ):
-        """Block A keeps presentation settings reviewer-only and IN_REVIEW-only.
-        Reopening returns the report to DRAFT — the reviewer's window comes
-        back when it is resubmitted, not before."""
+        """Céluma 1.3.1 R1 opened the assigned reviewer's presentation window
+        to DRAFT as well as IN_REVIEW, so a reopened (DRAFT) report accepts a
+        presentation change from them. What reopening must NOT do is skip
+        review: the report stays DRAFT, and no approval is possible until it
+        has been resubmitted.
+
+        (Before Céluma 1.4 this test asserted a 409 here; that came from the
+        fixture being a legacy report with no `presentation`, not from the
+        lifecycle. The fixture is V2 now that legacy authoring is retired.)"""
         assert _reopen(client, lab["report"], lab["reviewer"]).status_code == 200
 
         resp = client.patch(
@@ -687,7 +693,16 @@ class TestReopenedReportCannotSkipReview:
             json={"show_signature_section": True},
             headers=auth_headers(lab["reviewer"]),
         )
-        assert resp.status_code == 409, resp.text
+        assert resp.status_code == 200, resp.text
+
+        approve = client.post(
+            f"/api/v1/reports/{lab['report'].id}/approve",
+            json={},
+            headers=auth_headers(lab["reviewer"]),
+        )
+        assert approve.status_code in (400, 409), approve.text
+        session.refresh(lab["report"])
+        assert lab["report"].status == ReportStatus.DRAFT
 
 
 # ---------------------------------------------------------------------------

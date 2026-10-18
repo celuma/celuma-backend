@@ -1,10 +1,11 @@
-"""HTTP integration tests for the `reports_v2_enabled` tenant toggle
-(Céluma 1.3, Phase 2, Block D, Story D9).
+"""HTTP integration tests for the RETIRED `reports_v2_enabled` tenant field
+(introduced in Céluma 1.3, Phase 2, Block D, Story D9; retired in 1.4, #22).
 
-There is no dedicated endpoint for this flag — it is exposed as an optional
-field on the existing `PATCH /api/v1/tenants/{id}` (see
-app/api/v1/tenants.py::update_tenant), gated by the same `admin:manage_tenant`
-permission as the rest of that endpoint.
+The field is still parsed by `PATCH /api/v1/tenants/{id}` so older clients get a
+precise answer: `true` is accepted and ignored, `false` is refused (409), reads
+always report `true`, and nothing about existing reports changes. The endpoint
+keeps its `admin:manage_tenant` gate and tenant scope. The creation-path
+consequences are covered in `test_reports_v2_only.py`.
 """
 from app.models.enums import ReportStatus
 from app.models.report import ReportTemplate
@@ -37,8 +38,8 @@ def _create_template_version(session, tenant) -> ReportTemplateVersion:
     return version
 
 
-class TestToggleReportsV2Enabled:
-    def test_authorized_user_can_enable(self, client, session):
+class TestRetiredReportsV2Field:
+    def test_enabling_is_accepted_and_changes_nothing(self, client, session):
         tenant = create_tenant(session, reports_v2_enabled=False)
         user = create_user(session, tenant, email="admin@t1.example")
 
@@ -53,7 +54,7 @@ class TestToggleReportsV2Enabled:
         confirm = client.get(f"/api/v1/tenants/{tenant.id}", headers=auth_headers(user))
         assert confirm.json()["reports_v2_enabled"] is True
 
-    def test_authorized_user_can_disable(self, client, session):
+    def test_disabling_is_refused(self, client, session):
         tenant = create_tenant(session, reports_v2_enabled=True)
         user = create_user(session, tenant, email="admin@t1.example")
 
@@ -62,10 +63,13 @@ class TestToggleReportsV2Enabled:
             json={"reports_v2_enabled": False},
             headers=auth_headers(user),
         )
-        assert resp.status_code == 200, resp.text
-        assert resp.json()["reports_v2_enabled"] is False
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "reports_v2_flag_retired"
 
-    def test_omitting_the_field_leaves_flag_unchanged(self, client, session):
+        confirm = client.get(f"/api/v1/tenants/{tenant.id}", headers=auth_headers(user))
+        assert confirm.json()["reports_v2_enabled"] is True
+
+    def test_omitting_the_field_leaves_the_tenant_update_working(self, client, session):
         tenant = create_tenant(session, reports_v2_enabled=True)
         user = create_user(session, tenant, email="admin@t1.example")
 
@@ -75,6 +79,7 @@ class TestToggleReportsV2Enabled:
             headers=auth_headers(user),
         )
         assert resp.status_code == 200, resp.text
+        assert resp.json()["name"] == "Renamed Tenant"
         assert resp.json()["reports_v2_enabled"] is True
 
     def test_missing_permission_is_rejected(self, client, session):
@@ -95,19 +100,20 @@ class TestToggleReportsV2Enabled:
 
         resp = client.patch(
             f"/api/v1/tenants/{tenant_a.id}",
-            json={"reports_v2_enabled": True},
+            json={"reports_v2_enabled": True, "name": "Hijacked"},
             headers=auth_headers(user_b),
         )
         assert resp.status_code == 403
 
-        # Tenant A's flag must be untouched.
         confirm = client.get(
             f"/api/v1/tenants/{tenant_a.id}",
             headers=auth_headers(create_user(session, tenant_a, email="admin@a.example")),
         )
-        assert confirm.json()["reports_v2_enabled"] is False
+        assert confirm.json()["name"] == "Tenant A"
 
-    def test_disabling_does_not_affect_reading_an_existing_v2_report(self, client, session):
+    def test_refused_disable_does_not_affect_reading_an_existing_v2_report(
+        self, client, session
+    ):
         tenant = create_tenant(session, reports_v2_enabled=True)
         user = create_user(session, tenant, email="admin@t1.example")
         branch = create_branch(session, tenant)
@@ -117,36 +123,15 @@ class TestToggleReportsV2Enabled:
             session, tenant, branch, order, template_version, status=ReportStatus.PUBLISHED
         )
 
-        # Turn the flag off.
         toggle = client.patch(
             f"/api/v1/tenants/{tenant.id}",
             json={"reports_v2_enabled": False},
             headers=auth_headers(user),
         )
-        assert toggle.status_code == 200
-        assert toggle.json()["reports_v2_enabled"] is False
+        assert toggle.status_code == 409
 
-        # The existing V2 report must still read as schema_version 2,
-        # unaffected by the flag — it only gates *creation* of new V2 reports.
         detail = client.get(f"/api/v1/reports/{report.id}", headers=auth_headers(user))
         assert detail.status_code == 200, detail.text
         body = detail.json()
         assert body["schema_version"] == 2
         assert body["template_version_id"] == str(template_version.id)
-
-    def test_disabling_does_not_affect_other_tenants(self, client, session):
-        tenant_a = create_tenant(session, name="Tenant A", reports_v2_enabled=True)
-        tenant_b = create_tenant(session, name="Tenant B", reports_v2_enabled=True)
-        user_a = create_user(session, tenant_a, email="admin@a.example")
-        user_b = create_user(session, tenant_b, email="admin@b.example")
-
-        resp = client.patch(
-            f"/api/v1/tenants/{tenant_a.id}",
-            json={"reports_v2_enabled": False},
-            headers=auth_headers(user_a),
-        )
-        assert resp.status_code == 200
-        assert resp.json()["reports_v2_enabled"] is False
-
-        confirm_b = client.get(f"/api/v1/tenants/{tenant_b.id}", headers=auth_headers(user_b))
-        assert confirm_b.json()["reports_v2_enabled"] is True

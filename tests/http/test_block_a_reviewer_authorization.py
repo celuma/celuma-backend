@@ -61,7 +61,7 @@ def _report(session: Session, tenant, branch, order, *, status=ReportStatus.IN_R
     )
     session.add(report)
     session.flush()
-    version = ReportVersion(report_id=report.id, version_no=1, is_current=True)
+    version = ReportVersion(report_id=report.id, version_no=1, is_current=True, schema_version=2)
     session.add(version)
     session.commit()
     session.refresh(report)

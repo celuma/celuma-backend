@@ -53,9 +53,11 @@ class Tenant(BaseModel, TimestampMixin, table=True):
         ),
     )
     is_active: bool = Field(default=True)
-    # Céluma 1.3 Phase 2, Block A: gates creation of new V2 reports only.
-    # Does not affect rendering of existing reports (schema_version-based,
-    # see report-schema-versioning.md) and is not read anywhere in this block.
+    # Céluma 1.4 (#22): RETIRED compatibility column. Reports V2 is the only
+    # authoring path and nothing reads this value any more; a stored `false`
+    # cannot restore V1 creation. Kept (no schema change) so the published
+    # migration chain and older application versions stay compatible during
+    # rollout and rollback. Do not add new readers.
     reports_v2_enabled: bool = Field(default=False)
     # Céluma 1.3.1 Block D (CEL-131-06): a tenant-scoped CONFIGURATION
     # reference only — never a role, a permission, or clinical authority.

@@ -10,15 +10,18 @@ ticket-id discrepancy):
 
 All server-authoritative (`app/services/report_metadata.py`), overwriting
 whatever the client submits for these keys — the same pattern Block A used
-for `signatureMetadata`. Every test here uses a LEGACY report (no
-`template_id`/`template_version_id`): these are ordinary base fields, not a
-V2-only concept, and Legacy needs no letterhead/template setup, keeping the
-tests focused on the metadata resolution itself.
+for `signatureMetadata`. Since Céluma 1.4 (#22) every report is V2, so
+the tests create reports through the template selector; the fields are
+ordinary base fields and resolve identically from the report's frozen
+template snapshot.
 """
 import uuid
 from datetime import datetime
 
+from sqlmodel import select
+
 from app.models.report import Report
+from app.models.report_letterhead import ReportLetterhead
 from app.models.requesting_physician import RequestingPhysician
 
 from .conftest import make_pdf_bytes
@@ -45,9 +48,8 @@ BASE_TEMPLATE = {
 
 
 def _template_doc(base: dict) -> dict:
-    """A Legacy report's effective template — the `template` field on
-    `ReportCreate`, persisted as `Report.template`. It is what decides which
-    system metadata fields this report declares."""
+    """A report's clinical template document. It is what decides which system
+    metadata fields this report declares."""
     return {
         "base": {k: dict(v) for k, v in base.items()},
         "sections": {},
@@ -56,8 +58,9 @@ def _template_doc(base: dict) -> dict:
     }
 
 
-def _create_legacy_report(
+def _create_report(
     client,
+    session,
     tenant,
     branch,
     order,
@@ -67,13 +70,20 @@ def _create_legacy_report(
     submitted_base=None,
     declared_base=None,
 ):
-    """Create a Legacy report.
+    """Create a (V2) report whose template declares `declared_base`.
 
-    `submitted_base` is what the client puts in `report.base` (defaults to the
-    full BASE_TEMPLATE); `declared_base` is what the report's own template
-    declares (defaults to the same). Separating the two is what lets a test
-    exercise "the client omitted a key the template declares".
+    Céluma 1.4 (#22): there is no legacy creation path any more, so the
+    metadata resolution is exercised through the only one. `submitted_base` is
+    what the client puts in `report.base` (defaults to the full BASE_TEMPLATE);
+    `declared_base` is what the report's own template declares (defaults to the
+    same). Separating the two is what lets a test exercise "the client omitted
+    a key the template declares".
     """
+    from app.models.report import ReportTemplate
+    from app.services.report_template_hash import hash_clinical_template_block
+
+    from .factories import create_default_letterhead
+
     base = {
         k: dict(v)
         for k, v in (BASE_TEMPLATE if submitted_base is None else submitted_base).items()
@@ -82,13 +92,29 @@ def _create_legacy_report(
         for key, value in base_overrides.items():
             base[key]["value"] = value
     declared = BASE_TEMPLATE if declared_base is None else declared_base
+    template_doc = _template_doc(declared)
+    template = ReportTemplate(
+        tenant_id=tenant.id,
+        name=f"Plantilla {uuid.uuid4().hex[:6]}",
+        template_json=template_doc,
+        is_active=True,
+    )
+    session.add(template)
+    session.commit()
+    session.refresh(template)
+    if not session.exec(
+        select(ReportLetterhead).where(ReportLetterhead.tenant_id == tenant.id)
+    ).first():
+        create_default_letterhead(session, tenant)
     return client.post(
         "/api/v1/reports/",
         json={
             "tenant_id": str(tenant.id),
             "branch_id": str(branch.id),
             "order_id": str(order.id),
-            "template": _template_doc(declared),
+            "template": template_doc,
+            "template_id": str(template.id),
+            "template_hash": hash_clinical_template_block(template.template_json),
             "report": {
                 "base": base,
                 "sections": {},
@@ -145,7 +171,7 @@ class TestReceptionDate:
         session.add(s2)
         session.commit()
 
-        resp = _create_legacy_report(client, tenant, branch, order, user)
+        resp = _create_report(client, session, tenant, branch, order, user)
         assert resp.status_code == 200, resp.text
         value = _full_base(client, user, resp.json()["id"])["reception_date"]["value"]
         assert value == f"{earliest.day}/{earliest.month}/{earliest.year}"
@@ -165,7 +191,7 @@ class TestReceptionDate:
         session.add(s2)
         session.commit()
 
-        resp = _create_legacy_report(client, tenant, branch, order, user)
+        resp = _create_report(client, session, tenant, branch, order, user)
         assert resp.status_code == 200, resp.text
         value = _full_base(client, user, resp.json()["id"])["reception_date"]["value"]
         assert value == f"{real_date.day}/{real_date.month}/{real_date.year}"
@@ -182,7 +208,7 @@ class TestReceptionDate:
         session.add(sample)
         session.commit()
 
-        resp = _create_legacy_report(client, tenant, branch, order, user)
+        resp = _create_report(client, session, tenant, branch, order, user)
         assert resp.status_code == 200, resp.text
         assert _full_base(client, user, resp.json()["id"])["reception_date"]["value"] == ""
 
@@ -192,7 +218,7 @@ class TestReceptionDate:
         order = create_order(session, tenant, branch)
         user = create_user(session, tenant, email="author@t1.example")
 
-        resp = _create_legacy_report(client, tenant, branch, order, user)
+        resp = _create_report(client, session, tenant, branch, order, user)
         assert resp.status_code == 200, resp.text
         assert _full_base(client, user, resp.json()["id"])["reception_date"]["value"] == ""
 
@@ -212,7 +238,7 @@ class TestRequestingPhysician:
         session.add(order)
         session.commit()
 
-        resp = _create_legacy_report(client, tenant, branch, order, user)
+        resp = _create_report(client, session, tenant, branch, order, user)
         assert resp.status_code == 200, resp.text
         assert (
             _full_base(client, user, resp.json()["id"])["requesting_physician"]["value"]
@@ -228,7 +254,7 @@ class TestRequestingPhysician:
         session.commit()
         user = create_user(session, tenant, email="author@t1.example")
 
-        resp = _create_legacy_report(client, tenant, branch, order, user)
+        resp = _create_report(client, session, tenant, branch, order, user)
         assert resp.status_code == 200, resp.text
         assert (
             _full_base(client, user, resp.json()["id"])["requesting_physician"]["value"]
@@ -241,7 +267,7 @@ class TestRequestingPhysician:
         order = create_order(session, tenant, branch)
         user = create_user(session, tenant, email="author@t1.example")
 
-        resp = _create_legacy_report(client, tenant, branch, order, user)
+        resp = _create_report(client, session, tenant, branch, order, user)
         assert resp.status_code == 200, resp.text
         assert _full_base(client, user, resp.json()["id"])["requesting_physician"]["value"] == ""
 
@@ -262,7 +288,7 @@ class TestRequestingPhysician:
         session.commit()
         user = create_user(session, tenant, email="author@t1.example")
 
-        resp = _create_legacy_report(client, tenant, branch, order, user)
+        resp = _create_report(client, session, tenant, branch, order, user)
         assert resp.status_code == 200, resp.text
         assert _full_base(client, user, resp.json()["id"])["requesting_physician"]["value"] == ""
 
@@ -282,8 +308,8 @@ class TestFrontendCannotForgeMetadata:
         session.add(sample)
         session.commit()
 
-        resp = _create_legacy_report(
-            client, tenant, branch, order, user,
+        resp = _create_report(
+            client, session, tenant, branch, order, user,
             base_overrides={
                 "reception_date": "01/01/1999",
                 "requesting_physician": "Dr. Forjado",
@@ -301,7 +327,7 @@ class TestFrontendCannotForgeMetadata:
         branch = create_branch(session, tenant)
         order = create_order(session, tenant, branch)
         user = create_user(session, tenant, email="author@t1.example")
-        created = _create_legacy_report(client, tenant, branch, order, user)
+        created = _create_report(client, session, tenant, branch, order, user)
         report_id = created.json()["id"]
 
         resp = client.post(
@@ -341,7 +367,7 @@ class TestDeliveryDate:
         order = create_order(session, tenant, branch)
         user = create_user(session, tenant, email="author@t1.example")
 
-        resp = _create_legacy_report(client, tenant, branch, order, user)
+        resp = _create_report(client, session, tenant, branch, order, user)
         assert _full_base(client, user, resp.json()["id"])["delivery_date"]["value"] == ""
 
     def test_approval_alone_does_not_populate_it(self, client, session):
@@ -354,7 +380,7 @@ class TestDeliveryDate:
         reviewer = create_user(
             session, tenant, email="rev@t1.example", roles=("reviewer",)
         )
-        created = _create_legacy_report(client, tenant, branch, order, author)
+        created = _create_report(client, session, tenant, branch, order, author)
         report_id = created.json()["id"]
         report = session.get(Report, report_id)
         assign_reviewer(session, order, reviewer, report=report)
@@ -383,7 +409,7 @@ class TestDeliveryDate:
         reviewer = create_user(
             session, tenant, email="rev@t1.example", roles=("reviewer",)
         )
-        created = _create_legacy_report(client, tenant, branch, order, author)
+        created = _create_report(client, session, tenant, branch, order, author)
         report_id = created.json()["id"]
         report = session.get(Report, report_id)
         assign_reviewer(session, order, reviewer, report=report)
@@ -440,7 +466,7 @@ class TestReopenedAndPublishedDeterminism:
         session.add(sample)
         session.commit()
 
-        created = _create_legacy_report(client, tenant, branch, order, author)
+        created = _create_report(client, session, tenant, branch, order, author)
         report_id = created.json()["id"]
         report = session.get(Report, report_id)
         assign_reviewer(session, order, reviewer, report=report)
@@ -503,7 +529,7 @@ class TestReopenedAndPublishedDeterminism:
         session.add(order)
         session.commit()
 
-        created = _create_legacy_report(client, tenant, branch, order, author)
+        created = _create_report(client, session, tenant, branch, order, author)
         report_id = created.json()["id"]
         report = session.get(Report, report_id)
         assign_reviewer(session, order, reviewer, report=report)
@@ -565,8 +591,8 @@ class TestDeclaredFieldsCannotBeSuppressedByOmission:
         session.add(order)
         session.commit()
 
-        resp = _create_legacy_report(
-            client,
+        resp = _create_report(
+            client, session,
             tenant,
             branch,
             order,
@@ -599,8 +625,8 @@ class TestDeclaredFieldsCannotBeSuppressedByOmission:
             },
         }
 
-        resp = _create_legacy_report(
-            client, tenant, branch, order, user,
+        resp = _create_report(
+            client, session, tenant, branch, order, user,
             submitted_base={"order_code": dict(BASE_TEMPLATE["order_code"])},
             declared_base=declared,
         )
@@ -617,8 +643,8 @@ class TestDeclaredFieldsCannotBeSuppressedByOmission:
         order = self._order_with_sample(session, tenant, branch)
         user = create_user(session, tenant, email="author@t1.example")
 
-        resp = _create_legacy_report(
-            client, tenant, branch, order, user,
+        resp = _create_report(
+            client, session, tenant, branch, order, user,
             submitted_base={"order_code": dict(BASE_TEMPLATE["order_code"])},
             declared_base=BASE_TEMPLATE,
         )
@@ -644,8 +670,8 @@ class TestDeclaredFieldsCannotBeSuppressedByOmission:
         user = create_user(session, tenant, email="author@t1.example")
         pre_1_3_1 = {"order_code": dict(BASE_TEMPLATE["order_code"])}
 
-        resp = _create_legacy_report(
-            client, tenant, branch, order, user,
+        resp = _create_report(
+            client, session, tenant, branch, order, user,
             submitted_base=pre_1_3_1,
             declared_base=pre_1_3_1,
         )
@@ -661,7 +687,7 @@ class TestDeclaredFieldsCannotBeSuppressedByOmission:
         branch = create_branch(session, tenant)
         order = self._order_with_sample(session, tenant, branch)
         user = create_user(session, tenant, email="author@t1.example")
-        created = _create_legacy_report(client, tenant, branch, order, user)
+        created = _create_report(client, session, tenant, branch, order, user)
         report_id = created.json()["id"]
 
         resp = client.post(
