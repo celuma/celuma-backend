@@ -2331,6 +2331,9 @@ def upload_pdf_to_specific_version(
     if not version:
         raise HTTPException(404, "Report version not found")
 
+    # Céluma 1.4 (#22): refuse before any file read, object write or accounting.
+    require_v2_authoring(report, version)
+
     # Basic content-type validation
     content_type = (file.content_type or "").lower()
     if "pdf" not in content_type:
@@ -2458,6 +2461,9 @@ def upload_pdf_to_latest_version(
     ).first()
     if not latest_version:
         raise HTTPException(404, "No versions found for this report")
+
+    # Céluma 1.4 (#22): refuse before any file read, object write or accounting.
+    require_v2_authoring(report, latest_version)
 
     content_type = (file.content_type or "").lower()
     if "pdf" not in content_type:
@@ -3367,6 +3373,9 @@ def update_report_presentation(
     ).first()
     if not current_version:
         raise HTTPException(404, "No current version found for this report")
+
+    # Céluma 1.4 (#22): a legacy report's stored JSON is never rewritten.
+    require_v2_authoring(report, current_version)
 
     old_values = {
         "letterhead_version_id": (

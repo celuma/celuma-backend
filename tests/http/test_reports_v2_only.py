@@ -448,3 +448,103 @@ class TestV2ReportsAreNotAffectedByTheGuard:
         # Submission may still fail for unrelated reasons (no reviewer); it
         # must never fail with the legacy-retirement code.
         assert _error_code(submitted) != LEGACY_CODE
+
+
+# ---------------------------------------------------------------------------
+# Remaining write routes (review of #22): PDF uploads and presentation PATCH
+# ---------------------------------------------------------------------------
+
+def _row_counts(session):
+    from app.models.audit import AuditLog
+    from app.models.storage import StorageObject
+
+    session.expire_all()
+    return (
+        len(session.exec(select(StorageObject)).all()),
+        len(session.exec(select(AuditLog)).all()),
+    )
+
+
+class TestLegacyPdfUploadAndPresentationAreBlocked:
+    @pytest.mark.parametrize(
+        "status", [ReportStatus.DRAFT, ReportStatus.IN_REVIEW, ReportStatus.APPROVED]
+    )
+    @pytest.mark.parametrize("suffix", ["/pdf", "/versions/1/pdf"])
+    def test_pdf_upload_is_refused_without_any_side_effect(
+        self, client, session, status, suffix
+    ):
+        tenant, branch, order, report, version = _legacy(session, status)
+        author = create_user(session, tenant, email="upload@legacy.example")
+        store_before = dict(FakeS3Service.store)
+        counts_before = _row_counts(session)
+
+        resp = client.post(
+            f"/api/v1/reports/{report.id}{suffix}",
+            files={"file": ("x.pdf", make_pdf_bytes(1), "application/pdf")},
+            headers=auth_headers(author),
+        )
+
+        assert resp.status_code == 409, resp.text
+        assert _error_code(resp) == LEGACY_CODE
+        assert FakeS3Service.store == store_before
+        assert _row_counts(session) == counts_before
+        session.expire_all()
+        assert session.get(ReportVersion, version.id).pdf_storage_id is None
+
+    @pytest.mark.parametrize("status", [ReportStatus.DRAFT, ReportStatus.IN_REVIEW])
+    def test_presentation_patch_is_refused_without_rewriting_the_stored_json(
+        self, client, session, status
+    ):
+        tenant, branch, order, report, version = _legacy(session, status)
+        reviewer = create_user(
+            session, tenant, email="presentation@legacy.example", roles=("reviewer",)
+        )
+        assign_reviewer(session, order, reviewer, report=report)
+        store_before = dict(FakeS3Service.store)
+        counts_before = _row_counts(session)
+
+        resp = client.patch(
+            f"/api/v1/reports/{report.id}/presentation",
+            json={"show_signature_section": True},
+            headers=auth_headers(reviewer),
+        )
+
+        assert resp.status_code == 409, resp.text
+        assert _error_code(resp) == LEGACY_CODE
+        assert FakeS3Service.store == store_before
+        assert _row_counts(session) == counts_before
+
+    def test_upload_keeps_tenant_and_capability_guards_first(self, client, session):
+        tenant, branch, order, report, version = _legacy(session, ReportStatus.DRAFT)
+        other = create_tenant(session, name="Otro")
+        outsider = create_user(session, other, email="outsider@legacy.example")
+        viewer = create_user(
+            session, tenant, email="viewer@legacy.example", roles=("viewer",)
+        )
+        files = {"file": ("x.pdf", make_pdf_bytes(1), "application/pdf")}
+
+        foreign = client.post(
+            f"/api/v1/reports/{report.id}/pdf", files=files, headers=auth_headers(outsider)
+        )
+        unprivileged = client.post(
+            f"/api/v1/reports/{report.id}/pdf", files=files, headers=auth_headers(viewer)
+        )
+
+        assert foreign.status_code == 403
+        assert unprivileged.status_code == 403
+
+    @pytest.mark.parametrize("suffix", ["/pdf", "/versions/1/pdf"])
+    def test_v2_draft_pdf_upload_still_works(self, client, session, suffix):
+        tenant = create_tenant(session, name="V2 upload")
+        branch = create_branch(session, tenant)
+        order = create_order(session, tenant, branch, order_code="ORD-V2UP")
+        report, _ = create_report(session, tenant, branch, order, status=ReportStatus.DRAFT)
+        author = create_user(session, tenant, email="v2upload@example.test")
+
+        resp = client.post(
+            f"/api/v1/reports/{report.id}{suffix}",
+            files={"file": ("x.pdf", make_pdf_bytes(1), "application/pdf")},
+            headers=auth_headers(author),
+        )
+
+        assert resp.status_code == 200, resp.text
