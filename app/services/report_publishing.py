@@ -167,6 +167,24 @@ def embed_signature_metadata_if_required(
     session.commit()
 
 
+#: Céluma 1.4 (#13): the `detail.code` of a write refused because a signature
+#: of the version it would touch is in progress (see `publish_in_progress`).
+PUBLISH_IN_PROGRESS_CODE = "report_publish_in_progress"
+
+
+def publish_in_progress(version: Optional[ReportVersion], now: Optional[datetime] = None) -> bool:
+    """True while a fresh (non-stale) sign-and-publish claim is held on this
+    version. Céluma 1.4 (#13): every writer that could change what is being
+    signed (manual PDF uploads, presentation, review decisions, reopening,
+    cancelling an amendment, plain PDF generation) checks this under the
+    report's order lock and its version row lock, because the claim is the
+    only thing that spans the slow, lock-free rendering phase."""
+    if version is None or version.publish_started_at is None:
+        return False
+    stale_after = timedelta(seconds=settings.report_publish_timeout_seconds * 3)
+    return ((now or datetime.utcnow()) - version.publish_started_at) < stale_after
+
+
 def claim_publish(session: Session, version: ReportVersion, actor_id: UUID) -> None:
     """Atomically claims the right to sign-and-publish this version. Caller
     must hold the row lock (`load_locked_version`) when calling this —
@@ -177,13 +195,11 @@ def claim_publish(session: Session, version: ReportVersion, actor_id: UUID) -> N
     retried, same staleness policy as PDF generation.
     """
     now = datetime.utcnow()
-    if version.publish_started_at is not None:
-        stale_after = timedelta(seconds=settings.report_publish_timeout_seconds * 3)
-        if (now - version.publish_started_at) < stale_after:
-            raise ReportPublishAlreadyInProgressError(
-                "PUBLISH_IN_PROGRESS",
-                "A sign-and-publish attempt is already running for this report version",
-            )
+    if publish_in_progress(version, now):
+        raise ReportPublishAlreadyInProgressError(
+            "PUBLISH_IN_PROGRESS",
+            "A sign-and-publish attempt is already running for this report version",
+        )
     version.publish_started_at = now
     version.publish_started_by = actor_id
     session.add(version)

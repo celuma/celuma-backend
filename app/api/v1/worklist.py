@@ -570,7 +570,31 @@ def make_review_decision(
     ).first()
     if not report:
         raise HTTPException(404, "Report not found for this order")
-    
+
+    # Céluma 1.4 (#13), independent review: the decision changes review rows
+    # and the report status, so it takes the report writers' order lock and
+    # decides on the fresh state. A decision that lost the race to an
+    # amendment cancellation (which restores the delivered emission's
+    # decisions) or to a signature is refused instead of overwriting it.
+    from app.api.v1.reports import _lock_report_version, _refuse_while_publishing
+    from app.services import order_lifecycle
+
+    order_lifecycle.lock_report_order(session, report)
+    session.refresh(review)
+    if report.status in (ReportStatus.PUBLISHED, ReportStatus.RETRACTED):
+        raise HTTPException(
+            409,
+            {
+                "code": "report_review_closed",
+                "message": (
+                    "Este reporte ya está firmado o retirado; la decisión no se "
+                    "registró. Actualiza el reporte."
+                ),
+            },
+        )
+    if report.status == ReportStatus.APPROVED:
+        _refuse_while_publishing(_lock_report_version(session, report, current=True))
+
     # Céluma 1.4 (#13): decisions taken inside an open amendment carry its
     # correlation, like the report routes' events.
     from app.services import report_amendments

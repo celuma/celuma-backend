@@ -125,6 +125,8 @@ from app.services.report_publishing import (
     claim_publish,
     clear_publish_claim,
     finalize_publish,
+    publish_in_progress,
+    PUBLISH_IN_PROGRESS_CODE,
     ReportPublishError,
     ReportPublishAlreadyInProgressError,
     ReportPublishConflictError,
@@ -178,7 +180,7 @@ from pydantic import ValidationError as PydanticValidationError
 import copy
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -379,6 +381,59 @@ def _require_change_note(session: Session, version: ReportVersion | None) -> Non
                 "message": (
                     "Escribe la nota de enmienda (qué cambió y por qué) antes de "
                     "enviar a revisión o firmar."
+                ),
+            },
+        )
+
+
+# Céluma 1.4 (#13), independent review P1s: one synchronization protocol for
+# every writer of a report's lifecycle, versions, reviews and artifacts.
+#
+#   1. `order_lifecycle.lock_report_order` — the order row lock (one report
+#      per order, so it is the report's mutex) plus a re-read of the report;
+#   2. `_lock_report_version` — the target version's row lock, re-read;
+#   3. every lifecycle/amendment/signature/claim check, on those fresh rows;
+#   4. only then any S3 object, accounting row, state change or event.
+#
+# Always in that order (order before version), so no two writers can wait on
+# each other in a cycle. Signing keeps its lock-free rendering phase; the
+# publish claim it commits under these locks is what spans that phase, and
+# writers that could change what is being signed refuse while it is fresh
+# (`_refuse_while_publishing`).
+
+
+def _lock_report_version(
+    session: Session,
+    report: Report,
+    *,
+    version_no: int | None = None,
+    current: bool = False,
+) -> ReportVersion | None:
+    """Row-lock and re-read one version of `report`: `version_no`, else the
+    current (`is_current`) version when `current`, else the newest one. The
+    caller must already hold the order lock (`lock_report_order`)."""
+    statement = select(ReportVersion).where(ReportVersion.report_id == report.id)
+    if version_no is not None:
+        statement = statement.where(ReportVersion.version_no == version_no)
+    elif current:
+        statement = statement.where(ReportVersion.is_current == True)  # noqa: E712
+    else:
+        statement = statement.order_by(ReportVersion.version_no.desc()).limit(1)
+    return session.exec(
+        statement.with_for_update().execution_options(populate_existing=True)
+    ).first()
+
+
+def _refuse_while_publishing(version: ReportVersion | None) -> None:
+    """409 while a signature of `version` is in progress (fresh claim)."""
+    if publish_in_progress(version):
+        raise HTTPException(
+            409,
+            {
+                "code": PUBLISH_IN_PROGRESS_CODE,
+                "message": (
+                    "El reporte se está firmando en este momento. Espera a que "
+                    "termine y actualiza el reporte."
                 ),
             },
         )
@@ -1206,6 +1261,13 @@ def create_report_new_version(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.4 (#13), independent review P1: every check below (status,
+    # current version, open amendment) and every write after it happen under
+    # the order lock that cancelling an amendment, submitting and reopening
+    # take, so a save can no longer pass its checks, lose to a cancellation
+    # and still create a second current version afterwards.
+    order_lifecycle.lock_report_order(session, report)
+
     # Céluma 1.3 Phase 2, Block B, Story B9 moved content freezing out of the
     # frontend and into the API. Céluma 1.3.1 Block B (finding B-3) narrows it
     # from "PUBLISHED and RETRACTED are frozen" to an allowlist of the states
@@ -1231,9 +1293,7 @@ def create_report_new_version(
         raise HTTPException(409, detail)
 
     # Determine next version number
-    current_version = session.exec(
-        select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
-    ).first()
+    current_version = _lock_report_version(session, report, current=True)
     next_version_no = (current_version.version_no + 1) if current_version else 1
 
     # Céluma 1.4 (#22): no new content version may continue a legacy report.
@@ -2431,14 +2491,23 @@ def generate_report_pdf(
     """
     _require(user.id, "reports:edit", session)
 
+    report = session.get(Report, report_id)
+    if not report or str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Report or version not found")
+    # Céluma 1.4 (#13): order lock before the version lock, like every other
+    # report writer (see `_lock_report_version`).
+    order_lifecycle.lock_report_order(session, report)
+
     report, version = load_locked_version(session, report_id, version_no)
     if not report or not version:
-        raise HTTPException(404, "Report or version not found")
-    if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Report or version not found")
 
     # Céluma 1.4 (#22): never generate a new official PDF for a legacy draft.
     require_v2_authoring(report, version)
+
+    # Céluma 1.4 (#13): signing regenerates this version's official PDF
+    # itself; a second, unsigned generation must not race it.
+    _refuse_while_publishing(version)
 
     # Céluma 1.3 Phase 3, Block F: captured BEFORE the call, because
     # `generate()` short-circuits on an already-READY version and returns it
@@ -2463,6 +2532,19 @@ def generate_report_pdf(
     # notification cannot be atomic with its transition, and it is the safe
     # asymmetry: the PDF exists whether or not anyone is told about it.
     if not was_already_ready and version.pdf_generation_status == "READY":
+        # Céluma 1.4 (#13): rendering ran without locks, so the report may
+        # have moved on meanwhile (an amendment cancelled, a newer version
+        # saved). Only the report's current, still-unsigned-and-open version
+        # is "ready to sign"; a stale one stays a quiet historical artifact.
+        order_lifecycle.lock_report_order(session, report)
+        session.refresh(version)
+        if (
+            report.status in _IMMUTABLE_REPORT_STATUSES
+            or not version.is_current
+            or is_signed_version(version)
+        ):
+            session.commit()
+            return _pdf_generation_status_response(version)
         notify_report_pdf_ready(
             session,
             report=report,
@@ -2500,6 +2582,15 @@ def upload_pdf_to_specific_version(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.4 (#13), independent review P1: the checks below and the
+    # object write, accounting and pointer update after them all run under
+    # the order lock and this version's row lock — the locks signing takes to
+    # claim the version — so an upload can no longer pass the unsigned check,
+    # wait while the version is signed, and then repoint the signed version
+    # at its own bytes. An upload that gets the locks first completes, and
+    # signing then regenerates the official PDF from the signed state.
+    order_lifecycle.lock_report_order(session, report)
+
     # Céluma 1.3 Phase 2, Block B, Story B9: never silently replace the
     # PDF of a published/retracted report.
     if report.status in _IMMUTABLE_REPORT_STATUSES:
@@ -2507,12 +2598,7 @@ def upload_pdf_to_specific_version(
             409, f"Cannot replace the PDF for a report in {report.status} status"
         )
 
-    version = session.exec(
-        select(ReportVersion).where(
-            ReportVersion.report_id == report.id,
-            ReportVersion.version_no == version_no,
-        )
-    ).first()
+    version = _lock_report_version(session, report, version_no=version_no)
     if not version:
         raise HTTPException(404, "Report version not found")
 
@@ -2520,6 +2606,8 @@ def upload_pdf_to_specific_version(
     # the report's status (an amended report is editable again).
     if is_signed_version(version):
         raise HTTPException(409, "Cannot replace the PDF of a signed report version")
+    # ...and one being signed right now is about to become one.
+    _refuse_while_publishing(version)
 
     # Céluma 1.4 (#22): refuse before any file read, object write or accounting.
     require_v2_authoring(report, version)
@@ -2637,6 +2725,10 @@ def upload_pdf_to_latest_version(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.4 (#13): same locks and fresh checks as
+    # upload_pdf_to_specific_version, before any read, write or accounting.
+    order_lifecycle.lock_report_order(session, report)
+
     # Céluma 1.3 Phase 2, Block B, Story B9: never silently replace the
     # PDF of a published/retracted report.
     if report.status in _IMMUTABLE_REPORT_STATUSES:
@@ -2644,17 +2736,14 @@ def upload_pdf_to_latest_version(
             409, f"Cannot replace the PDF for a report in {report.status} status"
         )
 
-    latest_version = session.exec(
-        select(ReportVersion)
-        .where(ReportVersion.report_id == report.id)
-        .order_by(ReportVersion.version_no.desc())
-    ).first()
+    latest_version = _lock_report_version(session, report)
     if not latest_version:
         raise HTTPException(404, "No versions found for this report")
 
     # Céluma 1.4 (#13): see upload_pdf_to_specific_version.
     if is_signed_version(latest_version):
         raise HTTPException(409, "Cannot replace the PDF of a signed report version")
+    _refuse_while_publishing(latest_version)
 
     # Céluma 1.4 (#22): refuse before any file read, object write or accounting.
     require_v2_authoring(report, latest_version)
@@ -3101,6 +3190,11 @@ def approve_report(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.4 (#13): decide on the fresh state, under the same order lock
+    # as cancelling an amendment — an approval that lost that race must not
+    # turn a restored PUBLISHED report back into APPROVED.
+    order_lifecycle.lock_report_order(session, report)
+
     try:
         user_review = authorize_approval(session, report, user)
     except ReportStateError as exc:
@@ -3219,6 +3313,9 @@ def request_changes(
 
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
+
+    # Céluma 1.4 (#13): see approve_report.
+    order_lifecycle.lock_report_order(session, report)
 
     try:
         user_review = authorize_request_changes(session, report, user)
@@ -3399,6 +3496,12 @@ def reopen_report(
         raise HTTPException(400, exc.message) from None
     except ReportAuthorizationError as exc:
         raise HTTPException(403, exc.message) from None
+
+    # Céluma 1.4 (#13): an approved version being signed right now is not
+    # reopenable — the signature would otherwise finish on a reopened draft.
+    _refuse_while_publishing(
+        _lock_report_version(session, report, version_no=current_version.version_no)
+    )
 
     require_password_confirmation(
         session,
@@ -3822,21 +3925,15 @@ def cancel_report_amendment(
             },
         )
 
-    current = session.exec(
-        select(ReportVersion).where(
-            ReportVersion.report_id == report.id, ReportVersion.is_current == True  # noqa: E712
-        ).with_for_update().execution_options(populate_existing=True)
-    ).first()
-    if current is not None and current.publish_started_at is not None:
-        stale_after = timedelta(seconds=settings.report_publish_timeout_seconds * 3)
-        if datetime.utcnow() - current.publish_started_at < stale_after:
-            raise HTTPException(
-                409,
-                {
-                    "code": report_amendments.PUBLISH_IN_PROGRESS_CODE,
-                    "message": "La enmienda se está firmando; no puede cancelarse ahora.",
-                },
-            )
+    current = _lock_report_version(session, report, current=True)
+    if publish_in_progress(current):
+        raise HTTPException(
+            409,
+            {
+                "code": report_amendments.PUBLISH_IN_PROGRESS_CODE,
+                "message": "La enmienda se está firmando; no puede cancelarse ahora.",
+            },
+        )
 
     require_password_confirmation(
         session,
@@ -3976,6 +4073,13 @@ def update_report_presentation(
         # 404, not 403: never confirm another laboratory's report id.
         raise HTTPException(404, "Report not found")
 
+    # Céluma 1.4 (#13): the presentation is rewritten in the current
+    # version's JSON, so the lifecycle check and the rewrite run under the
+    # order lock and the version row lock (same protocol as content saves):
+    # a change that lost to a cancellation, an approval or a signature is
+    # refused instead of landing on the state that replaced it.
+    order_lifecycle.lock_report_order(session, report)
+
     try:
         authorize_presentation_change(session, report, user)
     except ReportStateError as exc:
@@ -3983,18 +4087,14 @@ def update_report_presentation(
     except ReportAuthorizationError as exc:
         raise HTTPException(403, exc.message) from None
 
-    current_version = session.exec(
-        select(ReportVersion).where(
-            ReportVersion.report_id == report.id,
-            ReportVersion.is_current == True,  # noqa: E712
-        )
-    ).first()
+    current_version = _lock_report_version(session, report, current=True)
     if not current_version:
         raise HTTPException(404, "No current version found for this report")
 
     # Céluma 1.4 (#13): a signed version's JSON is an issued artifact.
     if is_signed_version(current_version):
         raise HTTPException(409, "Cannot change the presentation of a signed report version")
+    _refuse_while_publishing(current_version)
 
     # Céluma 1.4 (#22): a legacy report's stored JSON is never rewritten.
     require_v2_authoring(report, current_version)
@@ -4166,6 +4266,10 @@ def sign_report(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.4 (#13): order lock, then version lock — the protocol of every
+    # report writer — for the claim here and again for finalize below.
+    order_lifecycle.lock_report_order(session, report)
+
     try:
         authorize_signing(session, report, user)
     except ReportStateError as exc:
@@ -4173,14 +4277,13 @@ def sign_report(
     except ReportAuthorizationError as exc:
         raise HTTPException(403, exc.message) from None
 
-    current_version = session.exec(
-        select(ReportVersion).where(
-            ReportVersion.report_id == report.id,
-            ReportVersion.is_current == True,  # noqa: E712
-        )
-    ).first()
+    current_version = _lock_report_version(session, report, current=True)
     if not current_version:
         raise HTTPException(404, "No current version found for this report")
+    # Céluma 1.4 (#13): a concurrent duplicate that got the locks while the
+    # first signature renders is refused as such (lifecycle guard, before the
+    # password), not by a precondition reading the transient render state.
+    _refuse_while_publishing(current_version)
 
     # Céluma 1.4 (#22): a legacy report cannot be signed anew.
     require_v2_authoring(report, current_version)
@@ -4207,10 +4310,9 @@ def sign_report(
         password=data.password,
     )
 
-    report, version = load_locked_version(session, report_id, current_version.version_no)
-    if not report or not version:
-        raise HTTPException(404, "Report or version not found")
-
+    # Still under both locks: the claim commits, releasing them, and from
+    # then on the claim itself keeps every other writer off this version.
+    version = current_version
     try:
         claim_publish(session, version, user.id)
     except ReportPublishAlreadyInProgressError as exc:
@@ -4239,6 +4341,7 @@ def sign_report(
         clear_publish_claim(session, version)
         raise
 
+    order_lifecycle.lock_report_order(session, report)
     report, version = load_locked_version(session, report_id, version.version_no)
     old_status = report.status
     try:
@@ -4314,6 +4417,12 @@ def sign_and_publish_report(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.4 (#13): order lock, then version lock — the protocol of every
+    # report writer (see `_lock_report_version`) — for the claim here and
+    # again for finalize below. Every guard therefore reads the fresh state
+    # that a concurrent save, upload, cancellation or reopen left behind.
+    order_lifecycle.lock_report_order(session, report)
+
     # Céluma 1.3.1 Block A / A3: role + `reports:sign` + assignment. The
     # assignment half is new; see `app/services/report_authorization.py`.
     try:
@@ -4323,14 +4432,13 @@ def sign_and_publish_report(
     except ReportAuthorizationError as exc:
         raise HTTPException(403, exc.message) from None
 
-    current_version = session.exec(
-        select(ReportVersion).where(
-            ReportVersion.report_id == report.id,
-            ReportVersion.is_current == True,
-        )
-    ).first()
+    current_version = _lock_report_version(session, report, current=True)
     if not current_version:
         raise HTTPException(404, "No current version found for this report")
+    # Céluma 1.4 (#13): a concurrent duplicate that got the locks while the
+    # first signature renders is refused as such (lifecycle guard, before the
+    # password), not by a precondition reading the transient render state.
+    _refuse_while_publishing(current_version)
 
     # Céluma 1.4 (#22): a legacy report cannot be signed anew.
     require_v2_authoring(report, current_version)
@@ -4347,10 +4455,9 @@ def sign_and_publish_report(
         password=data.password,
     )
 
-    report, version = load_locked_version(session, report_id, current_version.version_no)
-    if not report or not version:
-        raise HTTPException(404, "Report or version not found")
-
+    # Still under both locks: the claim commits, releasing them, and from
+    # then on the claim itself keeps every other writer off this version.
+    version = current_version
     try:
         claim_publish(session, version, user.id)
     except ReportPublishAlreadyInProgressError as exc:
@@ -4377,6 +4484,7 @@ def sign_and_publish_report(
         clear_publish_claim(session, version)
         raise
 
+    order_lifecycle.lock_report_order(session, report)
     report, version = load_locked_version(session, report_id, version.version_no)
     old_status = report.status
     try:
@@ -4446,7 +4554,12 @@ def retract_report(
     
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
-    
+
+    # Céluma 1.4 (#13): the order lock that opening an amendment takes, so a
+    # retraction that lost that race sees DRAFT and is refused instead of
+    # leaving a RETRACTED report with an open amendment.
+    order_lifecycle.lock_report_order(session, report)
+
     if report.status != ReportStatus.PUBLISHED:
         raise HTTPException(400, f"Cannot retract report in {report.status} status")
     

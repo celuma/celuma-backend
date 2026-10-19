@@ -1951,6 +1951,8 @@ Path param:
 **Errors:**
 - 400 if uploaded file is not a PDF or is empty
 - 404 if report or version is not found
+- 409 if the report is PUBLISHED/RETRACTED or the version is signed
+- 409 `{"detail": {"code": "report_publish_in_progress", ...}}` while a signature of that version is in progress (Céluma 1.4 #13: checked under the report's order lock and the version row lock, before any object write or accounting)
 
 ### GET /api/v1/reports/{report_id}/versions/{version_no}/pdf
 **Get a presigned URL for the PDF of a specific report version**
@@ -2000,6 +2002,8 @@ Path param:
 **Errors:**
 - 400 if uploaded file is not a PDF or is empty
 - 404 if report not found or it has no versions yet
+- 409 if the report is PUBLISHED/RETRACTED or the newest version is signed
+- 409 `{"detail": {"code": "report_publish_in_progress", ...}}` while a signature of that version is in progress (Céluma 1.4 #13: checked under the report's order lock and the version row lock, before any object write or accounting)
 
 ### GET /api/v1/reports/{report_id}/pdf
 **Get a presigned URL for the PDF of the newest report version**
@@ -2146,6 +2150,9 @@ Path param:
   `password_confirmation_throttled` with `retry_after_seconds` (a correct
   password is refused too while throttled). It grants no authority. The value
   is never stored, logged or echoed (422 responses redact it).
+- **Céluma 1.4 (#13): write serialization.** While a signature of the
+  approved version is in progress the reopen is refused with `409`
+  `report_publish_in_progress` (a lifecycle guard, checked before the password).
 
 ### POST /api/v1/reports/{report_id}/sign
 **Sign and publish a report (APPROVED → PUBLISHED) — legacy two-step route; the web app uses `POST /{report_id}/sign-and-publish`, which takes the same body**
@@ -2212,6 +2219,7 @@ Path param:
 - Creates a draft version copying the delivered emission's content and snapshot plus an `amendment` identification block; the signed version, its JSON, PDF and signature are untouched and it stays the delivered emission until the amendment is signed. The order leaves its completed status.
 - Audit `REPORT.REOPEN_FOR_AMENDMENT` and one timeline event (`STATUS_CHANGED`, `metadata.action = "REPORT_REOPENED_FOR_AMENDMENT"`), correlated with the amendment and both versions. Concurrent openings produce exactly one amendment.
 - While it is open, content saves may change only `report.amendment.change_note`; `submit`, `sign` and `sign-and-publish` answer `409` `amendment_change_note_required` while the stored note is empty. Signing the draft republishes the report (`REPORT_PUBLISHED` event with `action: "REPORT_REPUBLISHED"`, in-app `REPORT_REPUBLISHED` notification, no email).
+- **Write serialization (independent review, 2026-10-19).** Every report writer — content save, submit, approve, request changes, review decision, presentation, reopen, reopen for amendment, cancellation, retraction, PDF generation, both manual uploads, and both signing routes in their claim and finalize phases — takes the report's order lock, then the version row lock, and re-checks lifecycle, amendment, signature and publish-claim state before any write. A request that lost a race is refused with the ordinary state answer for the fresh state (e.g. a save after a cancellation gets `409` for a PUBLISHED report) or, while a signature renders, with `409` `report_publish_in_progress`; it writes nothing.
 
 ### POST /api/v1/reports/{report_id}/amendments/{amendment_id}/cancel
 **Cancel the open amendment (→ PUBLISHED)** — Céluma 1.4, #13
@@ -2892,14 +2900,19 @@ Unified worklist for managing assignments and report reviews.
 **Request Body:**
 ```json
 {
-  "decision": "approve",
+  "decision": "approved",
   "comment": "Optional comment"
 }
 ```
 
 **Notes:**
-- `decision` must be `approve` or `reject`
+- `decision` must be `approved` or `rejected`
 - Creates corresponding report workflow events
+- **Céluma 1.4 (#13):** decided under the report's order lock on the fresh state.
+  Refused with `409` `report_review_closed` once the report is PUBLISHED or
+  RETRACTED (e.g. a decision that lost the race to an amendment cancellation,
+  which restores the delivered emission's decisions), and with `409`
+  `report_publish_in_progress` while the APPROVED report is being signed.
 
 ## 📚 Study Types Endpoints
 
