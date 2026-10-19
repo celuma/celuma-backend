@@ -92,6 +92,10 @@ class ReportVersion(BaseModel, TimestampMixin, table=True):
     publish_started_at: Optional[datetime] = Field(default=None)
     publish_started_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
 
+    # Céluma 1.4 (#13): the amendment this version was authored in, if any
+    # (see report_amendment.py). NULL for every version of an original cycle.
+    amendment_id: Optional[UUID] = Field(foreign_key="report_amendment.id", default=None)
+
     # Basic relationships only
     report: Report = Relationship(back_populates="versions")
 

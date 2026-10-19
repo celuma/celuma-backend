@@ -27,6 +27,7 @@ from .events import OrderEvent
 from .invitation import UserInvitation, PasswordResetToken
 from .assignment import Assignment
 from .report_review import ReportReview
+from .report_amendment import ReportAmendment
 from .notification import (
     Notification,
     NotificationRecipient,
@@ -103,6 +104,7 @@ __all__ = [
     "PasswordResetToken",
     "Assignment",
     "ReportReview",
+    "ReportAmendment",
     "Notification",
     "NotificationRecipient",
     "NotificationDelivery",

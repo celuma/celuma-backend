@@ -175,6 +175,68 @@ tables (the expediente and every physician beyond the legacy single one are
 lost), deletes the timeline/audit rows of the four new event types and removes
 the permission. PostgreSQL cannot drop enum values, so the four values stay in
 `eventtype` (harmless: no row uses them after the downgrade).
+
+===========================================================================
+§5 — Password-confirmed signing and reopening (issue #13)
+===========================================================================
+
+Specification: `celuma-engineering/specs/reports/lifecycle.md` ("Password
+confirmation"); decision record:
+`celuma-engineering/adr/0017-password-confirmed-clinical-actions.md`.
+
+**§5a — `ix_audit_log_password_confirmation_failures`.** Signing and
+reopening require the actor's own password. A wrong one writes a
+credential-free `audit_log` row with action
+`SECURITY.PASSWORD_CONFIRMATION_FAILED`, and the per-actor throttle counts
+those rows in a sliding window before every confirmation. `audit_log` has no
+index on actor or action, so without this the count would scan the whole
+table on every signature. It is PARTIAL (only those rows), so it stays tiny
+and costs other audit writes nothing. Building it reads `audit_log` once; plain
+`CREATE INDEX`, like §1b, in the drained migration window. No row is written or
+rewritten, and no enum value is added (the action is free text; the timeline
+events of #13 use existing `eventtype` members).
+
+**Downgrade of §5** drops the index only. The failure audit rows stay: they
+are audit history, and 1.3.1 ignores them.
+
+===========================================================================
+§6 — Amendments of signed reports (issue #13)
+===========================================================================
+
+Specification: `celuma-engineering/specs/reports/lifecycle.md` ("Amendments of
+signed reports"); decision record:
+`celuma-engineering/adr/0018-report-amendments-as-emissions.md`.
+
+**§6a — `report_amendment`.** One row per amendment of a signed V2 report:
+tenant, report, per-report `amendment_no`, the signed `source_version_id` it
+amends, category (CORRECTION/SUPPLEMENT), reason, state (OPEN, PUBLISHED,
+CANCELLED), requester, the review decisions at opening (restored on
+cancellation), the version that republished it and the cancellation record.
+`UNIQUE (report_id, amendment_no)` and the partial unique index
+`uq_report_amendment_one_open` (one OPEN amendment per report) are the
+database-level guards behind exactly-once reopening. Created EMPTY.
+
+**§6b — `report_version.amendment_id`.** Nullable FK: the amendment a version
+was authored in. Every existing version gets NULL (an original cycle); nothing
+is backfilled or rewritten.
+
+**§6c — notification type `REPORT_REPUBLISHED`.** The in-app republication
+notice (owner decision D4). `notification.type` and
+`notification_preference.notification_type` are strings, but `v1_3_0` pins
+both to the permitted set with `ck_notification_type` and
+`ck_notification_preference_type`; both are recreated with the same ten values
+plus this one. A constraint swap, no row is touched.
+
+No `eventtype` value is added: reopening for amendment and cancellation use
+`STATUS_CHANGED` and republication uses `REPORT_PUBLISHED`, distinguished by
+`metadata.action`.
+
+**Downgrade of §6 is REFUSED while any amendment exists**, open or closed: the
+rows are clinical history (reason, requester, superseded emission, cancellation)
+that 1.3.1 cannot represent. Restore the pre-upgrade snapshot instead. Without
+amendments it deletes any `REPORT_REPUBLISHED` preference rows (user settings
+only; no such notification can exist without an amendment), restores both
+constraints to the `v1_3_0` set, and drops the column and the table.
 """
 from typing import Sequence, Union
 
@@ -207,6 +269,32 @@ MANUAL_CODE_PERMISSION = "lab:enter_manual_code"
 REMOVE_CAPTURE_PERMISSION = "lab:remove_capture"
 #: Event types added by §4e (PostgreSQL cannot drop enum values, so the downgrade keeps them).
 MANAGEMENT_EVENT_TYPES = ("ORDER_UPDATED", "ORDER_REMOVED", "SAMPLE_CODE_CORRECTED", "SAMPLE_REMOVED")
+
+#: Partial index behind the password-confirmation throttle (§5a).
+PASSWORD_FAILURE_INDEX = "ix_audit_log_password_confirmation_failures"
+PASSWORD_FAILURE_ACTION = "SECURITY.PASSWORD_CONFIRMATION_FAILED"
+
+#: The amendment record (§6).
+AMENDMENT_TABLE = "report_amendment"
+
+#: The notification types `v1_3_0` admits (frozen copy) and the one §6c adds.
+V1_3_NOTIFICATION_TYPES = (
+    "REPORT_SUBMITTED", "REPORT_PDF_READY", "REPORT_PUBLISHED", "REPORT_RETRACTED",
+    "ASSIGNMENT_ADDED", "SAMPLE_STATUS_CHANGED", "STORAGE_USAGE_APPROACHING",
+    "STORAGE_LIMIT_REACHED", "USER_LIMIT_APPROACHING", "USER_LIMIT_REACHED",
+)
+REPUBLISHED_NOTIFICATION_TYPE = "REPORT_REPUBLISHED"
+
+
+def _notification_type_checks(types) -> None:
+    """Recreate both notification-domain CHECK constraints over `types`."""
+    rendered = ", ".join(f"'{value}'" for value in types)
+    for table, column, name in (
+        ("notification", "type", "ck_notification_type"),
+        ("notification_preference", "notification_type", "ck_notification_preference_type"),
+    ):
+        op.execute(f"ALTER TABLE public.{table} DROP CONSTRAINT {name}")
+        op.execute(f"ALTER TABLE public.{table} ADD CONSTRAINT {name} CHECK ({column} IN ({rendered}))")
 
 #: Values of the retired `sampletype` enum; only the downgrade recreates it.
 RETIRED_SAMPLE_TYPE_VALUES = ("SANGRE", "BIOPSIA", "LAMINILLA", "TEJIDO", "OTRO")
@@ -414,6 +502,58 @@ def upgrade() -> None:
         SELECT r.id, p.id FROM public.role r CROSS JOIN public.permission p
         WHERE r.code IN ('admin', 'superuser') AND p.code = '{REMOVE_CAPTURE_PERMISSION}'
     """)
+    # §5a — the throttle's lookup; partial, nothing rewritten.
+    op.execute(
+        f"CREATE INDEX {PASSWORD_FAILURE_INDEX} ON public.audit_log "
+        f"USING btree (actor_user_id, created_at) WHERE action = '{PASSWORD_FAILURE_ACTION}'"
+    )
+    # §6a — amendments (empty)
+    op.execute("""
+        CREATE TABLE public.report_amendment (
+            created_at            timestamp without time zone NOT NULL,
+            id                    uuid NOT NULL,
+            tenant_id             uuid NOT NULL,
+            report_id             uuid NOT NULL,
+            amendment_no          integer NOT NULL,
+            source_version_id     uuid NOT NULL,
+            category              character varying(20) NOT NULL,
+            reason                character varying(1000) NOT NULL,
+            state                 character varying(20) NOT NULL,
+            requested_by          uuid NOT NULL,
+            requested_at          timestamp without time zone NOT NULL,
+            reviews_at_opening    json,
+            published_version_id  uuid,
+            published_at          timestamp without time zone,
+            cancelled_by          uuid,
+            cancelled_at          timestamp without time zone,
+            cancel_reason         character varying(1000),
+            CONSTRAINT report_amendment_pkey PRIMARY KEY (id),
+            CONSTRAINT uq_report_amendment_no UNIQUE (report_id, amendment_no),
+            CONSTRAINT ck_report_amendment_state CHECK (state IN ('OPEN', 'PUBLISHED', 'CANCELLED')),
+            CONSTRAINT ck_report_amendment_category CHECK (category IN ('CORRECTION', 'SUPPLEMENT')),
+            CONSTRAINT report_amendment_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenant(id),
+            CONSTRAINT report_amendment_report_id_fkey FOREIGN KEY (report_id) REFERENCES public.report(id),
+            CONSTRAINT report_amendment_source_version_id_fkey FOREIGN KEY (source_version_id) REFERENCES public.report_version(id),
+            CONSTRAINT report_amendment_published_version_id_fkey FOREIGN KEY (published_version_id) REFERENCES public.report_version(id),
+            CONSTRAINT report_amendment_requested_by_fkey FOREIGN KEY (requested_by) REFERENCES public.app_user(id),
+            CONSTRAINT report_amendment_cancelled_by_fkey FOREIGN KEY (cancelled_by) REFERENCES public.app_user(id)
+        )
+    """)
+    op.execute("CREATE INDEX ix_report_amendment_tenant_id ON public.report_amendment USING btree (tenant_id)")
+    op.execute("CREATE INDEX ix_report_amendment_report_id ON public.report_amendment USING btree (report_id)")
+    op.execute(
+        "CREATE UNIQUE INDEX uq_report_amendment_one_open ON public.report_amendment "
+        "USING btree (report_id) WHERE state = 'OPEN'"
+    )
+    # §6b — nullable link from a version to its amendment; nothing backfilled
+    op.execute("ALTER TABLE public.report_version ADD COLUMN amendment_id uuid")
+    op.execute(
+        "ALTER TABLE ONLY public.report_version ADD CONSTRAINT report_version_amendment_id_fkey "
+        "FOREIGN KEY (amendment_id) REFERENCES public.report_amendment(id)"
+    )
+    op.execute("CREATE INDEX ix_report_version_amendment_id ON public.report_version USING btree (amendment_id)")
+    # §6c — admit the republication notification type
+    _notification_type_checks(V1_3_NOTIFICATION_TYPES + (REPUBLISHED_NOTIFICATION_TYPE,))
 
 
 def downgrade() -> None:
@@ -424,8 +564,8 @@ def downgrade() -> None:
     extension is dropped as well: the 1.3.1 schema did not have it, and
     nothing but the 1.4 list search uses it.
     """
-    # §4 first (reverse order). Refused while tombstones exist: a 1.3.1 application would show the
-    # erroneous captures again. See the module docstring.
+    # Reverse order. §4's refusal is checked before anything is dropped: refused while tombstones
+    # exist, because a 1.3.1 application would show the erroneous captures again.
     bind = op.get_bind()
     removed = bind.exec_driver_sql(
         'SELECT (SELECT count(*) FROM public."order" WHERE removed_at IS NOT NULL) + '
@@ -437,6 +577,25 @@ def downgrade() -> None:
             f"Downgrade refused: {removed} removed order/sample/report record(s) would reappear in 1.3.1. "
             "Restore from a pre-upgrade snapshot instead (celuma-engineering/runbooks/migrations.md)."
         )
+    # §6's refusal, also before anything is dropped: amendments are clinical history.
+    amendments = bind.exec_driver_sql(f"SELECT count(*) FROM public.{AMENDMENT_TABLE}").scalar()
+    if amendments:
+        raise RuntimeError(
+            f"Downgrade refused: {amendments} report amendment record(s) cannot be represented in 1.3.1. "
+            "Restore from a pre-upgrade snapshot instead (celuma-engineering/runbooks/migrations.md)."
+        )
+    # §6
+    op.execute(
+        f"DELETE FROM public.notification_preference WHERE notification_type = '{REPUBLISHED_NOTIFICATION_TYPE}'"
+    )
+    _notification_type_checks(V1_3_NOTIFICATION_TYPES)
+    op.execute("ALTER TABLE public.report_version DROP CONSTRAINT report_version_amendment_id_fkey")
+    op.execute("DROP INDEX IF EXISTS public.ix_report_version_amendment_id")
+    op.execute("ALTER TABLE public.report_version DROP COLUMN amendment_id")
+    op.execute(f"DROP TABLE public.{AMENDMENT_TABLE}")
+    # §5: the index only; the failure audit rows are history and stay.
+    op.execute(f"DROP INDEX IF EXISTS public.{PASSWORD_FAILURE_INDEX}")
+    # §4
     op.execute(f"""
         DELETE FROM public.role_permission WHERE permission_id IN
             (SELECT id FROM public.permission WHERE code = '{REMOVE_CAPTURE_PERMISSION}')

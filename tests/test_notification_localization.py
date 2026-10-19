@@ -190,6 +190,8 @@ class TestTemplateVersioning:
             "report_pdf_ready_v1",
             "report_published_v1",
             "report_retracted_v1",
+            # Céluma 1.4 (#13): the in-app republication notice.
+            "report_republished_v1",
             "assignment_added_v1",
             "sample_status_changed_v2",
             # Céluma 1.3, Phase 4, Block G — the four usage-threshold types,

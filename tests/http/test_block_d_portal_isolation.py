@@ -397,6 +397,10 @@ class TestPortalPayloadBoundary:
             "title",
             "published_at",
             "pdf_url",
+            # Céluma 1.4 (#13, D3): for an amended emission, the reference to
+            # the one it supersedes (amendment number and signature date);
+            # null otherwise. Never a version number or a draft.
+            "supersedes",
         }
         assert not (set(body) & self.FORBIDDEN_KEYS)
 

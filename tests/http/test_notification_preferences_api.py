@@ -95,16 +95,20 @@ class TestPolicyRegistry:
             for policy in NOTIFICATION_DELIVERY_POLICIES.values()
         )
 
-    def test_sample_status_changed_is_the_only_in_app_only_type(self):
-        """Confirmed against Block A's event inventory: it is the only
-        MUST_HAVE_1_3 event that fires once per state transition and fans out
-        to every order assignee."""
+    def test_the_in_app_only_types(self):
+        """SAMPLE_STATUS_CHANGED (Block A: fires once per state transition and
+        fans out to every order assignee) and, since Céluma 1.4 (#13, owner
+        decision D4), REPORT_REPUBLISHED: amendment republication is an in-app
+        notice; external redelivery is manual."""
         unsupported = {
             notification_type
             for notification_type, policy in NOTIFICATION_DELIVERY_POLICIES.items()
             if not policy.email_supported
         }
-        assert unsupported == {NotificationType.SAMPLE_STATUS_CHANGED}
+        assert unsupported == {
+            NotificationType.SAMPLE_STATUS_CHANGED,
+            NotificationType.REPORT_REPUBLISHED,
+        }
 
     def test_an_unsupported_type_cannot_declare_an_email_default(self):
         from app.services.notification_policies import NotificationDeliveryPolicy

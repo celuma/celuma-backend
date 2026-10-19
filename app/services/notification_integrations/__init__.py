@@ -58,6 +58,7 @@ from app.services.notification_integrations.assignments import (
 from app.services.notification_integrations.reports import (
     notify_report_pdf_ready,
     notify_report_published,
+    notify_report_republished,
     notify_report_retracted,
     notify_report_submitted,
 )
@@ -69,6 +70,7 @@ __all__ = [
     "notify_report_submitted",
     "notify_report_pdf_ready",
     "notify_report_published",
+    "notify_report_republished",
     "notify_report_retracted",
     "notify_order_assignments_added",
     "notify_order_reviewers_added",

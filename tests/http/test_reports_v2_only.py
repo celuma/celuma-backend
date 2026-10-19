@@ -16,6 +16,7 @@ from app.models.tenant import Tenant
 
 from .conftest import FakeS3Service, make_pdf_bytes
 from .factories import (
+    TEST_USER_PASSWORD,
     assign_reviewer,
     auth_headers,
     create_branch,
@@ -333,7 +334,9 @@ class TestUnsignedLegacyReportsAreBlocked:
         stub_pdf_render.succeed(make_pdf_bytes(1))
 
         resp = client.post(
-            f"/api/v1/reports/{report.id}/{route}", json={}, headers=auth_headers(reviewer)
+            f"/api/v1/reports/{report.id}/{route}",
+            json={"password": TEST_USER_PASSWORD},
+            headers=auth_headers(reviewer),
         )
 
         assert resp.status_code == 409, resp.text

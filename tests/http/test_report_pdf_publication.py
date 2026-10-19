@@ -10,6 +10,7 @@ from app.models.report import Report, ReportVersion
 
 from .conftest import make_pdf_bytes
 from .factories import (
+    TEST_USER_PASSWORD,
     assign_reviewer,
     auth_headers,
     create_branch,
@@ -42,7 +43,7 @@ class TestSignRequiresReadyPdf:
         report, _ = _create_approved_report(session, tenant, branch, order)
 
         resp = client.post(
-            f"/api/v1/reports/{report.id}/sign", json={}, headers=auth_headers(reviewer)
+            f"/api/v1/reports/{report.id}/sign", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(reviewer)
         )
         assert resp.status_code == 422
         session.refresh(report)
@@ -64,7 +65,7 @@ class TestSignRequiresReadyPdf:
         session.commit()
 
         resp = client.post(
-            f"/api/v1/reports/{report.id}/sign", json={}, headers=auth_headers(reviewer)
+            f"/api/v1/reports/{report.id}/sign", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(reviewer)
         )
         assert resp.status_code == 422
 
@@ -82,7 +83,7 @@ class TestSignRequiresReadyPdf:
         session.commit()
 
         resp = client.post(
-            f"/api/v1/reports/{report.id}/sign", json={}, headers=auth_headers(reviewer)
+            f"/api/v1/reports/{report.id}/sign", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(reviewer)
         )
         assert resp.status_code == 422
 
@@ -106,7 +107,7 @@ class TestSignRequiresReadyPdf:
         assert gen.status_code == 200
 
         resp = client.post(
-            f"/api/v1/reports/{report.id}/sign", json={}, headers=auth_headers(reviewer)
+            f"/api/v1/reports/{report.id}/sign", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(reviewer)
         )
         assert resp.status_code == 200, resp.text
         session.refresh(report)
@@ -129,6 +130,6 @@ class TestSignRequiresReadyPdf:
         stub_pdf_render.succeed(make_pdf_bytes(1))
         client.post(f"/api/v1/reports/{report.id}/versions/1/generate-pdf", headers=auth_headers(editor))
 
-        resp = client.post(f"/api/v1/reports/{report.id}/sign", json={}, headers=auth_headers(editor))
+        resp = client.post(f"/api/v1/reports/{report.id}/sign", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(editor))
         assert resp.status_code == 403
         assert ROLE_REVIEWER in resp.text

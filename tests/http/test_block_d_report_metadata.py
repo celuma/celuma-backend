@@ -26,6 +26,7 @@ from app.models.requesting_physician import RequestingPhysician
 
 from .conftest import make_pdf_bytes
 from .factories import (
+    TEST_USER_PASSWORD,
     assign_reviewer,
     auth_headers,
     create_branch,
@@ -426,7 +427,7 @@ class TestDeliveryDate:
         stub_pdf_render.succeed(make_pdf_bytes(1))
         sign = client.post(
             f"/api/v1/reports/{report_id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(reviewer),
         )
         assert sign.status_code == 200, sign.text
@@ -480,7 +481,7 @@ class TestReopenedAndPublishedDeterminism:
         )
 
         reopen = client.post(
-            f"/api/v1/reports/{report_id}/reopen", json={}, headers=auth_headers(admin)
+            f"/api/v1/reports/{report_id}/reopen", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(admin)
         )
         assert reopen.status_code == 200, reopen.text
 
@@ -544,7 +545,7 @@ class TestReopenedAndPublishedDeterminism:
         stub_pdf_render.succeed(make_pdf_bytes(1))
         client.post(
             f"/api/v1/reports/{report_id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(reviewer),
         )
 

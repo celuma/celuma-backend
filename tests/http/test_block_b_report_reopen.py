@@ -40,6 +40,7 @@ from app.models.report import Report, ReportVersion
 from app.models.report_review import ReportReview
 
 from .factories import (
+    TEST_USER_PASSWORD,
     assign_reviewer,
     auth_headers,
     create_branch,
@@ -57,7 +58,7 @@ from .factories import (
 def _reopen(client, report, actor, **kwargs):
     return client.post(
         f"/api/v1/reports/{report.id}/reopen",
-        json=kwargs.get("body", {}),
+        json={"password": TEST_USER_PASSWORD, **kwargs.get("body", {})},
         headers=auth_headers(actor),
     )
 
@@ -370,7 +371,7 @@ class TestReopenLifecycleFailures:
     def test_an_unknown_report_is_404(self, client, session, lab, admin):
         resp = client.post(
             f"/api/v1/reports/{uuid.uuid4()}/reopen",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(admin),
         )
         assert resp.status_code == 404, resp.text
@@ -620,7 +621,7 @@ class TestReopenedReportCannotSkipReview:
 
         resp = client.post(
             f"/api/v1/reports/{lab['report'].id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         assert resp.status_code == 400, resp.text
@@ -637,7 +638,7 @@ class TestReopenedReportCannotSkipReview:
 
         resp = client.post(
             f"/api/v1/reports/{lab['report'].id}/sign",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         assert resp.status_code == 400, resp.text
@@ -657,7 +658,7 @@ class TestReopenedReportCannotSkipReview:
         # which an administrator does not hold either.
         for path, body in (
             ("approve", {}),
-            ("sign-and-publish", {}),
+            ("sign-and-publish", {"password": TEST_USER_PASSWORD}),
             ("request-changes", {"comment": "x"}),
         ):
             resp = client.post(
@@ -953,7 +954,7 @@ class TestReopenIsTheOnlyWayBackToEditing:
         # Still not signable: the new content has not been reviewed.
         blocked = client.post(
             f"/api/v1/reports/{lab['report'].id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         assert blocked.status_code == 400, blocked.text

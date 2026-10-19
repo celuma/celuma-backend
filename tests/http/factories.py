@@ -68,6 +68,14 @@ def create_branch(session: Session, tenant: Tenant, *, code: str = "MAIN") -> Br
     return branch
 
 
+#: The synthetic password every factory user is created with — never a real
+#: credential. Céluma 1.4 (#13): signing and reopening require the actor's own
+#: current password, so tests send `{"password": TEST_USER_PASSWORD}` (also on
+#: role-negative calls, so their 403 still comes from the guard under test and
+#: not from a missing confirmation).
+TEST_USER_PASSWORD = "synthetic-test-password"
+
+
 def create_user(
     session: Session,
     tenant: Tenant,
@@ -93,7 +101,7 @@ def create_user(
         full_name=full_name or "Test User",
         first_name="Test",
         last_name="User",
-        hashed_password=hash_password("irrelevant-in-tests"),
+        hashed_password=hash_password(TEST_USER_PASSWORD),
     )
     session.add(user)
     session.flush()

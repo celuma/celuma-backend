@@ -38,6 +38,7 @@ from app.models.report import Report, ReportVersion
 from app.models.report_review import ReportReview
 
 from .factories import (
+    TEST_USER_PASSWORD,
     assign_reviewer,
     auth_headers,
     create_branch,
@@ -105,7 +106,7 @@ class TestTheDecisionIsReset:
 
         resp = client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         assert resp.status_code == 200, resp.text
@@ -119,7 +120,7 @@ class TestTheDecisionIsReset:
         and recording it as such would misstate what happened."""
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         rows = _reviews(session, lab["order"].id)
@@ -128,7 +129,7 @@ class TestTheDecisionIsReset:
     def test_the_assignment_itself_is_preserved(self, client, session, lab):
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
 
@@ -144,7 +145,7 @@ class TestTheDecisionIsReset:
         """Assigned but pending — never absent, and never still approved."""
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
 
@@ -177,7 +178,7 @@ class TestTheDecisionIsReset:
         # Reopened by an administrator, so neither row belongs to the actor.
         admin = create_user(session, lab["tenant"], email="admin@t1.example", roles=("admin",))
         resp = client.post(
-            REOPEN.format(lab["report"].id), json={}, headers=auth_headers(admin)
+            REOPEN.format(lab["report"].id), json={"password": TEST_USER_PASSWORD}, headers=auth_headers(admin)
         )
         assert resp.status_code == 200, resp.text
 
@@ -206,7 +207,7 @@ class TestHistoryIsNotDestroyed:
 
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
 
@@ -225,7 +226,7 @@ class TestHistoryIsNotDestroyed:
     ):
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
 
@@ -257,7 +258,7 @@ class TestHistoryIsNotDestroyed:
 
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
 
@@ -275,7 +276,7 @@ class TestHistoryIsNotDestroyed:
     ):
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         assert len(_reopen_events(session, lab["order"].id)) == 1
@@ -290,7 +291,7 @@ class TestNothingChangesWhenTheReopenFails:
         )
 
         resp = client.post(
-            REOPEN.format(lab["report"].id), json={}, headers=auth_headers(patho)
+            REOPEN.format(lab["report"].id), json={"password": TEST_USER_PASSWORD}, headers=auth_headers(patho)
         )
         assert resp.status_code == 403, resp.text
 
@@ -309,7 +310,7 @@ class TestNothingChangesWhenTheReopenFails:
 
         resp = client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         assert resp.status_code == 400, resp.text
@@ -328,7 +329,7 @@ class TestNothingChangesWhenTheReopenFails:
 
         resp = client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         assert resp.status_code == 409, resp.text
@@ -343,7 +344,7 @@ class TestTheNewCycleBehavesLikeAnyOther:
     ):
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         author = create_user(
@@ -367,7 +368,7 @@ class TestTheNewCycleBehavesLikeAnyOther:
         cycle, and only a fresh decision can take it back to APPROVED."""
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         session.expire_all()
@@ -408,7 +409,7 @@ class TestTheNewCycleBehavesLikeAnyOther:
         for _ in range(3):
             client.post(
                 REOPEN.format(lab["report"].id),
-                json={},
+                json={"password": TEST_USER_PASSWORD},
                 headers=auth_headers(lab["reviewer"]),
             )
             client.post(SUBMIT.format(lab["report"].id), json={}, headers=auth_headers(author))

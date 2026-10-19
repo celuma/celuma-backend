@@ -18,6 +18,7 @@ from app.services.report_pdf_generation import ReportPdfGenerationError
 
 from .conftest import make_pdf_bytes
 from .factories import (
+    TEST_USER_PASSWORD,
     assign_reviewer,
     auth_headers,
     create_branch,
@@ -53,7 +54,7 @@ class TestSingleActionFlow:
 
         stub_pdf_render.succeed(make_pdf_bytes(1))
         resp = client.post(
-            f"/api/v1/reports/{report.id}/sign-and-publish", json={}, headers=auth_headers(reviewer)
+            f"/api/v1/reports/{report.id}/sign-and-publish", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(reviewer)
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -74,7 +75,7 @@ class TestSingleActionFlow:
         report, _ = _create_approved_report(session, tenant, branch, order)
 
         resp = client.post(
-            f"/api/v1/reports/{report.id}/sign-and-publish", json={}, headers=auth_headers(no_perm_user)
+            f"/api/v1/reports/{report.id}/sign-and-publish", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(no_perm_user)
         )
         assert resp.status_code == 403
 
@@ -89,7 +90,7 @@ class TestSingleActionFlow:
         report, _ = _create_approved_report(session, tenant, branch, order)
 
         resp = client.post(
-            f"/api/v1/reports/{report.id}/sign-and-publish", json={}, headers=auth_headers(editor)
+            f"/api/v1/reports/{report.id}/sign-and-publish", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(editor)
         )
         assert resp.status_code == 403
 
@@ -105,7 +106,7 @@ class TestSingleActionFlow:
         session.commit()
 
         resp = client.post(
-            f"/api/v1/reports/{report.id}/sign-and-publish", json={}, headers=auth_headers(reviewer)
+            f"/api/v1/reports/{report.id}/sign-and-publish", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(reviewer)
         )
         assert resp.status_code == 400
 
@@ -128,7 +129,7 @@ class TestConcurrencyClaim:
 
         stub_pdf_render.succeed(make_pdf_bytes(1))
         resp = client.post(
-            f"/api/v1/reports/{report.id}/sign-and-publish", json={}, headers=auth_headers(reviewer)
+            f"/api/v1/reports/{report.id}/sign-and-publish", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(reviewer)
         )
         assert resp.status_code == 409
         assert stub_pdf_render.call_count == 0
@@ -154,7 +155,7 @@ class TestConcurrencyClaim:
 
         stub_pdf_render.succeed(make_pdf_bytes(1))
         resp = client.post(
-            f"/api/v1/reports/{report.id}/sign-and-publish", json={}, headers=auth_headers(reviewer)
+            f"/api/v1/reports/{report.id}/sign-and-publish", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(reviewer)
         )
         assert resp.status_code == 200, resp.text
         session.refresh(report)
@@ -175,7 +176,7 @@ class TestFailedGenerationIsRetryable:
 
         stub_pdf_render.fail(ReportPdfGenerationError("RENDER_FAILED", "boom"))
         resp = client.post(
-            f"/api/v1/reports/{report.id}/sign-and-publish", json={}, headers=auth_headers(reviewer)
+            f"/api/v1/reports/{report.id}/sign-and-publish", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(reviewer)
         )
         assert resp.status_code == 422
 
@@ -198,13 +199,13 @@ class TestFailedGenerationIsRetryable:
 
         stub_pdf_render.fail(ReportPdfGenerationError("RENDER_FAILED", "boom"))
         first = client.post(
-            f"/api/v1/reports/{report.id}/sign-and-publish", json={}, headers=auth_headers(reviewer)
+            f"/api/v1/reports/{report.id}/sign-and-publish", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(reviewer)
         )
         assert first.status_code == 422
 
         stub_pdf_render.succeed(make_pdf_bytes(1))
         second = client.post(
-            f"/api/v1/reports/{report.id}/sign-and-publish", json={}, headers=auth_headers(reviewer)
+            f"/api/v1/reports/{report.id}/sign-and-publish", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(reviewer)
         )
         assert second.status_code == 200, second.text
         session.refresh(report)

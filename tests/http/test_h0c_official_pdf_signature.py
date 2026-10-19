@@ -48,6 +48,7 @@ from app.services.report_pdf_generation import ReportPdfGenerationError
 
 from .conftest import FakeS3Service, make_pdf_bytes
 from .factories import (
+    TEST_USER_PASSWORD,
     assign_reviewer,
     auth_headers,
     create_branch,
@@ -158,7 +159,7 @@ class TestSignatureEmbedding:
         stub_pdf_render.succeed(make_pdf_bytes(1))
         resp = client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer),
         )
         assert resp.status_code == 200, resp.text
@@ -190,7 +191,7 @@ class TestSignatureEmbedding:
         stub_pdf_render.succeed(make_pdf_bytes(1))
         resp = client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer),
         )
         assert resp.status_code == 200, resp.text
@@ -213,7 +214,7 @@ class TestSignatureEmbedding:
         stub_pdf_render.succeed(make_pdf_bytes(1))
         resp = client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer),
         )
 
@@ -250,7 +251,7 @@ class TestRenderRefusalIsHonoured:
 
         resp = client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer),
         )
 
@@ -276,7 +277,7 @@ class TestRenderRefusalIsHonoured:
         )
         first = client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer),
         )
         assert first.status_code == 422
@@ -285,7 +286,7 @@ class TestRenderRefusalIsHonoured:
         stub_pdf_render.succeed(make_pdf_bytes(1))
         second = client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer),
         )
         assert second.status_code == 200, second.text
@@ -308,7 +309,7 @@ class TestSignatureTenantIsolation:
         stub_pdf_render.succeed(make_pdf_bytes(1))
         resp = client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer_a),
         )
         assert resp.status_code == 200, resp.text
@@ -330,7 +331,7 @@ class TestSignatureTenantIsolation:
 
         resp = client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer_b),
         )
 
@@ -388,7 +389,7 @@ class TestTheRendererSeesASignedReport:
         )
         resp = client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer),
         )
         assert resp.status_code == 200, resp.text
@@ -419,7 +420,7 @@ class TestTheRendererSeesASignedReport:
         )
         assert client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer),
         ).status_code == 200
 
@@ -457,7 +458,7 @@ class TestTheRendererSeesASignedReport:
         monkeypatch.setattr(ReportPdfGenerationService, "_render_pdf", fake_render)
         assert client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer),
         ).status_code == 200
 
@@ -498,7 +499,7 @@ class TestResidualSignEndpoint:
 
         resp = client.post(
             f"/api/v1/reports/{report.id}/sign",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer),
         )
         assert resp.status_code == 200, resp.text
@@ -526,7 +527,7 @@ class TestResidualSignEndpoint:
         )
         resp = client.post(
             f"/api/v1/reports/{report.id}/sign",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer),
         )
 
@@ -545,7 +546,7 @@ class TestResidualSignEndpoint:
 
         resp = client.post(
             f"/api/v1/reports/{report.id}/sign",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer),
         )
         assert resp.status_code == 422, resp.text
@@ -561,7 +562,7 @@ class TestResidualSignEndpoint:
 
         resp = client.post(
             f"/api/v1/reports/{report.id}/sign",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(pathologist),
         )
         # Role gate fires before any PDF precondition.
@@ -577,7 +578,7 @@ class TestResidualSignEndpoint:
 
         resp = client.post(
             f"/api/v1/reports/{report.id}/sign",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer_b),
         )
         assert resp.status_code in (403, 404), resp.text

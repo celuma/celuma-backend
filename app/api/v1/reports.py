@@ -4,9 +4,28 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlmodel import select, Session, and_
 from sqlalchemy import cast, String
 from sqlalchemy.orm.attributes import flag_modified
+from app.core.config import settings
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.services.report_v2_policy import require_v2_authoring
+from app.services.password_confirmation import require_password_confirmation
+from app.services.report_lifecycle_events import (
+    ACTION_REPORT_REOPENED,
+    AUDIT_AMENDMENT_CANCEL,
+    AUDIT_REOPEN_FOR_AMENDMENT,
+    REOPEN_KIND_UNSIGNED,
+    amendment_context,
+    build_amendment_cancel_event,
+    build_amendment_reopen_event,
+    build_publication_event,
+    publication_correlation,
+)
+from app.services import report_amendments
+from app.models.report_amendment import (
+    AMENDMENT_STATE_CANCELLED,
+    AMENDMENT_STATE_PUBLISHED,
+    ReportAmendment,
+)
 from app.models.report import Report, ReportVersion, ReportTemplate
 from app.models.report_template_version import ReportTemplateVersion, ReportTemplateVersionStatus
 from app.models.report_letterhead import ReportLetterhead
@@ -53,6 +72,7 @@ from app.services.letterhead_resolution import (
 from app.services.notification_integrations import (
     notify_report_pdf_ready,
     notify_report_published,
+    notify_report_republished,
     notify_report_retracted,
     notify_report_submitted,
 )
@@ -75,15 +95,19 @@ from app.services.report_lists import (
 )
 from app.services.usage import UsageService
 from app.services.report_authorization import (
+    AmendmentLegacyOriginalError,
     ReportAlreadySignedError,
     ReportAuthorizationError,
     ReportStateError,
+    authorize_amendment_cancellation,
+    authorize_amendment_opening,
     authorize_approval,
     authorize_presentation_change,
     authorize_reopen,
     authorize_request_changes,
     authorize_signing,
     is_content_editable,
+    is_signed_version,
 )
 from app.services.report_presentation import (
     SIGNATURE_METADATA_KEY,
@@ -101,6 +125,8 @@ from app.services.report_publishing import (
     claim_publish,
     clear_publish_claim,
     finalize_publish,
+    publish_in_progress,
+    PUBLISH_IN_PROGRESS_CODE,
     ReportPublishError,
     ReportPublishAlreadyInProgressError,
     ReportPublishConflictError,
@@ -122,6 +148,13 @@ from app.schemas.report import (
     ReportFilterOptionsResponse,
     ReportStatusUpdate,
     ReportSignRequest,
+    ReportReopenRequest,
+    ReportAmendmentOpenRequest,
+    ReportAmendmentCancelRequest,
+    ReportAmendmentInfo,
+    ReportAmendmentActionResponse,
+    ReportEmissionInfo,
+    ReportEmissionsResponse,
     ReportReviewComment,
     ReportActionResponse,
     ReportSignAndPublishResponse,
@@ -144,6 +177,7 @@ from app.schemas.report_template_version import (
 )
 from app.schemas.laboratory import ReportFullDetailResponse
 from pydantic import ValidationError as PydanticValidationError
+import copy
 import json
 import re
 from datetime import datetime
@@ -253,6 +287,156 @@ def update_order_status_for_report(order_id: str, session: Session) -> None:
     """Wrapper to update order status after report changes"""
     from app.api.v1.laboratory import update_order_status
     update_order_status(order_id, session)
+
+
+# ---------------------------------------------------------------------------
+# Céluma 1.4 (#13): amendment helpers shared by the lifecycle routes
+# ---------------------------------------------------------------------------
+
+def _version_body(session: Session, version: ReportVersion | None) -> dict | None:
+    """The stored JSON body of a version, or None when it cannot be read."""
+    if version is None or not version.json_storage_id:
+        return None
+    storage = session.get(StorageObject, version.json_storage_id)
+    if storage is None:
+        return None
+    try:
+        return json.loads(S3Service().download_text(storage.object_key))
+    except Exception:
+        logger.warning(
+            "Could not read a report version body",
+            extra={"event": "report.version_body_unreadable", "report_version_id": str(version.id)},
+        )
+        return None
+
+
+def _user_name(session: Session, user_id) -> str | None:
+    if not user_id:
+        return None
+    u = session.get(AppUser, user_id)
+    return (u.full_name or u.username) if u else None
+
+
+def _amendment_info(session: Session, amendment: ReportAmendment) -> ReportAmendmentInfo:
+    source = session.get(ReportVersion, amendment.source_version_id)
+    published = (
+        session.get(ReportVersion, amendment.published_version_id)
+        if amendment.published_version_id else None
+    )
+    return ReportAmendmentInfo(
+        id=str(amendment.id),
+        amendment_no=amendment.amendment_no,
+        state=amendment.state,
+        category=amendment.category,
+        reason=amendment.reason,
+        source_version_id=str(amendment.source_version_id),
+        source_version_no=source.version_no if source else None,
+        source_signed_at=source.signed_at if source else None,
+        requested_by=str(amendment.requested_by),
+        requested_by_name=_user_name(session, amendment.requested_by),
+        requested_at=amendment.requested_at,
+        published_version_id=str(amendment.published_version_id) if amendment.published_version_id else None,
+        published_version_no=published.version_no if published else None,
+        published_at=amendment.published_at,
+        cancelled_by=str(amendment.cancelled_by) if amendment.cancelled_by else None,
+        cancelled_by_name=_user_name(session, amendment.cancelled_by),
+        cancelled_at=amendment.cancelled_at,
+        cancel_reason=amendment.cancel_reason,
+    )
+
+
+def _emission_info(
+    session: Session, version: ReportVersion, delivered: ReportVersion | None
+) -> ReportEmissionInfo:
+    amendment = report_amendments.version_amendment(session, version)
+    return ReportEmissionInfo(
+        report_version_id=str(version.id),
+        version_no=version.version_no,
+        signed_at=version.signed_at,
+        signed_by=str(version.signed_by) if version.signed_by else None,
+        signed_by_name=_user_name(session, version.signed_by),
+        amendment_no=amendment.amendment_no if amendment else None,
+        is_delivered=bool(delivered is not None and delivered.id == version.id),
+        pdf_available=bool(version.pdf_storage_id and version.pdf_generation_status == "READY"),
+        pdf_sha256=version.pdf_sha256,
+    )
+
+
+def _amendment_scope(session: Session, report: Report) -> tuple[ReportAmendment | None, ReportVersion | None]:
+    """The open amendment and its source emission, or (None, None)."""
+    amendment = report_amendments.open_amendment(session, report)
+    if amendment is None:
+        return None, None
+    return amendment, session.get(ReportVersion, amendment.source_version_id)
+
+
+def _require_change_note(session: Session, version: ReportVersion | None) -> None:
+    """D2: an amended emission cannot go to review or be signed without the
+    author's change note."""
+    if not report_amendments.change_note_of(_version_body(session, version)):
+        raise HTTPException(
+            409,
+            {
+                "code": report_amendments.CHANGE_NOTE_REQUIRED_CODE,
+                "message": (
+                    "Escribe la nota de enmienda (qué cambió y por qué) antes de "
+                    "enviar a revisión o firmar."
+                ),
+            },
+        )
+
+
+# Céluma 1.4 (#13), independent review P1s: one synchronization protocol for
+# every writer of a report's lifecycle, versions, reviews and artifacts.
+#
+#   1. `order_lifecycle.lock_report_order` — the order row lock (one report
+#      per order, so it is the report's mutex) plus a re-read of the report;
+#   2. `_lock_report_version` — the target version's row lock, re-read;
+#   3. every lifecycle/amendment/signature/claim check, on those fresh rows;
+#   4. only then any S3 object, accounting row, state change or event.
+#
+# Always in that order (order before version), so no two writers can wait on
+# each other in a cycle. Signing keeps its lock-free rendering phase; the
+# publish claim it commits under these locks is what spans that phase, and
+# writers that could change what is being signed refuse while it is fresh
+# (`_refuse_while_publishing`).
+
+
+def _lock_report_version(
+    session: Session,
+    report: Report,
+    *,
+    version_no: int | None = None,
+    current: bool = False,
+) -> ReportVersion | None:
+    """Row-lock and re-read one version of `report`: `version_no`, else the
+    current (`is_current`) version when `current`, else the newest one. The
+    caller must already hold the order lock (`lock_report_order`)."""
+    statement = select(ReportVersion).where(ReportVersion.report_id == report.id)
+    if version_no is not None:
+        statement = statement.where(ReportVersion.version_no == version_no)
+    elif current:
+        statement = statement.where(ReportVersion.is_current == True)  # noqa: E712
+    else:
+        statement = statement.order_by(ReportVersion.version_no.desc()).limit(1)
+    return session.exec(
+        statement.with_for_update().execution_options(populate_existing=True)
+    ).first()
+
+
+def _refuse_while_publishing(version: ReportVersion | None) -> None:
+    """409 while a signature of `version` is in progress (fresh claim)."""
+    if publish_in_progress(version):
+        raise HTTPException(
+            409,
+            {
+                "code": PUBLISH_IN_PROGRESS_CODE,
+                "message": (
+                    "El reporte se está firmando en este momento. Espera a que "
+                    "termine y actualiza el reporte."
+                ),
+            },
+        )
 
 
 def _build_order_full_detail(order_id: str, session: Session, ctx: AuthContext):
@@ -713,6 +897,9 @@ def create_report(
     # If a JSON report body is provided, upload to S3 and create initial version (v1)
     if report_data.report is not None:
         body = dict(report_data.report)
+        # Céluma 1.4 (#13): an original is never an amended document; only the
+        # amendment routes write the identification block.
+        body.pop(report_amendments.AMENDMENT_KEY, None)
         # Céluma 1.3.1 Block C: the V2 marker is the server-built SNAPSHOT,
         # not the presence of a `ReportTemplateVersion`. A report built from
         # the live template is fully V2 and carries no version row.
@@ -1074,6 +1261,13 @@ def create_report_new_version(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.4 (#13), independent review P1: every check below (status,
+    # current version, open amendment) and every write after it happen under
+    # the order lock that cancelling an amendment, submitting and reopening
+    # take, so a save can no longer pass its checks, lose to a cancellation
+    # and still create a second current version afterwards.
+    order_lifecycle.lock_report_order(session, report)
+
     # Céluma 1.3 Phase 2, Block B, Story B9 moved content freezing out of the
     # frontend and into the API. Céluma 1.3.1 Block B (finding B-3) narrows it
     # from "PUBLISHED and RETRACTED are frozen" to an allowlist of the states
@@ -1099,9 +1293,7 @@ def create_report_new_version(
         raise HTTPException(409, detail)
 
     # Determine next version number
-    current_version = session.exec(
-        select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.is_current == True)
-    ).first()
+    current_version = _lock_report_version(session, report, current=True)
     next_version_no = (current_version.version_no + 1) if current_version else 1
 
     # Céluma 1.4 (#22): no new content version may continue a legacy report.
@@ -1147,6 +1339,16 @@ def create_report_new_version(
         carried_report_body,
         current_version=current_version,
         template=report.template,
+    )
+
+    # Céluma 1.4 (#13): inside an open amendment the identification block is
+    # carried forward from the previous version and only the author's change
+    # note is taken from the request; outside one it is stripped (D2).
+    amendment, amendment_source = _amendment_scope(session, report)
+    carried_report_body = report_amendments.carry_forward_identification(
+        _version_body(session, current_version) if amendment is not None else None,
+        carried_report_body,
+        in_amendment=amendment is not None,
     )
 
     # Céluma 1.3.1 Block D: same backend-authoritative overwrite as
@@ -1225,6 +1427,7 @@ def create_report_new_version(
         template_version_id=carried_template_version_id,
         generated_by_renderer_version=carried_renderer_version,
         letterhead_version_id=carried_letterhead_version_id,
+        amendment_id=amendment.id if amendment is not None else None,
     )
     session.add(new_version)
     
@@ -1248,6 +1451,7 @@ def create_report_new_version(
             "report_title": report.title,
             "version_no": next_version_no,
             "reviews_reset": reviewer_count,
+            **amendment_context(amendment, amendment_source),
         },
         created_by=report_data.created_by,
     )
@@ -2077,6 +2281,16 @@ def _build_report_detail_response(
         pdf_page_count=(version.pdf_page_count if version else None),
         pdf_error_code=(version.pdf_error_code if version else None),
         pdf_error_message=(version.pdf_error_message if version else None),
+        open_amendment=(
+            _amendment_info(session, amendment)
+            if (amendment := report_amendments.open_amendment(session, report)) is not None
+            else None
+        ),
+        delivered_emission=(
+            _emission_info(session, delivered, delivered)
+            if (delivered := report_amendments.delivered_emission(session, report)) is not None
+            else None
+        ),
     )
 
 
@@ -2161,7 +2375,10 @@ def get_pdf_of_latest_version(
     report = authorize_report_read_access(session, ctx, user, report_id)
     order = session.get(Order, report.order_id)
 
-    latest_version = session.exec(
+    # Céluma 1.4 (#13, D3/D6): once a report has been signed, "latest" means
+    # the delivered emission (latest signed version) — never an unsigned
+    # amendment draft that happens to have a higher version number.
+    latest_version = report_amendments.delivered_emission(session, report) or session.exec(
         select(ReportVersion)
         .where(ReportVersion.report_id == report.id)
         .order_by(ReportVersion.version_no.desc())
@@ -2189,6 +2406,34 @@ def get_pdf_of_latest_version(
         "pdf_key": storage.object_key,
         "pdf_url": url,
     }
+
+@router.get("/{report_id}/emissions", response_model=ReportEmissionsResponse)
+def list_report_emissions(
+    report_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Céluma 1.4 (#13): authorized history — every signed emission (newest
+    first, with which one is delivered) and every amendment. Same read policy
+    as the report itself (`reports:read`, tenant)."""
+    report = authorize_report_read_access(session, ctx, user, report_id)
+    delivered = report_amendments.delivered_emission(session, report)
+    signed = session.exec(
+        select(ReportVersion)
+        .where(ReportVersion.report_id == report.id, ReportVersion.signed_at.is_not(None))
+        .order_by(ReportVersion.version_no.desc())
+    ).all()
+    amendments = session.exec(
+        select(ReportAmendment)
+        .where(ReportAmendment.report_id == report.id)
+        .order_by(ReportAmendment.amendment_no.desc())
+    ).all()
+    return ReportEmissionsResponse(
+        emissions=[_emission_info(session, v, delivered) for v in signed],
+        amendments=[_amendment_info(session, a) for a in amendments],
+    )
+
 
 @router.get("/{report_id}/{version_no}", response_model=ReportDetailResponse)
 def get_report_version(
@@ -2246,14 +2491,23 @@ def generate_report_pdf(
     """
     _require(user.id, "reports:edit", session)
 
+    report = session.get(Report, report_id)
+    if not report or str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(404, "Report or version not found")
+    # Céluma 1.4 (#13): order lock before the version lock, like every other
+    # report writer (see `_lock_report_version`).
+    order_lifecycle.lock_report_order(session, report)
+
     report, version = load_locked_version(session, report_id, version_no)
     if not report or not version:
-        raise HTTPException(404, "Report or version not found")
-    if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Report or version not found")
 
     # Céluma 1.4 (#22): never generate a new official PDF for a legacy draft.
     require_v2_authoring(report, version)
+
+    # Céluma 1.4 (#13): signing regenerates this version's official PDF
+    # itself; a second, unsigned generation must not race it.
+    _refuse_while_publishing(version)
 
     # Céluma 1.3 Phase 3, Block F: captured BEFORE the call, because
     # `generate()` short-circuits on an already-READY version and returns it
@@ -2278,6 +2532,19 @@ def generate_report_pdf(
     # notification cannot be atomic with its transition, and it is the safe
     # asymmetry: the PDF exists whether or not anyone is told about it.
     if not was_already_ready and version.pdf_generation_status == "READY":
+        # Céluma 1.4 (#13): rendering ran without locks, so the report may
+        # have moved on meanwhile (an amendment cancelled, a newer version
+        # saved). Only the report's current, still-unsigned-and-open version
+        # is "ready to sign"; a stale one stays a quiet historical artifact.
+        order_lifecycle.lock_report_order(session, report)
+        session.refresh(version)
+        if (
+            report.status in _IMMUTABLE_REPORT_STATUSES
+            or not version.is_current
+            or is_signed_version(version)
+        ):
+            session.commit()
+            return _pdf_generation_status_response(version)
         notify_report_pdf_ready(
             session,
             report=report,
@@ -2315,6 +2582,15 @@ def upload_pdf_to_specific_version(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.4 (#13), independent review P1: the checks below and the
+    # object write, accounting and pointer update after them all run under
+    # the order lock and this version's row lock — the locks signing takes to
+    # claim the version — so an upload can no longer pass the unsigned check,
+    # wait while the version is signed, and then repoint the signed version
+    # at its own bytes. An upload that gets the locks first completes, and
+    # signing then regenerates the official PDF from the signed state.
+    order_lifecycle.lock_report_order(session, report)
+
     # Céluma 1.3 Phase 2, Block B, Story B9: never silently replace the
     # PDF of a published/retracted report.
     if report.status in _IMMUTABLE_REPORT_STATUSES:
@@ -2322,14 +2598,16 @@ def upload_pdf_to_specific_version(
             409, f"Cannot replace the PDF for a report in {report.status} status"
         )
 
-    version = session.exec(
-        select(ReportVersion).where(
-            ReportVersion.report_id == report.id,
-            ReportVersion.version_no == version_no,
-        )
-    ).first()
+    version = _lock_report_version(session, report, version_no=version_no)
     if not version:
         raise HTTPException(404, "Report version not found")
+
+    # Céluma 1.4 (#13): a signed version's PDF is an issued artifact, whatever
+    # the report's status (an amended report is editable again).
+    if is_signed_version(version):
+        raise HTTPException(409, "Cannot replace the PDF of a signed report version")
+    # ...and one being signed right now is about to become one.
+    _refuse_while_publishing(version)
 
     # Céluma 1.4 (#22): refuse before any file read, object write or accounting.
     require_v2_authoring(report, version)
@@ -2447,6 +2725,10 @@ def upload_pdf_to_latest_version(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.4 (#13): same locks and fresh checks as
+    # upload_pdf_to_specific_version, before any read, write or accounting.
+    order_lifecycle.lock_report_order(session, report)
+
     # Céluma 1.3 Phase 2, Block B, Story B9: never silently replace the
     # PDF of a published/retracted report.
     if report.status in _IMMUTABLE_REPORT_STATUSES:
@@ -2454,13 +2736,14 @@ def upload_pdf_to_latest_version(
             409, f"Cannot replace the PDF for a report in {report.status} status"
         )
 
-    latest_version = session.exec(
-        select(ReportVersion)
-        .where(ReportVersion.report_id == report.id)
-        .order_by(ReportVersion.version_no.desc())
-    ).first()
+    latest_version = _lock_report_version(session, report)
     if not latest_version:
         raise HTTPException(404, "No versions found for this report")
+
+    # Céluma 1.4 (#13): see upload_pdf_to_specific_version.
+    if is_signed_version(latest_version):
+        raise HTTPException(409, "Cannot replace the PDF of a signed report version")
+    _refuse_while_publishing(latest_version)
 
     # Céluma 1.4 (#22): refuse before any file read, object write or accounting.
     require_v2_authoring(report, latest_version)
@@ -2737,6 +3020,11 @@ def submit_report(
     ).first()
     require_v2_authoring(report, submit_version)
 
+    # Céluma 1.4 (#13): an amended emission needs its change note (D2).
+    amendment, amendment_source = _amendment_scope(session, report)
+    if amendment is not None:
+        _require_change_note(session, submit_version)
+
     # Fifth post-Phase-2 remediation (§3.5): submit-for-review is the
     # moment the letterhead is FROZEN, so it is also the last moment to
     # check that what is being frozen is coherent. From here on no route
@@ -2808,7 +3096,11 @@ def submit_report(
         entity_type="report",
         entity_id=report_id,
         old_values={"status": old_status},
-        new_values={"status": report.status, "changelog": data.changelog},
+        new_values={
+            "status": report.status,
+            "changelog": data.changelog,
+            **amendment_context(amendment, amendment_source),
+        },
     )
     
     # Create timeline event for report submission
@@ -2826,6 +3118,7 @@ def submit_report(
             "report_title": report.title,
             "submitted_by": str(user.id),
             "submitted_by_name": user.full_name or user.username,
+            **amendment_context(amendment, amendment_source),
         },
         created_by=user.id,
     )
@@ -2897,6 +3190,11 @@ def approve_report(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.4 (#13): decide on the fresh state, under the same order lock
+    # as cancelling an amendment — an approval that lost that race must not
+    # turn a restored PUBLISHED report back into APPROVED.
+    order_lifecycle.lock_report_order(session, report)
+
     try:
         user_review = authorize_approval(session, report, user)
     except ReportStateError as exc:
@@ -2907,6 +3205,7 @@ def approve_report(
     user_review.status = ReviewStatus.APPROVED
     user_review.decision_at = datetime.utcnow()
     session.add(user_review)
+    amendment, amendment_source = _amendment_scope(session, report)
 
     # Update report status (MVP rule: ≥1 approved = report approved)
     old_status = report.status
@@ -2940,7 +3239,11 @@ def approve_report(
         entity_type="report",
         entity_id=report_id,
         old_values={"status": old_status},
-        new_values={"status": report.status, "changelog": data.changelog},
+        new_values={
+            "status": report.status,
+            "changelog": data.changelog,
+            **amendment_context(amendment, amendment_source),
+        },
     )
     
     # Create timeline event for report approval
@@ -2959,6 +3262,7 @@ def approve_report(
             "reviewer_id": str(user.id),
             "reviewer_name": user.full_name or user.username,
             "comment": data.changelog if data.changelog else None,
+            **amendment_context(amendment, amendment_source),
         },
         created_by=user.id,
     )
@@ -3010,6 +3314,9 @@ def request_changes(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.4 (#13): see approve_report.
+    order_lifecycle.lock_report_order(session, report)
+
     try:
         user_review = authorize_request_changes(session, report, user)
     except ReportStateError as exc:
@@ -3020,6 +3327,7 @@ def request_changes(
     user_review.status = ReviewStatus.REJECTED
     user_review.decision_at = datetime.utcnow()
     session.add(user_review)
+    amendment, amendment_source = _amendment_scope(session, report)
 
     # Update status back to DRAFT
     old_status = report.status
@@ -3053,7 +3361,11 @@ def request_changes(
         entity_type="report",
         entity_id=report_id,
         old_values={"status": old_status},
-        new_values={"status": report.status, "comment": data.comment},
+        new_values={
+            "status": report.status,
+            "comment": data.comment,
+            **amendment_context(amendment, amendment_source),
+        },
     )
     
     # Create timeline event for changes requested
@@ -3072,6 +3384,7 @@ def request_changes(
             "reviewer_id": str(user.id),
             "reviewer_name": user.full_name or user.username,
             "comment": data.comment if data.comment else None,
+            **amendment_context(amendment, amendment_source),
         },
         created_by=user.id,
     )
@@ -3136,7 +3449,7 @@ def _reset_order_reviews_to_pending(session: Session, order_id) -> int:
 @router.post("/{report_id}/reopen", response_model=ReportActionResponse)
 def reopen_report(
     report_id: str,
-    data: ReportStatusUpdate,
+    data: ReportReopenRequest,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
@@ -3159,6 +3472,12 @@ def reopen_report(
     lifecycle at DRAFT and must travel submit → IN_REVIEW → approve before it
     can be signed again; the reopener does not gain the right to approve or
     sign it, and an administrator never had it.
+
+    Céluma 1.4 (#13): the actor confirms with their own current password,
+    verified after every authorization/lifecycle guard and before anything
+    is written. The order lock serializes concurrent reopens: the second one
+    re-reads DRAFT and is refused, so exactly one transition and one event
+    are recorded.
     """
     report = session.get(Report, report_id)
     if not report:
@@ -3166,6 +3485,8 @@ def reopen_report(
 
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
+
+    order_lifecycle.lock_report_order(session, report)
 
     try:
         current_version = authorize_reopen(session, report, user)
@@ -3175,6 +3496,20 @@ def reopen_report(
         raise HTTPException(400, exc.message) from None
     except ReportAuthorizationError as exc:
         raise HTTPException(403, exc.message) from None
+
+    # Céluma 1.4 (#13): an approved version being signed right now is not
+    # reopenable — the signature would otherwise finish on a reopened draft.
+    _refuse_while_publishing(
+        _lock_report_version(session, report, version_no=current_version.version_no)
+    )
+
+    require_password_confirmation(
+        session,
+        user=user,
+        report=report,
+        attempted_action="REPORT.REOPEN",
+        password=data.password,
+    )
 
     old_status = report.status
     report.status = ReportStatus.DRAFT
@@ -3232,6 +3567,13 @@ def reopen_report(
             # REPORT.APPROVE rows — this only records that they stopped being
             # current, and when.
             "reviews_reset_to_pending": reviews_reset,
+            # Céluma 1.4 (#13): canonical correlation, shared with the
+            # timeline event below. Reopening for amendment is a different
+            # kind (and a different action), never this one.
+            "reopen_kind": REOPEN_KIND_UNSIGNED,
+            "report_version_id": str(current_version.id),
+            "password_confirmed": True,
+            **amendment_context(*_amendment_scope(session, report)),
         },
     )
 
@@ -3273,7 +3615,8 @@ def reopen_report(
         # any consumer that does not know the `action` key.
         description="Reporte reabierto",
         event_metadata={
-            "action": "REPORT_REOPENED",
+            "action": ACTION_REPORT_REOPENED,
+            "reopen_kind": REOPEN_KIND_UNSIGNED,
             "report_id": str(report.id),
             "report_title": report.title,
             # `ReportStatus` is a `(str, Enum)`, whose `str()` renders as
@@ -3282,9 +3625,14 @@ def reopen_report(
             # transition.
             "from_status": getattr(old_status, "value", old_status),
             "to_status": getattr(report.status, "value", report.status),
+            "report_version_id": str(current_version.id),
             "reopened_version_no": current_version.version_no,
             "reopened_by": str(user.id),
             "reopened_by_name": user.full_name or user.username,
+            "reason": data.changelog or None,
+            "reviews_reset_to_pending": reviews_reset,
+            "confirmation": "password",
+            **amendment_context(*_amendment_scope(session, report)),
         },
         created_by=user.id,
     )
@@ -3310,6 +3658,373 @@ def reopen_report(
             "Reporte reabierto. Vuelve a borrador y debe enviarse a revisión "
             "y aprobarse de nuevo antes de poder firmarse."
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Céluma 1.4 (#13): amendments of signed reports
+# ---------------------------------------------------------------------------
+
+def _amendment_refusal(exc: ReportAuthorizationError) -> HTTPException:
+    if isinstance(exc, AmendmentLegacyOriginalError):
+        return HTTPException(
+            409, {"code": report_amendments.LEGACY_ORIGINAL_CODE, "message": exc.message}
+        )
+    if isinstance(exc, ReportStateError):
+        return HTTPException(400, exc.message)
+    return HTTPException(403, exc.message)
+
+
+@router.post("/{report_id}/amendments", response_model=ReportAmendmentActionResponse)
+def open_report_amendment(
+    report_id: str,
+    data: ReportAmendmentOpenRequest,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Reopen a PUBLISHED report for amendment ("reopening after signature").
+
+    Creates the amendment record and its first draft version — a complete copy
+    of the delivered emission's content and frozen snapshot (D1), without the
+    signer's image URL or delivery date, carrying the server-owned
+    identification block (D2) — and returns the report to DRAFT (D6). The
+    source version, its JSON, PDF and signature evidence are untouched, and it
+    stays the delivered emission until the amendment republishes (D3).
+
+    Actors: the assigned reviewer or admin/superuser (`reports:manage_templates`),
+    with their own current password and a required reason; neither grants
+    approval or signing. V2 originals only (D5). Exactly once: the order lock
+    re-reads the state and a partial unique index allows one open amendment.
+    """
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
+
+    order_lifecycle.lock_report_order(session, report)
+
+    try:
+        source = authorize_amendment_opening(session, report, user)
+    except ReportAuthorizationError as exc:
+        raise _amendment_refusal(exc) from None
+
+    source_body = _version_body(session, source)
+    if source_body is None:
+        raise HTTPException(
+            409,
+            "No se pudo leer la emisión firmada de este reporte; no se abrió la enmienda.",
+        )
+
+    require_password_confirmation(
+        session,
+        user=user,
+        report=report,
+        attempted_action=AUDIT_REOPEN_FOR_AMENDMENT,
+        password=data.password,
+    )
+
+    now = datetime.utcnow()
+    reviews = session.exec(
+        select(ReportReview).where(ReportReview.order_id == report.order_id)
+    ).all()
+    amendment = ReportAmendment(
+        tenant_id=report.tenant_id,
+        report_id=report.id,
+        amendment_no=report_amendments.next_amendment_no(session, report),
+        source_version_id=source.id,
+        category=data.category,
+        reason=data.reason,
+        requested_by=user.id,
+        requested_at=now,
+        reviews_at_opening=[
+            {
+                "review_id": str(r.id),
+                "status": getattr(r.status, "value", r.status),
+                "decision_at": r.decision_at.isoformat() if r.decision_at else None,
+            }
+            for r in reviews
+        ],
+    )
+    session.add(amendment)
+    session.flush()
+
+    # D1: a complete re-emission. The new signer's image and the delivery
+    # date are set again at signing, never inherited from the original.
+    body = copy.deepcopy(source_body)
+    body.pop(report_amendments.AMENDMENT_KEY, None)
+    signature_metadata = body.get(SIGNATURE_METADATA_KEY)
+    if isinstance(signature_metadata, dict):
+        signature_metadata.pop("signature_url", None)
+    snapshot = body.get("rendering_snapshot")
+    body = apply_authoritative_report_metadata(
+        session,
+        body,
+        session.get(Order, report.order_id),
+        template=snapshot.get("template") if isinstance(snapshot, dict) else report.template,
+    )
+    body[report_amendments.AMENDMENT_KEY] = report_amendments.identification_block(amendment, source)
+
+    next_version_no = (
+        max(
+            session.exec(
+                select(ReportVersion.version_no).where(ReportVersion.report_id == report.id)
+            ).all()
+        )
+        + 1
+    )
+    s3 = S3Service()
+    key = f"reports/{report.tenant_id}/{report.branch_id}/{report.id}/versions/{next_version_no}/report.json"
+    info = s3.upload_bytes(
+        json.dumps(body, ensure_ascii=False).encode("utf-8"), key=key, content_type="application/json"
+    )
+    storage = StorageObject(
+        provider="aws",
+        region=s3.region,
+        bucket=info.bucket,
+        object_key=info.key,
+        version_id=info.version_id,
+        etag=info.etag,
+        content_type="application/json",
+        size_bytes=info.size_bytes,
+        created_by=user.id,
+        tenant_id=report.tenant_id,
+    )
+    session.add(storage)
+    session.flush()
+    record_storage_delta_with_thresholds(
+        session,
+        report.tenant_id,
+        storage.size_bytes or 0,
+        source="report_json",
+        resource_type="report_json",
+        actor_id=user.id,
+    )
+
+    for version in session.exec(
+        select(ReportVersion).where(
+            ReportVersion.report_id == report.id, ReportVersion.is_current == True  # noqa: E712
+        )
+    ).all():
+        version.is_current = False
+        session.add(version)
+    draft = ReportVersion(
+        report_id=report.id,
+        version_no=next_version_no,
+        json_storage_id=storage.id,
+        authored_by=user.id,
+        authored_at=now,
+        is_current=True,
+        schema_version=2,
+        template_version_id=source.template_version_id,
+        generated_by_renderer_version=source.generated_by_renderer_version,
+        letterhead_version_id=source.letterhead_version_id,
+        changelog=f"Enmienda {amendment.amendment_no}",
+        amendment_id=amendment.id,
+    )
+    session.add(draft)
+
+    old_status = report.status
+    report.status = ReportStatus.DRAFT
+    session.add(report)
+    # A new review cycle starts (R9 semantics); the decisions on the delivered
+    # emission are kept on the amendment and restored if it is cancelled.
+    reviews_reset = _reset_order_reviews_to_pending(session, report.order_id)
+    session.flush()
+
+    _create_audit_log(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        branch_id=str(report.branch_id),
+        actor_user_id=ctx.user_id,
+        action=AUDIT_REOPEN_FOR_AMENDMENT,
+        entity_type="report",
+        entity_id=report_id,
+        old_values={"status": old_status, "delivered_version_id": str(source.id)},
+        new_values={
+            "status": report.status,
+            **report_amendments.correlation(amendment, source),
+            "report_version_id": str(draft.id),
+            "version_no": draft.version_no,
+            "category": amendment.category,
+            "reason": amendment.reason,
+            "reviews_reset_to_pending": reviews_reset,
+            "password_confirmed": True,
+        },
+    )
+    session.add(build_amendment_reopen_event(report, amendment, source, draft, user, old_status=old_status))
+
+    # D6: the order leaves Cerrada/Liberada while the amendment is worked on.
+    if report.order_id:
+        update_order_status_for_report(str(report.order_id), session)
+
+    session.commit()
+    session.refresh(report)
+    session.refresh(amendment)
+
+    logger.info(
+        "Report reopened for amendment",
+        extra={
+            "event": "report.amendment_opened",
+            "report_id": report_id,
+            "amendment_id": str(amendment.id),
+            "user_id": ctx.user_id,
+        },
+    )
+    return ReportAmendmentActionResponse(
+        id=str(report.id),
+        status=report.status,
+        message=(
+            f"Enmienda {amendment.amendment_no} abierta. La emisión firmada sigue "
+            "vigente hasta que la enmienda se firme."
+        ),
+        amendment=_amendment_info(session, amendment),
+        version_no=next_version_no,
+    )
+
+
+@router.post(
+    "/{report_id}/amendments/{amendment_id}/cancel",
+    response_model=ReportAmendmentActionResponse,
+)
+def cancel_report_amendment(
+    report_id: str,
+    amendment_id: str,
+    data: ReportAmendmentCancelRequest,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Cancel the open amendment (D3): the report returns to PUBLISHED with
+    its delivered emission current again, the review decisions it had are
+    restored, and the order returns to its completed state. Nothing signed
+    is rewritten; the amendment's draft versions stay as history.
+
+    Same actors and password rule as opening it, plus a required reason.
+    Refused while a signature of the amendment is in progress.
+    """
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
+
+    order_lifecycle.lock_report_order(session, report)
+
+    try:
+        amendment = authorize_amendment_cancellation(session, report, user)
+    except ReportAuthorizationError as exc:
+        raise _amendment_refusal(exc) from None
+    if str(amendment.id) != amendment_id:
+        raise HTTPException(
+            409,
+            {
+                "code": report_amendments.NO_OPEN_AMENDMENT_CODE,
+                "message": "Esa enmienda ya no está abierta. Actualiza el reporte.",
+            },
+        )
+
+    current = _lock_report_version(session, report, current=True)
+    if publish_in_progress(current):
+        raise HTTPException(
+            409,
+            {
+                "code": report_amendments.PUBLISH_IN_PROGRESS_CODE,
+                "message": "La enmienda se está firmando; no puede cancelarse ahora.",
+            },
+        )
+
+    require_password_confirmation(
+        session,
+        user=user,
+        report=report,
+        attempted_action=AUDIT_AMENDMENT_CANCEL,
+        password=data.password,
+    )
+
+    source = session.get(ReportVersion, amendment.source_version_id)
+    now = datetime.utcnow()
+    amendment.state = AMENDMENT_STATE_CANCELLED
+    amendment.cancelled_by = user.id
+    amendment.cancelled_at = now
+    amendment.cancel_reason = data.reason
+    session.add(amendment)
+
+    for version in session.exec(
+        select(ReportVersion).where(
+            ReportVersion.report_id == report.id, ReportVersion.is_current == True  # noqa: E712
+        )
+    ).all():
+        version.is_current = False
+        session.add(version)
+    source.is_current = True
+    session.add(source)
+
+    restored = 0
+    for entry in amendment.reviews_at_opening or []:
+        review = session.get(ReportReview, entry.get("review_id"))
+        if review is None or review.order_id != report.order_id:
+            continue
+        review.status = ReviewStatus(entry["status"])
+        review.decision_at = (
+            datetime.fromisoformat(entry["decision_at"]) if entry.get("decision_at") else None
+        )
+        session.add(review)
+        restored += 1
+
+    old_status = report.status
+    report.status = ReportStatus.PUBLISHED
+    session.add(report)
+    session.flush()
+
+    _create_audit_log(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        branch_id=str(report.branch_id),
+        actor_user_id=ctx.user_id,
+        action=AUDIT_AMENDMENT_CANCEL,
+        entity_type="report",
+        entity_id=report_id,
+        old_values={"status": old_status, "amendment_state": "OPEN"},
+        new_values={
+            "status": report.status,
+            "amendment_state": amendment.state,
+            **report_amendments.correlation(amendment, source),
+            "report_version_id": str(source.id),
+            "version_no": source.version_no,
+            "reason": amendment.cancel_reason,
+            "reviews_restored": restored,
+            "password_confirmed": True,
+        },
+    )
+    session.add(build_amendment_cancel_event(report, amendment, source, user, old_status=old_status))
+
+    if report.order_id:
+        update_order_status_for_report(str(report.order_id), session)
+
+    session.commit()
+    session.refresh(report)
+    session.refresh(amendment)
+
+    logger.info(
+        "Report amendment cancelled",
+        extra={
+            "event": "report.amendment_cancelled",
+            "report_id": report_id,
+            "amendment_id": str(amendment.id),
+            "user_id": ctx.user_id,
+        },
+    )
+    return ReportAmendmentActionResponse(
+        id=str(report.id),
+        status=report.status,
+        message=(
+            f"Enmienda {amendment.amendment_no} cancelada. La emisión firmada "
+            f"(versión {source.version_no}) sigue siendo la vigente."
+        ),
+        amendment=_amendment_info(session, amendment),
+        version_no=source.version_no,
     )
 
 
@@ -3358,6 +4073,13 @@ def update_report_presentation(
         # 404, not 403: never confirm another laboratory's report id.
         raise HTTPException(404, "Report not found")
 
+    # Céluma 1.4 (#13): the presentation is rewritten in the current
+    # version's JSON, so the lifecycle check and the rewrite run under the
+    # order lock and the version row lock (same protocol as content saves):
+    # a change that lost to a cancellation, an approval or a signature is
+    # refused instead of landing on the state that replaced it.
+    order_lifecycle.lock_report_order(session, report)
+
     try:
         authorize_presentation_change(session, report, user)
     except ReportStateError as exc:
@@ -3365,14 +4087,14 @@ def update_report_presentation(
     except ReportAuthorizationError as exc:
         raise HTTPException(403, exc.message) from None
 
-    current_version = session.exec(
-        select(ReportVersion).where(
-            ReportVersion.report_id == report.id,
-            ReportVersion.is_current == True,  # noqa: E712
-        )
-    ).first()
+    current_version = _lock_report_version(session, report, current=True)
     if not current_version:
         raise HTTPException(404, "No current version found for this report")
+
+    # Céluma 1.4 (#13): a signed version's JSON is an issued artifact.
+    if is_signed_version(current_version):
+        raise HTTPException(409, "Cannot change the presentation of a signed report version")
+    _refuse_while_publishing(current_version)
 
     # Céluma 1.4 (#22): a legacy report's stored JSON is never rewritten.
     require_v2_authoring(report, current_version)
@@ -3433,6 +4155,87 @@ def update_report_presentation(
     )
 
 
+def _require_amendment_signable(
+    session: Session, report: Report, version: ReportVersion
+) -> None:
+    """Céluma 1.4 (#13): inside an open amendment, the version being signed
+    must be the amendment's own draft and carry the author's change note."""
+    amendment, _ = _amendment_scope(session, report)
+    if amendment is None:
+        return
+    if version.amendment_id != amendment.id:
+        raise HTTPException(409, "The current version does not belong to the open amendment.")
+    _require_change_note(session, version)
+
+
+def _record_publication(
+    session: Session,
+    ctx: AuthContext,
+    user: AppUser,
+    report: Report,
+    version: ReportVersion,
+    *,
+    old_status,
+    changelog: str | None,
+    audit_action: str,
+):
+    """Céluma 1.4 (#13): the single audit row, timeline row, order update and
+    notification of a successful publication, staged right after
+    `finalize_publish` in its transaction. Inside an open amendment this is a
+    REPUBLICATION: the amendment closes as PUBLISHED and its signed version
+    becomes the delivered emission, superseding `source` (D1/D3); recipients
+    are told in-app only (D4)."""
+    amendment, source = _amendment_scope(session, report)
+    if amendment is not None:
+        amendment.state = AMENDMENT_STATE_PUBLISHED
+        amendment.published_version_id = version.id
+        amendment.published_at = report.published_at
+        session.add(amendment)
+
+    _create_audit_log(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        branch_id=str(report.branch_id),
+        actor_user_id=ctx.user_id,
+        action=audit_action,
+        entity_type="report",
+        entity_id=str(report.id),
+        old_values={"status": old_status},
+        new_values={
+            "status": report.status,
+            "signed_by": str(user.id),
+            "changelog": changelog,
+            # `signed_at` is the stored signature instant (the claim time, as
+            # on the version and in the PDF), not `published_at`.
+            **publication_correlation(version, amendment, source),
+            "password_confirmed": True,
+        },
+    )
+
+    sign_event = build_publication_event(
+        report, version, user, old_status=old_status, changelog=changelog,
+        amendment=amendment, source=source,
+    )
+    session.add(sign_event)
+
+    # Order status follows the report (D6): back to Cerrada/Liberada.
+    if report.order_id:
+        update_order_status_for_report(str(report.order_id), session)
+
+    order = session.get(Order, report.order_id) if report.order_id else None
+    if amendment is not None:
+        notify_report_republished(
+            session, report=report, order=order, actor=user,
+            occurrence_marker=str(sign_event.id),
+        )
+    else:
+        notify_report_published(
+            session, report=report, order=order, actor=user,
+            occurrence_marker=str(sign_event.id),
+        )
+    return sign_event
+
+
 @router.post("/{report_id}/sign", response_model=ReportActionResponse)
 def sign_report(
     report_id: str,
@@ -3449,6 +4252,12 @@ def sign_report(
     `reports:sign` but not the role, was already rejected), but any reviewer
     in the tenant could sign any approved report — including one they were
     never assigned to.
+
+    Céluma 1.4 (#13): the signer confirms with their own current password,
+    and this route now runs exactly the publication sequence of
+    `sign-and-publish` — row-locked claim, regeneration, `finalize_publish`
+    re-verification under the lock — so a retried or concurrent call can no
+    longer publish (or record the publication) twice.
     """
     report = session.get(Report, report_id)
     if not report:
@@ -3457,6 +4266,10 @@ def sign_report(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.4 (#13): order lock, then version lock — the protocol of every
+    # report writer — for the claim here and again for finalize below.
+    order_lifecycle.lock_report_order(session, report)
+
     try:
         authorize_signing(session, report, user)
     except ReportStateError as exc:
@@ -3464,26 +4277,22 @@ def sign_report(
     except ReportAuthorizationError as exc:
         raise HTTPException(403, exc.message) from None
 
-    # Get current version and sign it
-    current_version = session.exec(
-        select(ReportVersion).where(
-            ReportVersion.report_id == report.id,
-            ReportVersion.is_current == True
-        )
-    ).first()
-    
+    current_version = _lock_report_version(session, report, current=True)
     if not current_version:
         raise HTTPException(404, "No current version found for this report")
+    # Céluma 1.4 (#13): a concurrent duplicate that got the locks while the
+    # first signature renders is refused as such (lifecycle guard, before the
+    # password), not by a precondition reading the transient render state.
+    _refuse_while_publishing(current_version)
 
     # Céluma 1.4 (#22): a legacy report cannot be signed anew.
     require_v2_authoring(report, current_version)
 
     # Céluma 1.3 Phase 2, Block E: a report cannot be published without a
     # validated, hashed, persisted official PDF for the version being
-    # published — see pdf-publication-workflow.md. Generation is a separate,
-    # explicit step (POST .../generate-pdf); signing never generates one
-    # itself, to keep the (potentially slow, browser-driven) generation out
-    # of this transaction.
+    # published — see pdf-publication-workflow.md. This two-step route keeps
+    # that precondition (generation is the explicit first step); it then
+    # regenerates from the signed state below (H-0c Blocker B).
     if current_version.pdf_generation_status != "READY":
         raise HTTPException(
             422,
@@ -3491,125 +4300,63 @@ def sign_report(
             "Generate the official PDF before publishing.",
         )
 
-    # Second post-Phase-2 remediation (UX): same claim that
-    # sign_and_publish_report uses, as defense in depth against a direct
-    # double-submit to this endpoint (the main UI flow no longer calls it,
-    # but it remains for compatibility). The lock is not held during the
-    # call — it is released on commit.
+    _require_amendment_signable(session, report, current_version)
+
+    require_password_confirmation(
+        session,
+        user=user,
+        report=report,
+        attempted_action="REPORT.SIGN",
+        password=data.password,
+    )
+
+    # Still under both locks: the claim commits, releasing them, and from
+    # then on the claim itself keeps every other writer off this version.
+    version = current_version
     try:
-        claim_publish(session, current_version, user.id)
+        claim_publish(session, version, user.id)
     except ReportPublishAlreadyInProgressError as exc:
         raise HTTPException(409, exc.message) from None
 
-    # If the report requires a digital signature, embed the user's public
-    # signature URL in the persisted JSON — see report_publishing.py.
     try:
-        embed_signature_metadata_if_required(session, report_id, current_version, user)
-        # Céluma 1.3.1 Block D: the report's delivery_date exists for the
-        # first time at this exact instant. A separate pass from the call
-        # above — that one returns early when no digital signature image is
-        # required, but delivery_date must be set regardless. See
-        # report_metadata.py.
-        embed_delivery_date_at_signing(session, report_id, current_version, user)
-        # H-0c Blocker B (§4). This endpoint used to publish whatever PDF
-        # happened to be READY — necessarily a PDF generated BEFORE signing,
-        # since it refuses to run without one. The result was an immutable,
-        # authoritative artifact for a report marked digitally signed whose
-        # PDF contained no signature; PUBLISHED status then blocks any
-        # regeneration, so the inconsistency was permanent. The UI no longer
-        # calls this route, but it is a live, non-deprecated, authenticated
-        # API any reviewer can invoke, so "the frontend doesn't call it" is
-        # not a safety argument.
-        #
-        # It now regenerates from the just-signed state with exactly the
-        # semantics `sign-and-publish` uses: `force=True` to bypass the stale
-        # READY, inside the same publish claim, with the same compensation.
+        embed_signature_metadata_if_required(session, report_id, version, user)
+        # Céluma 1.3.1 Block D: delivery_date exists for the first time at
+        # this instant, whether or not a signature image is required.
+        embed_delivery_date_at_signing(session, report_id, version, user)
+        # H-0c Blocker B (§4): never publish a PDF generated BEFORE signing.
+        # Regenerate from the just-signed state with `force=True`, inside the
+        # claim, exactly as `sign-and-publish` does.
         pdf_service = ReportPdfGenerationService(session)
-        current_version = pdf_service.generate(
-            report, current_version, user.id, force=True
-        )
+        version = pdf_service.generate(report, version, user.id, force=True)
     except (ReportPdfAlreadyInProgressError, ReportPdfImmutableError) as exc:
-        clear_publish_claim(session, current_version)
+        clear_publish_claim(session, version)
         raise HTTPException(409, exc.message) from None
     except ReportPdfGenerationError as exc:
-        clear_publish_claim(session, current_version)
+        clear_publish_claim(session, version)
         raise HTTPException(422, exc.message) from None
     except ReportPublishError as exc:
-        clear_publish_claim(session, current_version)
+        clear_publish_claim(session, version)
         raise HTTPException(422, exc.message) from None
+    except Exception:
+        clear_publish_claim(session, version)
+        raise
 
-    # The same instant the renderer was shown (see get_internal_render_data):
-    # the PDF and the stored signature must not disagree.
-    signed_at = current_version.publish_started_at or datetime.utcnow()
-    current_version.publish_started_at = None
-    current_version.publish_started_by = None
-
-    # Update version with signature
-    current_version.signed_by = user.id
-    current_version.signed_at = signed_at
-    if data.changelog:
-        current_version.changelog = data.changelog
-    session.add(current_version)
-    
-    # Update report status and published_at
+    order_lifecycle.lock_report_order(session, report)
+    report, version = load_locked_version(session, report_id, version.version_no)
     old_status = report.status
-    report.status = ReportStatus.PUBLISHED
-    report.published_at = datetime.utcnow()
-    session.add(report)
-    
-    # Create audit log
-    _create_audit_log(
-        session=session,
-        tenant_id=ctx.tenant_id,
-        branch_id=str(report.branch_id),
-        actor_user_id=ctx.user_id,
-        action="REPORT.SIGN",
-        entity_type="report",
-        entity_id=report_id,
-        old_values={"status": old_status},
-        new_values={
-            "status": report.status,
-            "signed_by": str(user.id),
-            "signed_at": report.published_at.isoformat(),
-            "changelog": data.changelog,
-        },
-    )
-    
-    # Create timeline event for report signature/publication
-    from app.models.events import OrderEvent
-    from app.models.enums import EventType
-    
-    sign_event = OrderEvent(
-        tenant_id=report.tenant_id,
-        branch_id=report.branch_id,
-        order_id=report.order_id,
-        event_type=EventType.REPORT_APPROVED,  # Using REPORT_APPROVED for signing
-        description="",
-        event_metadata={
-            "report_id": str(report.id),
-            "signer_id": str(user.id),
-            "signer_name": user.full_name or user.username,
-            "published": True,
-            "changelog": data.changelog if data.changelog else None,
-        },
-        created_by=user.id,
-    )
-    session.add(sign_event)
-
-    # Update order status based on report being published
-    if report.order_id:
-        update_order_status_for_report(str(report.order_id), session)
+    try:
+        finalize_publish(session, report, version, user.id, data.changelog)
+    except ReportPublishConflictError as exc:
+        clear_publish_claim(session, version)
+        raise HTTPException(409, exc.message) from None
 
     # Céluma 1.3 Phase 3, Block F. This is the legacy two-step `/sign`
     # endpoint, kept for compatibility; `/sign-and-publish` below is what the
-    # UI calls. Both reach PUBLISHED and both notify, because a report
-    # published through either path is equally published to its recipients.
-    notify_report_published(
-        session,
-        report=report,
-        order=session.get(Order, report.order_id) if report.order_id else None,
-        actor=user,
-        occurrence_marker=str(sign_event.id),
+    # UI calls. Both reach PUBLISHED and both record and notify the same way,
+    # because a report published through either path is equally published.
+    _record_publication(
+        session, ctx, user, report, version,
+        old_status=old_status, changelog=data.changelog, audit_action="REPORT.SIGN",
     )
 
     session.commit()
@@ -3670,6 +4417,12 @@ def sign_and_publish_report(
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
 
+    # Céluma 1.4 (#13): order lock, then version lock — the protocol of every
+    # report writer (see `_lock_report_version`) — for the claim here and
+    # again for finalize below. Every guard therefore reads the fresh state
+    # that a concurrent save, upload, cancellation or reopen left behind.
+    order_lifecycle.lock_report_order(session, report)
+
     # Céluma 1.3.1 Block A / A3: role + `reports:sign` + assignment. The
     # assignment half is new; see `app/services/report_authorization.py`.
     try:
@@ -3679,22 +4432,32 @@ def sign_and_publish_report(
     except ReportAuthorizationError as exc:
         raise HTTPException(403, exc.message) from None
 
-    current_version = session.exec(
-        select(ReportVersion).where(
-            ReportVersion.report_id == report.id,
-            ReportVersion.is_current == True,
-        )
-    ).first()
+    current_version = _lock_report_version(session, report, current=True)
     if not current_version:
         raise HTTPException(404, "No current version found for this report")
+    # Céluma 1.4 (#13): a concurrent duplicate that got the locks while the
+    # first signature renders is refused as such (lifecycle guard, before the
+    # password), not by a precondition reading the transient render state.
+    _refuse_while_publishing(current_version)
 
     # Céluma 1.4 (#22): a legacy report cannot be signed anew.
     require_v2_authoring(report, current_version)
 
-    report, version = load_locked_version(session, report_id, current_version.version_no)
-    if not report or not version:
-        raise HTTPException(404, "Report or version not found")
+    _require_amendment_signable(session, report, current_version)
 
+    # Céluma 1.4 (#13): every guard above has passed and nothing has been
+    # written yet — the claim below is the first write.
+    require_password_confirmation(
+        session,
+        user=user,
+        report=report,
+        attempted_action="REPORT.SIGN_AND_PUBLISH",
+        password=data.password,
+    )
+
+    # Still under both locks: the claim commits, releasing them, and from
+    # then on the claim itself keeps every other writer off this version.
+    version = current_version
     try:
         claim_publish(session, version, user.id)
     except ReportPublishAlreadyInProgressError as exc:
@@ -3721,6 +4484,7 @@ def sign_and_publish_report(
         clear_publish_claim(session, version)
         raise
 
+    order_lifecycle.lock_report_order(session, report)
     report, version = load_locked_version(session, report_id, version.version_no)
     old_status = report.status
     try:
@@ -3729,58 +4493,14 @@ def sign_and_publish_report(
         clear_publish_claim(session, version)
         raise HTTPException(409, exc.message) from None
 
-    _create_audit_log(
-        session=session,
-        tenant_id=ctx.tenant_id,
-        branch_id=str(report.branch_id),
-        actor_user_id=ctx.user_id,
-        action="REPORT.SIGN_AND_PUBLISH",
-        entity_type="report",
-        entity_id=report_id,
-        old_values={"status": old_status},
-        new_values={
-            "status": report.status,
-            "signed_by": str(user.id),
-            "signed_at": report.published_at.isoformat() if report.published_at else None,
-            "changelog": data.changelog,
-            "pdf_sha256": version.pdf_sha256,
-        },
-    )
-
-    from app.models.events import OrderEvent
-    from app.models.enums import EventType
-
-    sign_event = OrderEvent(
-        tenant_id=report.tenant_id,
-        branch_id=report.branch_id,
-        order_id=report.order_id,
-        event_type=EventType.REPORT_APPROVED,  # Using REPORT_APPROVED for signing
-        description="",
-        event_metadata={
-            "report_id": str(report.id),
-            "signer_id": str(user.id),
-            "signer_name": user.full_name or user.username,
-            "published": True,
-            "changelog": data.changelog if data.changelog else None,
-        },
-        created_by=user.id,
-    )
-    session.add(sign_event)
-
-    if report.order_id:
-        update_order_status_for_report(str(report.order_id), session)
-
     # Céluma 1.3 Phase 3, Block F: the single-action sign-and-publish path.
     # No REPORT_PDF_READY notification is emitted for the forced regeneration
     # this endpoint performs — that generation is an internal step of
     # publishing, not an invitation to sign something that is already being
     # signed. See notify_report_pdf_ready's docstring.
-    notify_report_published(
-        session,
-        report=report,
-        order=session.get(Order, report.order_id) if report.order_id else None,
-        actor=user,
-        occurrence_marker=str(sign_event.id),
+    _record_publication(
+        session, ctx, user, report, version,
+        old_status=old_status, changelog=data.changelog, audit_action="REPORT.SIGN_AND_PUBLISH",
     )
 
     session.commit()
@@ -3834,7 +4554,12 @@ def retract_report(
     
     if str(report.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Report does not belong to your tenant")
-    
+
+    # Céluma 1.4 (#13): the order lock that opening an amendment takes, so a
+    # retraction that lost that race sees DRAFT and is refused instead of
+    # leaving a RETRACTED report with an open amendment.
+    order_lifecycle.lock_report_order(session, report)
+
     if report.status != ReportStatus.PUBLISHED:
         raise HTTPException(400, f"Cannot retract report in {report.status} status")
     

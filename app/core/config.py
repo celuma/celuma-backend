@@ -68,6 +68,14 @@ class Settings(BaseSettings):
     rate_limit_max_requests: int = 100
     rate_limit_window_seconds: int = 60
 
+    # Céluma 1.4 (#13): signing and reopening require the actor's own current
+    # password. Wrong passwords are counted per actor from their security
+    # audit rows in this sliding window; at the limit the confirmation is
+    # refused (429) without verifying, so the limiter is not an oracle. See
+    # app/services/password_confirmation.py.
+    password_confirmation_max_failures: int = 5
+    password_confirmation_window_seconds: int = 900
+
     # Céluma 1.3 Phase 2, Block E: official PDF generation. `pdf_generator_base_url`
     # is the origin of the frontend the headless browser navigates to render
     # `/internal/report-render/...` — intentionally has no localhost default so an

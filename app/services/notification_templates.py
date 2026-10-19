@@ -286,6 +286,18 @@ _TEMPLATES_ES_MX: Dict[NotificationType, NotificationTemplate] = {
         body="El reporte fue publicado y firmado por {actor_name}.",
         params=(_ORDER_NUMBER, _ACTOR_NAME),
     ),
+    # Céluma 1.4 (#13): the reason and change note are user-authored free text
+    # and stay on the resource; the notification says what happened.
+    NotificationType.REPORT_REPUBLISHED: NotificationTemplate(
+        key="report_republished_v1",
+        notification_type=NotificationType.REPORT_REPUBLISHED,
+        title="Reporte enmendado y republicado — Orden {order_number}",
+        body=(
+            "{actor_name} firmó la enmienda del reporte; la nueva emisión sustituye "
+            "a la anterior. El reenvío externo se hace manualmente."
+        ),
+        params=(_ORDER_NUMBER, _ACTOR_NAME),
+    ),
     NotificationType.REPORT_RETRACTED: NotificationTemplate(
         key="report_retracted_v1",
         notification_type=NotificationType.REPORT_RETRACTED,

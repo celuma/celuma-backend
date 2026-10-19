@@ -15,6 +15,7 @@ from app.models.report_review import ReportReview
 from app.models.tenant import Tenant
 
 from .factories import (
+    TEST_USER_PASSWORD,
     assign_reviewer,
     auth_headers,
     create_branch,
@@ -425,7 +426,7 @@ class TestBlockAAndBInvariantsHoldForTheFallback:
 
         reopen = client.post(
             f"/api/v1/reports/{report.id}/reopen",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(reviewer),
         )
         assert reopen.status_code == 200, reopen.text

@@ -32,6 +32,7 @@ from app.models.events import OrderEvent
 from app.models.report import Report, ReportVersion
 
 from .factories import (
+    TEST_USER_PASSWORD,
     assign_reviewer,
     auth_headers,
     create_branch,
@@ -105,7 +106,7 @@ class TestTheReopenEventExists:
 
         resp = client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         assert resp.status_code == 200, resp.text
@@ -120,7 +121,7 @@ class TestTheReopenEventExists:
     ):
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         session.expire_all()
@@ -143,7 +144,7 @@ class TestTheReopenEventExists:
     ):
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         session.expire_all()
@@ -162,7 +163,7 @@ class TestTheReopenEventExists:
         not know the `action` key."""
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         session.expire_all()
@@ -179,7 +180,7 @@ class TestTheReopenEventExists:
         rather than letting the enum drift."""
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         session.expire_all()
@@ -199,7 +200,7 @@ class TestNothingIsWrittenWhenTheReopenFails:
         before = len(_events(session, lab["order"].id))
 
         resp = client.post(
-            REOPEN.format(lab["report"].id), json={}, headers=auth_headers(patho)
+            REOPEN.format(lab["report"].id), json={"password": TEST_USER_PASSWORD}, headers=auth_headers(patho)
         )
         assert resp.status_code == 403, resp.text
 
@@ -218,7 +219,7 @@ class TestNothingIsWrittenWhenTheReopenFails:
 
         resp = client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         assert resp.status_code == 400, resp.text
@@ -238,7 +239,7 @@ class TestNothingIsWrittenWhenTheReopenFails:
 
         resp = client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         assert resp.status_code == 409, resp.text
@@ -254,7 +255,7 @@ class TestRepeatedReopenCycles:
         for _ in range(3):
             resp = client.post(
                 REOPEN.format(lab["report"].id),
-                json={},
+                json={"password": TEST_USER_PASSWORD},
                 headers=auth_headers(lab["reviewer"]),
             )
             assert resp.status_code == 200, resp.text
@@ -277,7 +278,7 @@ class TestTheAuditTrailIsUnchanged:
     ):
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         session.expire_all()
@@ -297,7 +298,7 @@ class TestTheAuditTrailIsUnchanged:
     def test_the_transition_itself_still_happens(self, client, session, lab):
         client.post(
             REOPEN.format(lab["report"].id),
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(lab["reviewer"]),
         )
         session.expire_all()
