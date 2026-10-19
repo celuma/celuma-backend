@@ -1,5 +1,5 @@
-from pydantic import BaseModel, model_validator
-from typing import Optional, Dict, Any, List
+from pydantic import BaseModel, Field, model_validator
+from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime
 
 
@@ -212,6 +212,11 @@ class ReportDetailResponse(BaseModel):
     pdf_page_count: Optional[int] = None
     pdf_error_code: Optional[str] = None
     pdf_error_message: Optional[str] = None
+    # Céluma 1.4 (#13): the amendment in progress (the internal indicator; it
+    # is never exposed to portals) and the emission readers receive while it
+    # is drafted, reviewed and signed.
+    open_amendment: Optional["ReportAmendmentInfo"] = None
+    delivered_emission: Optional["ReportEmissionInfo"] = None
 
 class ReportVersionCreate(BaseModel):
     """Schema for creating a report version"""
@@ -243,6 +248,8 @@ class ReportMetaResponse(BaseModel):
     published_at: Optional[datetime] = None
     version_no: Optional[int] = None
     has_pdf: bool = False
+    # Céluma 1.4 (#13): internal "amendment in progress" indicator (D3).
+    open_amendment_no: Optional[int] = None
 
 # Schemas for enriched list responses
 class BranchRef(BaseModel):
@@ -311,9 +318,116 @@ class ReportStatusUpdate(BaseModel):
     """Schema for updating report status"""
     changelog: Optional[str] = None
 
+#: Céluma 1.4 (#13): the actor's own current password, required by signing and
+#: reopening (see app/services/password_confirmation.py). Excluded from
+#: `model_dump`/JSON and hidden from `repr`, so neither an accidental log of the
+#: request model nor a serialization of it can carry the credential. Left
+#: unconstrained on purpose: a length/type rule here would make FastAPI echo the
+#: value in a 422; the service bounds it instead.
+CONFIRMATION_PASSWORD_FIELD = Field(default=None, exclude=True, repr=False)
+
+
 class ReportSignRequest(BaseModel):
     """Schema for signing a report"""
     changelog: Optional[str] = None
+    password: Optional[str] = CONFIRMATION_PASSWORD_FIELD
+
+
+class ReportReopenRequest(BaseModel):
+    """Céluma 1.4 (#13): reopening an approved, unsigned report. `changelog` is
+    the optional reason recorded in the audit row and the timeline event."""
+    changelog: Optional[str] = None
+    password: Optional[str] = CONFIRMATION_PASSWORD_FIELD
+
+# ---------------------------------------------------------------------------
+# Céluma 1.4 (#13): amendments of signed reports
+# ---------------------------------------------------------------------------
+
+class ReportAmendmentOpenRequest(BaseModel):
+    """Reopen a published report for amendment. `category` records why (D1:
+    a correction or a supplement such as IHC); both produce a complete new
+    emission. `reason` is required and recorded in the audit, the timeline and
+    the amended document."""
+    category: Literal["CORRECTION", "SUPPLEMENT"]
+    reason: str = Field(min_length=3, max_length=1000)
+    password: Optional[str] = CONFIRMATION_PASSWORD_FIELD
+
+    @model_validator(mode="after")
+    def _strip_reason(self):
+        self.reason = self.reason.strip()
+        if len(self.reason) < 3:
+            raise ValueError("reason must have at least 3 non-blank characters")
+        return self
+
+
+class ReportAmendmentCancelRequest(BaseModel):
+    """Cancel the open amendment; the delivered emission becomes current again."""
+    reason: str = Field(min_length=3, max_length=1000)
+    password: Optional[str] = CONFIRMATION_PASSWORD_FIELD
+
+    @model_validator(mode="after")
+    def _strip_reason(self):
+        self.reason = self.reason.strip()
+        if len(self.reason) < 3:
+            raise ValueError("reason must have at least 3 non-blank characters")
+        return self
+
+
+class ReportAmendmentInfo(BaseModel):
+    id: str
+    amendment_no: int
+    state: str
+    category: str
+    reason: str
+    source_version_id: str
+    source_version_no: Optional[int] = None
+    source_signed_at: Optional[datetime] = None
+    requested_by: str
+    requested_by_name: Optional[str] = None
+    requested_at: datetime
+    published_version_id: Optional[str] = None
+    published_version_no: Optional[int] = None
+    published_at: Optional[datetime] = None
+    cancelled_by: Optional[str] = None
+    cancelled_by_name: Optional[str] = None
+    cancelled_at: Optional[datetime] = None
+    cancel_reason: Optional[str] = None
+
+
+class ReportEmissionInfo(BaseModel):
+    """One signed emission of a report (original or amendment)."""
+    report_version_id: str
+    version_no: int
+    signed_at: Optional[datetime] = None
+    signed_by: Optional[str] = None
+    signed_by_name: Optional[str] = None
+    amendment_no: Optional[int] = None
+    is_delivered: bool = False
+    pdf_available: bool = False
+    pdf_sha256: Optional[str] = None
+
+
+# `ReportDetailResponse` references the two models above by name. Resolve them
+# now: subclasses declared in other modules (`InternalRenderDataResponse`, the
+# official-PDF render envelope) are built at import time and need a complete
+# parent.
+ReportDetailResponse.model_rebuild()
+
+
+class ReportEmissionsResponse(BaseModel):
+    """Authorized history: every signed emission, newest first, and every
+    amendment (open, published or cancelled)."""
+    emissions: List[ReportEmissionInfo]
+    amendments: List[ReportAmendmentInfo]
+
+
+class ReportAmendmentActionResponse(BaseModel):
+    id: str
+    status: str
+    message: str
+    amendment: ReportAmendmentInfo
+    version_no: Optional[int] = None
+
 
 class ReportReviewComment(BaseModel):
     """Schema for review comments"""

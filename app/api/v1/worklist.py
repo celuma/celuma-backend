@@ -24,7 +24,7 @@ from app.models.user import AppUser
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
 from app.models.laboratory import Order, Sample, OrderComment
-from app.models.report import Report
+from app.models.report import Report, ReportVersion
 from app.models.patient import Patient
 from app.models.enums import AssignmentItemType, ReviewStatus, ReportStatus, EventType
 from app.models.events import OrderEvent
@@ -571,6 +571,16 @@ def make_review_decision(
     if not report:
         raise HTTPException(404, "Report not found for this order")
     
+    # Céluma 1.4 (#13): decisions taken inside an open amendment carry its
+    # correlation, like the report routes' events.
+    from app.services import report_amendments
+    from app.services.report_lifecycle_events import amendment_context
+    open_amendment = report_amendments.open_amendment(session, report)
+    amendment_correlation = amendment_context(
+        open_amendment,
+        session.get(ReportVersion, open_amendment.source_version_id) if open_amendment else None,
+    )
+
     # Track previous status for change detection
     previous_status = review.status
     new_status = ReviewStatus.APPROVED if data.decision == "approved" else ReviewStatus.REJECTED
@@ -591,7 +601,7 @@ def make_review_decision(
         entity_type="report_review",
         entity_id=str(review.id),
         old_values={"status": previous_status.value if hasattr(previous_status, 'value') else str(previous_status)},
-        new_values={"status": new_status.value, "comment": data.comment},
+        new_values={"status": new_status.value, "comment": data.comment, **amendment_correlation},
     )
     
     # Update report status based on review decisions
@@ -613,6 +623,7 @@ def make_review_decision(
                     "reviewer_id": str(user.id),
                     "reviewer_name": user.full_name or user.username,
                     "previous_review_status": previous_status.value if hasattr(previous_status, 'value') else str(previous_status),
+                    **amendment_correlation,
                 },
                 created_by=user.id,
             )
@@ -648,6 +659,7 @@ def make_review_decision(
                 "reviewer_id": str(user.id),
                 "reviewer_name": user.full_name or user.username,
                 "previous_review_status": previous_status.value if hasattr(previous_status, 'value') else str(previous_status),
+                **amendment_correlation,
             },
             created_by=user.id,
         )

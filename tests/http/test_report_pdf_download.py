@@ -7,6 +7,7 @@ from app.models.report import Report, ReportVersion
 
 from .conftest import make_pdf_bytes
 from .factories import (
+    TEST_USER_PASSWORD,
     assign_reviewer,
     auth_headers,
     create_branch,
@@ -118,7 +119,7 @@ class TestOfficialDownload:
 
         stub_pdf_render.succeed(make_pdf_bytes(1))
         client.post(f"/api/v1/reports/{report.id}/versions/1/generate-pdf", headers=auth_headers(editor))
-        sign = client.post(f"/api/v1/reports/{report.id}/sign", json={}, headers=auth_headers(reviewer))
+        sign = client.post(f"/api/v1/reports/{report.id}/sign", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(reviewer))
         assert sign.status_code == 200
 
         resp = client.get(f"/api/v1/reports/{report.id}/versions/1/pdf", headers=auth_headers(reviewer))

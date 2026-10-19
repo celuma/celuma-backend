@@ -39,6 +39,7 @@ from app.models.role_permission import RolePermission
 from app.models.storage import StorageObject
 
 from .factories import (
+    TEST_USER_PASSWORD,
     auth_headers,
     create_branch,
     create_order,
@@ -512,7 +513,7 @@ class TestSigningAuthorization:
 
         resp = client.post(
             f"/api/v1/reports/{approved['report'].id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(reviewer),
         )
         assert resp.status_code == 200, resp.text
@@ -535,7 +536,7 @@ class TestSigningAuthorization:
 
         resp = client.post(
             f"/api/v1/reports/{approved['report'].id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(reviewer_b),
         )
         assert resp.status_code == 403, resp.text
@@ -554,7 +555,7 @@ class TestSigningAuthorization:
 
         resp = client.post(
             f"/api/v1/reports/{approved['report'].id}/sign",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(reviewer_b),
         )
         assert resp.status_code == 403, resp.text
@@ -568,7 +569,7 @@ class TestSigningAuthorization:
 
         resp = client.post(
             f"/api/v1/reports/{approved['report'].id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(pathologist),
         )
         assert resp.status_code == 403, resp.text
@@ -582,7 +583,7 @@ class TestSigningAuthorization:
 
         resp = client.post(
             f"/api/v1/reports/{approved['report'].id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(admin),
         )
         assert resp.status_code == 403, resp.text
@@ -596,7 +597,7 @@ class TestSigningAuthorization:
 
         resp = client.post(
             f"/api/v1/reports/{approved['report'].id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(su),
         )
         assert resp.status_code == 403, resp.text
@@ -1122,7 +1123,7 @@ class TestReopenAuthorizationContract:
         before = _Unchanged(session, approved["report"], approved["version"])
         sign = client.post(
             f"/api/v1/reports/{approved['report'].id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(admin),
         )
         assert sign.status_code == 403, sign.text
@@ -1154,7 +1155,7 @@ class TestReopenAuthorizationContract:
         assert not can_reopen_approved_report(session, approved["report"], pathologist)
         refused = client.post(
             f"/api/v1/reports/{approved['report'].id}/reopen",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(pathologist),
         )
         assert refused.status_code == 403, refused.text
@@ -1169,7 +1170,7 @@ class TestReopenAuthorizationContract:
         assert can_reopen_approved_report(session, approved["report"], admin)
         allowed = client.post(
             f"/api/v1/reports/{approved['report'].id}/reopen",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(admin),
         )
         assert allowed.status_code == 200, allowed.text

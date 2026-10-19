@@ -262,6 +262,8 @@ class TestNotificationModels:
             "REPORT_PDF_READY",
             "REPORT_PUBLISHED",
             "REPORT_RETRACTED",
+            # Céluma 1.4 (#13, D4): an amendment's republication.
+            "REPORT_REPUBLISHED",
             "ASSIGNMENT_ADDED",
             "SAMPLE_STATUS_CHANGED",
             "STORAGE_USAGE_APPROACHING",

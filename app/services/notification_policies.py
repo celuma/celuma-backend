@@ -119,6 +119,14 @@ NOTIFICATION_DELIVERY_POLICIES: Dict[NotificationType, NotificationDeliveryPolic
         email_supported=True,
         email_default_enabled=True,
     ),
+    # Céluma 1.4 (#13, owner decision D4): an amendment was signed and
+    # republished. In-app only: external redelivery (requesting physicians,
+    # patients) stays a manual step in 1.4, and no email is materialized.
+    NotificationType.REPORT_REPUBLISHED: NotificationDeliveryPolicy(
+        in_app_required=True,
+        email_supported=False,
+        email_default_enabled=False,
+    ),
     # A published report was withdrawn — the one event where *not* hearing
     # about it promptly is actively harmful.
     NotificationType.REPORT_RETRACTED: NotificationDeliveryPolicy(

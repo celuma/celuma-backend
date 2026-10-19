@@ -2101,7 +2101,8 @@ Path param:
 **Request Body:**
 ```json
 {
-  "changelog": "Membrete equivocado; se corrige antes de firmar"
+  "changelog": "Membrete equivocado; se corrige antes de firmar",
+  "password": "<the acting user's current password>"
 }
 ```
 
@@ -2130,15 +2131,30 @@ Path param:
   presentation window, which stays `IN_REVIEW`-only.
 - Reviewer assignments and their previous decisions are **preserved**;
   `POST /{report_id}/submit` resets them to PENDING on the next submission.
-- Creates an audit log entry (`REPORT.REOPEN`). `changelog` is optional.
+- Creates an audit log entry (`REPORT.REOPEN`) and one timeline event
+  (`STATUS_CHANGED` with `metadata.action = "REPORT_REOPENED"`,
+  `reopen_kind = "UNSIGNED"`, the version id and `reason` = `changelog`).
+  `changelog` is optional. Concurrent or repeated reopens are serialized: one
+  succeeds, the others get `400` and write nothing.
+- **Céluma 1.4 (#13): password confirmation.** `password` is the acting
+  user's **own current password**. It is verified after the authorization and
+  lifecycle checks above and before anything is written: missing → `403`
+  `{"detail": {"code": "password_confirmation_required", "message": ...}}`;
+  wrong (including another user's) → `403` `password_confirmation_invalid`,
+  which also writes one credential-free `SECURITY.PASSWORD_CONFIRMATION_FAILED`
+  audit row and nothing else; too many recent failures by this user → `429`
+  `password_confirmation_throttled` with `retry_after_seconds` (a correct
+  password is refused too while throttled). It grants no authority. The value
+  is never stored, logged or echoed (422 responses redact it).
 
 ### POST /api/v1/reports/{report_id}/sign
-**Sign and publish a report (APPROVED → PUBLISHED) - Pathologist only**
+**Sign and publish a report (APPROVED → PUBLISHED) — legacy two-step route; the web app uses `POST /{report_id}/sign-and-publish`, which takes the same body**
 
 **Request Body:**
 ```json
 {
-  "changelog": "Final review complete, report signed and published"
+  "changelog": "Final review complete, report signed and published",
+  "password": "<the signer's current password>"
 }
 ```
 
@@ -2152,13 +2168,65 @@ Path param:
 ```
 
 **Notes:**
-- Only pathologists can sign reports
+- Requires the assigned reviewer (reviewer role + `reports:sign` + order
+  assignment) and a READY official PDF; the PDF is regenerated from the signed
+  state under the publish claim, exactly as `sign-and-publish` does
 - Transitions report from APPROVED to PUBLISHED status
-- Sets `signed_by` to current pathologist's user ID
-- Sets `signed_at` timestamp
-- Sets `published_at` timestamp on the report
-- Creates an audit log entry
+- Sets `signed_by`/`signed_at` on the version and `published_at` on the report
+- Creates an audit log entry (`REPORT.SIGN`; `REPORT.SIGN_AND_PUBLISH` for the
+  single-action route) and, since 1.4, one `REPORT_PUBLISHED` timeline event
+  (`metadata.action = "REPORT_PUBLISHED"`, `publication_kind = "INITIAL"`,
+  version id/number, `pdf_sha256`, signer). Before 1.4 publications were stored
+  as `REPORT_APPROVED` with `published: true`; those rows are not rewritten
+- A retried or concurrent call after success is refused and records nothing
 - Changelog is optional but recommended
+- **Céluma 1.4 (#13): password confirmation.** `password` is the acting
+  user's **own current password**. It is verified after the authorization and
+  lifecycle checks above and before anything is written: missing → `403`
+  `{"detail": {"code": "password_confirmation_required", "message": ...}}`;
+  wrong (including another user's) → `403` `password_confirmation_invalid`,
+  which also writes one credential-free `SECURITY.PASSWORD_CONFIRMATION_FAILED`
+  audit row and nothing else; too many recent failures by this user → `429`
+  `password_confirmation_throttled` with `retry_after_seconds` (a correct
+  password is refused too while throttled). It grants no authority. The value
+  is never stored, logged or echoed (422 responses redact it).
+
+### POST /api/v1/reports/{report_id}/amendments
+**Reopen a published report for amendment (PUBLISHED → DRAFT)** — Céluma 1.4, #13
+
+**Request Body:**
+```json
+{
+  "category": "CORRECTION",
+  "reason": "Lateralidad incorrecta en el diagnóstico",
+  "password": "<the acting user's current password>"
+}
+```
+`category` is `CORRECTION` or `SUPPLEMENT` (e.g. an IHC result); both produce a complete new emission that supersedes the delivered one when signed. `reason` is required (3–1000 characters).
+
+**Response:** `{"id", "status": "DRAFT", "message", "amendment": {...}, "version_no"}` where `amendment` carries `id`, `amendment_no`, `state` (`OPEN`), `category`, `reason`, `source_version_id`/`_no`/`signed_at`, requester and timestamps.
+
+**Notes:**
+- Same actors as `/reopen` (assigned reviewer with `reports:approve`, or `reports:manage_templates`); password confirmation as described under `/reopen`. It grants no approval or signing.
+- `400` unless the report is `PUBLISHED` with no open amendment; `409` `amendment_legacy_original` when the delivered emission is not V2 (legacy originals are not amendable).
+- Creates a draft version copying the delivered emission's content and snapshot plus an `amendment` identification block; the signed version, its JSON, PDF and signature are untouched and it stays the delivered emission until the amendment is signed. The order leaves its completed status.
+- Audit `REPORT.REOPEN_FOR_AMENDMENT` and one timeline event (`STATUS_CHANGED`, `metadata.action = "REPORT_REOPENED_FOR_AMENDMENT"`), correlated with the amendment and both versions. Concurrent openings produce exactly one amendment.
+- While it is open, content saves may change only `report.amendment.change_note`; `submit`, `sign` and `sign-and-publish` answer `409` `amendment_change_note_required` while the stored note is empty. Signing the draft republishes the report (`REPORT_PUBLISHED` event with `action: "REPORT_REPUBLISHED"`, in-app `REPORT_REPUBLISHED` notification, no email).
+
+### POST /api/v1/reports/{report_id}/amendments/{amendment_id}/cancel
+**Cancel the open amendment (→ PUBLISHED)** — Céluma 1.4, #13
+
+**Request Body:** `{"reason": "Se abrió por error", "password": "<the acting user's current password>"}`
+
+**Notes:**
+- Same actors and password rule as opening; `reason` required.
+- `400` when no amendment is open; `409` `amendment_not_open` for a stale id; `409` `amendment_publish_in_progress` while its signature is running.
+- The delivered emission becomes current again, the report returns to `PUBLISHED`, the review decisions recorded at opening are restored and the order returns to its completed status. The draft versions are kept. Audit `REPORT.AMENDMENT_CANCEL` and one timeline event (`action: "REPORT_AMENDMENT_CANCELLED"`).
+
+### GET /api/v1/reports/{report_id}/emissions
+**Authorized emission history** — Céluma 1.4, #13 (`reports:read`, tenant)
+
+Returns `{"emissions": [...], "amendments": [...]}`: every signed version newest first (`version_no`, `signed_at`, signer, `amendment_no` or null for the original, `is_delivered`, `pdf_available`, `pdf_sha256`) and every amendment with its state. Each emission's PDF is downloadable with `GET /reports/{id}/versions/{n}/pdf`. `GET /reports/{id}/pdf` returns the delivered emission (latest signed version); report detail responses include `open_amendment` and `delivered_emission`; portal report responses deliver the latest signed emission with `status: "PUBLISHED"` and a `supersedes` reference (`amendment_no`, `supersedes_signed_at`) for an amended one.
 
 ### POST /api/v1/reports/{report_id}/retract
 **Retract a published report (PUBLISHED → RETRACTED) - Pathologist only**

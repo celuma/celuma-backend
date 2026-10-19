@@ -159,7 +159,7 @@ class TestStorageTriggerCoverage:
     def test_every_wrapper_call_site_is_accounted_for(self):
         """The inventory itself, as a number.
 
-        Fifteen production storage flows, matching
+        Sixteen production storage flows, matching
         `usage-threshold-trigger-matrix.md` §Storage. If this count changes,
         the matrix needs a row added or removed — which is the point of
         asserting it.
@@ -176,6 +176,12 @@ class TestStorageTriggerCoverage:
         which rewrites the report JSON in place at sign-and-publish time
         (embedding the delivery date) — the same in-place-rewrite shape as
         the fourteenth, at the adjacent moment in the lifecycle.
+
+        Céluma 1.4 (#13) added the sixteenth:
+        `app/api/v1/reports.py::open_report_amendment`, which writes the new
+        JSON body of an amendment's first draft version — a NEW report JSON
+        object (full size), like `create_report_new_version`. The signed source
+        version's objects are never rewritten, so nothing is subtracted.
         """
         call_sites = []
         for relative, path in self._production_modules():
@@ -189,7 +195,7 @@ class TestStorageTriggerCoverage:
                     and node.func.id == "record_storage_delta_with_thresholds"
                 ):
                     call_sites.append(f"{relative}:{node.lineno}")
-        assert len(call_sites) == 15, sorted(call_sites)
+        assert len(call_sites) == 16, sorted(call_sites)
         assert {site.split(":")[0] for site in call_sites} == {
             "app/api/v1/laboratory.py",
             "app/api/v1/report_letterheads.py",

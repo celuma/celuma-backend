@@ -1,6 +1,8 @@
 from fastapi import FastAPI, Request, Response, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 import logging
 import os
@@ -140,6 +142,40 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Request-ID"],
 )
+
+# Céluma 1.4 (#13): FastAPI's default 422 handler echoes each offending
+# `input` back to the caller — including a credential sent with the wrong type
+# or shape (a password confirmation for signing/reopening, a profile password
+# change). Same response format as the default; only credential-named values
+# are replaced. Every other validation detail stays intact.
+_CREDENTIAL_FIELD_NAMES = frozenset({"password", "current_password", "new_password"})
+_REDACTED = "<redacted>"
+
+
+def _redact_credential_inputs(value):
+    if isinstance(value, dict):
+        return {
+            key: _REDACTED if str(key).lower() in _CREDENTIAL_FIELD_NAMES else _redact_credential_inputs(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_credential_inputs(item) for item in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def redacting_validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = []
+    for error in exc.errors():
+        error = dict(error)
+        if "input" in error:
+            names_credential = any(
+                str(part).lower() in _CREDENTIAL_FIELD_NAMES for part in error.get("loc", ())
+            )
+            error["input"] = _REDACTED if names_credential else _redact_credential_inputs(error["input"])
+        errors.append(error)
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
+
 
 # Global exception handler
 @app.exception_handler(Exception)

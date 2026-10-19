@@ -33,6 +33,7 @@ from app.models.report import Report, ReportVersion
 from app.models.report_review import ReportReview
 
 from .factories import (
+    TEST_USER_PASSWORD,
     auth_headers,
     create_branch,
     create_order,
@@ -361,7 +362,9 @@ class TestApprovalAndSigningRemainClosedInDraft:
         ).status_code == 200
 
         resp = client.post(
-            endpoint.format(lab["report"].id), json={}, headers=auth_headers(reviewer)
+            endpoint.format(lab["report"].id),
+            json={"password": TEST_USER_PASSWORD},
+            headers=auth_headers(reviewer),
         )
         assert resp.status_code == 400, resp.text
 

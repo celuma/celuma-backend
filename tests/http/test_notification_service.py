@@ -63,6 +63,11 @@ VALID_PARAMS = {
         "order_number": "ORD-2026-00152",
         "actor_name": "Dra. Martínez",
     },
+    # Céluma 1.4 (#13): the in-app republication notice of an amendment.
+    NotificationType.REPORT_REPUBLISHED: {
+        "order_number": "ORD-2026-00152",
+        "actor_name": "Dra. Martínez",
+    },
     NotificationType.ASSIGNMENT_ADDED: {
         "order_number": "ORD-2026-00152",
         "actor_name": "Dra. Martínez",

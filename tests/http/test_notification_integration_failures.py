@@ -38,6 +38,7 @@ from app.models.notification import Notification
 from app.models.report import Report
 from app.services.notification import NotificationService
 from tests.http.factories import (
+    TEST_USER_PASSWORD,
     add_order_reviewer,
     assign_to_order,
     auth_headers,
@@ -154,7 +155,7 @@ class TestReportPublishedSurvives:
 
         response = client.post(
             f"/api/v1/reports/{report.id}/sign",
-            json={"changelog": None},
+            json={"password": TEST_USER_PASSWORD, "changelog": None},
             headers=auth_headers(lab["signer"]),
         )
 
@@ -162,7 +163,9 @@ class TestReportPublishedSurvives:
         assert failing_notifications.calls == 1
         session.expire_all()
         assert session.get(Report, report.id).status == ReportStatus.PUBLISHED
-        assert _event_exists(session, order.id, EventType.REPORT_APPROVED)
+        # Céluma 1.4 (#13): publication is recorded as REPORT_PUBLISHED, no
+        # longer as a second REPORT_APPROVED.
+        assert _event_exists(session, order.id, EventType.REPORT_PUBLISHED)
         _assert_no_notification(session)
 
     def test_sign_and_publish_still_completes(
@@ -172,7 +175,7 @@ class TestReportPublishedSurvives:
 
         response = client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={"changelog": None},
+            json={"password": TEST_USER_PASSWORD, "changelog": None},
             headers=auth_headers(lab["signer"]),
         )
 

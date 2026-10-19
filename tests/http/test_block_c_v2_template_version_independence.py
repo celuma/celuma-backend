@@ -43,6 +43,7 @@ from app.services.report_template_hash import hash_clinical_template_block
 
 from .conftest import FakeS3Service
 from .factories import (
+    TEST_USER_PASSWORD,
     auth_headers,
     create_branch,
     create_letterhead,
@@ -661,7 +662,7 @@ class TestLifecycleShapesStillWork:
         )
 
         reopened = client.post(
-            f"/api/v1/reports/{report.id}/reopen", json={}, headers=auth_headers(admin)
+            f"/api/v1/reports/{report.id}/reopen", json={"password": TEST_USER_PASSWORD}, headers=auth_headers(admin)
         )
         assert reopened.status_code == 200, reopened.text
 

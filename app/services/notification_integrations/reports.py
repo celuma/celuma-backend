@@ -197,6 +197,46 @@ def notify_report_published(
     )
 
 
+def notify_report_republished(
+    session: Session,
+    *,
+    report: Report,
+    order: Optional[Order],
+    actor: Optional[AppUser],
+    occurrence_marker: str,
+) -> Optional[UUID]:
+    """Céluma 1.4 (#13, D4): an amendment was signed and republished.
+
+    Same recipients as a publication (the order's assignees plus the report
+    author, minus the signer), in-app only by policy. The marker is the
+    republication `OrderEvent`'s id, so each amendment is its own occurrence.
+    The reason and change note are free text and stay on the resource.
+    """
+    if order is None:
+        return None
+
+    recipients = resolve_report_published_recipients(
+        session, tenant_id=report.tenant_id, order_id=report.order_id, report=report
+    )
+    return NotificationService.notify(
+        session,
+        NotificationCommand(
+            tenant_id=report.tenant_id,
+            type=NotificationType.REPORT_REPUBLISHED,
+            resource_type=NotificationResourceType.REPORT,
+            resource_id=report.id,
+            occurrence_marker=occurrence_marker,
+            template_key=CURRENT_TEMPLATE_KEY[NotificationType.REPORT_REPUBLISHED],
+            template_params={
+                "order_number": order.order_code,
+                "actor_name": _actor_name(actor),
+            },
+            recipient_user_ids=recipients,
+            created_by=(actor.id if actor else None),
+        ),
+    )
+
+
 def notify_report_retracted(
     session: Session,
     *,

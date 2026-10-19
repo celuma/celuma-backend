@@ -55,8 +55,10 @@ from sqlmodel import Session, and_, or_, select
 from app.core.rbac import ROLE_REVIEWER, has_any_role, has_permission
 from app.models.enums import ReportStatus, ReviewStatus
 from app.models.report import Report, ReportVersion
+from app.models.report_amendment import ReportAmendment
 from app.models.report_review import ReportReview
 from app.models.user import AppUser
+from app.services import report_amendments
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +396,15 @@ def can_reopen_approved_report(
 REOPENABLE_REPORT_STATUSES = (ReportStatus.APPROVED,)
 
 
+def is_signed_version(version: ReportVersion) -> bool:
+    """Céluma 1.4 (#13): signature evidence on ONE version — the per-version
+    twin of `find_signature_evidence`. A signed version's JSON and PDF are
+    issued artifacts and are never rewritten, whatever the report's status:
+    report status alone stops protecting them once an amendment can return a
+    signed report to an editable status."""
+    return version.signed_at is not None or version.signed_by is not None
+
+
 def find_signature_evidence(
     session: Session, report: Report
 ) -> Optional[ReportVersion]:
@@ -453,15 +464,36 @@ def authorize_reopen(
             "Only an approved report that has not been signed can be reopened."
         )
 
+    # Céluma 1.4 (#13): inside an open amendment the earlier emissions are
+    # signed and published by definition; what must be unsigned is the
+    # amendment's own cycle. Outside one, the 1.3.1 rule is unchanged.
+    amendment = report_amendments.open_amendment(session, report)
+    if amendment is not None:
+        signed_in_cycle = session.exec(
+            select(ReportVersion).where(
+                and_(
+                    ReportVersion.report_id == report.id,
+                    ReportVersion.amendment_id == amendment.id,
+                    or_(
+                        ReportVersion.signed_at.is_not(None),
+                        ReportVersion.signed_by.is_not(None),
+                    ),
+                )
+            )
+        ).first()
+        if signed_in_cycle is not None:
+            raise ReportAlreadySignedError(
+                "This amendment has already been signed and cannot be reopened."
+            )
     # Checked even though APPROVED implies neither: `published_at` is the
     # report-level record of a publication, and a reopen must be refused on
     # any finalisation evidence, not only on the one the happy path writes.
-    if find_signature_evidence(session, report) is not None or (
+    elif find_signature_evidence(session, report) is not None or (
         report.published_at is not None
     ):
         raise ReportAlreadySignedError(
             "This report has already been signed and cannot be reopened. "
-            "Correcting a signed report is not supported in this version."
+            "Use «Enmendar reporte» to correct or supplement a signed report."
         )
 
     current_version = session.exec(
@@ -519,3 +551,67 @@ def is_content_editable(report: Report) -> bool:
     this, and neither is replaced by it.
     """
     return report.status in CONTENT_EDITABLE_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# Céluma 1.4 (#13) — amendments of signed reports
+# ---------------------------------------------------------------------------
+
+class AmendmentLegacyOriginalError(ReportAuthorizationError):
+    """The delivered emission is not V2 (owner decision D5): legacy originals
+    are not amendable. Routes map this to 409."""
+
+
+#: The only state an amendment may start from: a published report, whose
+#: delivered emission is its latest signed version. RETRACTED is final.
+AMENDABLE_REPORT_STATUSES = (ReportStatus.PUBLISHED,)
+
+#: The states an open amendment travels through until it republishes.
+AMENDMENT_OPEN_STATUSES = (ReportStatus.DRAFT, ReportStatus.IN_REVIEW, ReportStatus.APPROVED)
+
+
+def authorize_amendment_opening(
+    session: Session, report: Report, user: AppUser
+) -> ReportVersion:
+    """The guard for PUBLISHED -> DRAFT with a new amendment ("reopening after
+    signature"). Same actors as the unsigned reopen — the assigned reviewer
+    through the clinical contract, admin/superuser through
+    `reports:manage_templates` — and, like it, it grants nothing else.
+
+    Authorization first, lifecycle second (no state oracle). Returns the
+    delivered emission the amendment will amend.
+    """
+    if not can_reopen_approved_report(session, report, user):
+        raise NotAReviewerError(
+            "Only the assigned reviewer or an administrator can amend this report"
+        )
+    if report.status not in AMENDABLE_REPORT_STATUSES:
+        raise ReportStateError(
+            f"Cannot amend a report in {report.status} status. "
+            "Only a published report can be amended."
+        )
+    if report_amendments.open_amendment(session, report) is not None:
+        raise ReportStateError("This report already has an amendment in progress.")
+    source = report_amendments.delivered_emission(session, report)
+    if source is None:
+        raise ReportStateError("This report has no signed emission to amend.")
+    if source.schema_version != 2:
+        raise AmendmentLegacyOriginalError(
+            "Este reporte se emitió con el formato anterior y no admite enmiendas."
+        )
+    return source
+
+
+def authorize_amendment_cancellation(
+    session: Session, report: Report, user: AppUser
+) -> ReportAmendment:
+    """The guard for cancelling an open amendment: the same reopening actors,
+    an amendment that is still open, and a report in its amendment cycle."""
+    if not can_reopen_approved_report(session, report, user):
+        raise NotAReviewerError(
+            "Only the assigned reviewer or an administrator can cancel this amendment"
+        )
+    amendment = report_amendments.open_amendment(session, report)
+    if amendment is None or report.status not in AMENDMENT_OPEN_STATUSES:
+        raise ReportStateError("This report has no amendment in progress.")
+    return amendment

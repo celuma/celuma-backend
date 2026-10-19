@@ -22,6 +22,7 @@ from app.models.notification import (
     NotificationType,
 )
 from tests.http.factories import (
+    TEST_USER_PASSWORD,
     add_order_reviewer,
     assign_to_order,
     auth_headers,
@@ -347,7 +348,7 @@ class TestReportPublishedAndRetracted:
 
         response = client.post(
             f"/api/v1/reports/{report.id}/sign",
-            json={"changelog": COMMENT_SECRET_SENTINEL},
+            json={"password": TEST_USER_PASSWORD, "changelog": COMMENT_SECRET_SENTINEL},
             headers=auth_headers(lab["reviewer_signer"]),
         )
         assert response.status_code == 200
@@ -370,7 +371,7 @@ class TestReportPublishedAndRetracted:
         order, report, version = self._approved_report(session, lab, order_code="ORD-RET-1")
         client.post(
             f"/api/v1/reports/{report.id}/sign",
-            json={"changelog": None},
+            json={"password": TEST_USER_PASSWORD, "changelog": None},
             headers=auth_headers(lab["reviewer_signer"]),
         )
 
@@ -410,7 +411,7 @@ class TestReportPublishedAndRetracted:
         order, report, version = self._approved_report(session, lab, order_code="ORD-RET-2")
         client.post(
             f"/api/v1/reports/{report.id}/sign",
-            json={"changelog": None},
+            json={"password": TEST_USER_PASSWORD, "changelog": None},
             headers=auth_headers(lab["reviewer_signer"]),
         )
         client.post(
@@ -496,7 +497,7 @@ class TestReportPdfReady:
 
         response = client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={"changelog": None},
+            json={"password": TEST_USER_PASSWORD, "changelog": None},
             headers=auth_headers(lab["reviewer_signer"]),
         )
         assert response.status_code == 200

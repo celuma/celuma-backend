@@ -21,6 +21,7 @@ from app.core.security import create_render_token
 from app.models.enums import ReportStatus
 from app.models.report import Report, ReportVersion
 from app.models.storage import StorageObject
+from app.services.report_authorization import is_signed_version
 from app.services.s3 import S3Service
 from app.services.usage import UsageService
 from app.services.usage_thresholds import record_storage_delta_with_thresholds
@@ -92,6 +93,13 @@ class ReportPdfGenerationService:
             # while still APPROVED).
             raise ReportPdfImmutableError(
                 "REPORT_IMMUTABLE", "Cannot generate a PDF for a published or retracted report"
+            )
+        if is_signed_version(version):
+            # Céluma 1.4 (#13): a signed version is an issued artifact by
+            # itself, whatever the report's status — an amended report returns
+            # to an editable status while its signed versions must stay intact.
+            raise ReportPdfImmutableError(
+                "VERSION_SIGNED", "Cannot generate a PDF for a signed report version"
             )
 
         if version.pdf_generation_status == _READY and not force:
@@ -388,7 +396,12 @@ def load_locked_version(
 ) -> tuple[Report, ReportVersion] | tuple[None, None]:
     """Load (report, version) for update, row-locking the version so two
     concurrent generation requests for the same version serialize instead of
-    racing. Returns (None, None) if either doesn't exist."""
+    racing. Returns (None, None) if either doesn't exist.
+
+    Céluma 1.4 (#13): `populate_existing` — a caller that already loaded the
+    version earlier in the transaction would otherwise get that identity-map
+    copy back, and the claim/finalize checks would read a state older than
+    the row they just locked."""
     report = session.get(Report, report_id)
     if not report:
         return None, None
@@ -396,6 +409,7 @@ def load_locked_version(
         select(ReportVersion)
         .where(ReportVersion.report_id == report.id, ReportVersion.version_no == version_no)
         .with_for_update()
+        .execution_options(populate_existing=True)
     ).first()
     if not version:
         return None, None

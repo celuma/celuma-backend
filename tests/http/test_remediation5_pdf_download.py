@@ -40,6 +40,7 @@ from app.models.report import Report, ReportVersion
 
 from .conftest import FakeS3Service, make_pdf_bytes
 from .factories import (
+    TEST_USER_PASSWORD,
     assign_reviewer,
     auth_headers,
     create_branch,
@@ -312,7 +313,7 @@ class TestSignAndPublishResponseContract:
         stub_pdf_render.succeed(make_pdf_bytes(2))
         resp = client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer),
         )
         assert resp.status_code == 200, resp.text
@@ -363,7 +364,7 @@ class TestSignAndPublishResponseContract:
         stub_pdf_render.succeed(make_pdf_bytes(1))
         resp = client.post(
             f"/api/v1/reports/{report.id}/sign-and-publish",
-            json={},
+            json={"password": TEST_USER_PASSWORD},
             headers=auth_headers(signer),
         )
         assert resp.status_code == 200, resp.text

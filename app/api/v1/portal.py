@@ -11,6 +11,7 @@ from app.models.user import AppUser
 from app.models.enums import ReportStatus
 from app.services.s3 import S3Service
 from app.api.v1.reports import official_pdf_presigned_url, _order_study_type_name
+from app.services import report_amendments
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -70,7 +71,13 @@ def list_physician_orders(
                 patient_code=patient_code,
                 status=order.status,
                 has_report=bool(report),
-                report_status=report.status if report else None,
+                # Céluma 1.4 (#13): the physician sees the delivered state,
+                # never an internal amendment in progress (D3).
+                report_status=(
+                    ReportStatus.PUBLISHED
+                    if report and report_amendments.externally_delivered_emission(session, report)
+                    else (report.status if report else None)
+                ),
                 requested_by=order.requested_by,
             )
         )
@@ -120,16 +127,11 @@ def get_physician_report(
     if not report:
         raise HTTPException(404, "Report not found for this order")
     
-    # Only show published reports
-    if report.status != ReportStatus.PUBLISHED:
+    # Céluma 1.4 (#13): deliver the latest SIGNED emission (never an unsigned
+    # amendment draft), whatever the report's working status (D3/D6).
+    latest_version = report_amendments.externally_delivered_emission(session, report)
+    if latest_version is None:
         raise HTTPException(403, "Report is not yet available")
-    
-    # Get latest version with PDF
-    latest_version = session.exec(
-        select(ReportVersion)
-        .where(ReportVersion.report_id == report.id)
-        .order_by(ReportVersion.version_no.desc())
-    ).first()
     
     if not latest_version or not latest_version.pdf_storage_id:
         raise HTTPException(404, "PDF not available for this report")
@@ -152,9 +154,12 @@ def get_physician_report(
     return {
         "report_id": str(report.id),
         "order_code": order.order_code,
-        "status": report.status,
+        # The delivered document is always a published emission; an amendment
+        # in progress is internal and never shown here (D3).
+        "status": ReportStatus.PUBLISHED,
         "title": report.title,
         "published_at": report.published_at,
+        "supersedes": report_amendments.supersession_reference(session, latest_version),
         "pdf_url": url,
     }
 
@@ -200,16 +205,11 @@ def get_patient_report(
     if not report:
         raise HTTPException(404, "Report not available for this case")
     
-    # Only show published reports
-    if report.status != ReportStatus.PUBLISHED:
+    # Céluma 1.4 (#13): deliver the latest SIGNED emission (never an unsigned
+    # amendment draft), whatever the report's working status (D3/D6).
+    latest_version = report_amendments.externally_delivered_emission(session, report)
+    if latest_version is None:
         raise HTTPException(403, "Report is not yet available")
-    
-    # Get latest version with PDF
-    latest_version = session.exec(
-        select(ReportVersion)
-        .where(ReportVersion.report_id == report.id)
-        .order_by(ReportVersion.version_no.desc())
-    ).first()
     
     if not latest_version or not latest_version.pdf_storage_id:
         raise HTTPException(404, "PDF not available for this report")
@@ -233,9 +233,10 @@ def get_patient_report(
         "report_id": str(report.id),
         "order_code": matched_order.order_code,
         "patient_name": patient_name,
-        "status": report.status,
+        "status": ReportStatus.PUBLISHED,
         "title": report.title,
         "published_at": report.published_at,
+        "supersedes": report_amendments.supersession_reference(session, latest_version),
         "pdf_url": url,
     }
 

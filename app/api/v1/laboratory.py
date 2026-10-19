@@ -46,7 +46,7 @@ from app.services.list_pagination import (
     sort_field,
     uuid_filter,
 )
-from app.services import idempotency, numbering, order_lifecycle, order_management
+from app.services import idempotency, numbering, order_lifecycle, order_management, report_amendments
 from app.services.usage import UsageService
 from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from datetime import datetime
@@ -2151,6 +2151,11 @@ def build_order_full_detail(
             published_at=report.published_at,
             version_no=current_version.version_no if current_version else None,
             has_pdf=has_pdf,
+            open_amendment_no=(
+                amendment.amendment_no
+                if (amendment := report_amendments.open_amendment(session, report)) is not None
+                else None
+            ),
         )
 
     return OrderFullDetailResponse(order=order_resp, patient=patient_resp, samples=sample_resps, report=report_meta)
