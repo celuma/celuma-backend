@@ -46,7 +46,7 @@ from app.services.list_pagination import (
     sort_field,
     uuid_filter,
 )
-from app.services import idempotency, numbering, order_lifecycle, order_management, report_amendments
+from app.services import idempotency, numbering, order_lifecycle, order_management, report_amendments, report_reviewers
 from app.services.usage import UsageService
 from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from datetime import datetime
@@ -2530,6 +2530,7 @@ def _get_order_reviewers_with_status(session: Session, order_id: UUID, tenant_id
     user_ids = [r.reviewer_user_id for r in reviews]
     users_dict = {u.id: u for u in session.exec(select(AppUser).where(AppUser.id.in_(user_ids))).all()}
     
+    eligible_ids = report_reviewers.eligible_reviewer_ids(session, user_ids, tenant_id)
     reviewers_with_status = []
     for review in reviews:
         user = users_dict.get(review.reviewer_user_id)
@@ -2544,6 +2545,7 @@ def _get_order_reviewers_with_status(session: Session, order_id: UUID, tenant_id
                 avatar_url=user.avatar_url,
                 status=(review.status.value if hasattr(review.status, 'value') else str(review.status)).lower(),
                 review_id=str(review.id),
+                eligible=review.reviewer_user_id in eligible_ids,
             )
         )
     
@@ -2862,18 +2864,37 @@ def update_order_reviewers(
     if str(order.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Order does not belong to your tenant")
     
-    # Validate all reviewer IDs belong to tenant and have the 'reviewer' role
+    # Céluma 1.4: assignment changes use the same order lifecycle lock as submit / approve /
+    # reopen / cancel / sign, then re-read the report, so a change either completes before a
+    # transition (which then sees it) or waits for it (and then sees the new state).
+    order_lifecycle.lock_order(session, order.id)
+    session.refresh(order)
+    report = session.exec(
+        select(Report).where(Report.order_id == order.id).execution_options(populate_existing=True)
+    ).first()
+
+    # The order lock does not span a signature's rendering phase; its fresh publish claim does.
+    report_reviewers.refuse_while_signing(session, report)
+
+    # Validate all reviewer IDs belong to tenant and can actually review (active, 'reviewer'
+    # role and the approval capability). Foreign / unknown users keep the historical 400.
     new_reviewers = set()
     for rid in data.reviewer_ids:
         reviewer_user = session.get(AppUser, UUID(rid))
         if not reviewer_user or str(reviewer_user.tenant_id) != ctx.tenant_id:
             raise HTTPException(400, f"User {rid} not found or not in tenant")
-        if ROLE_REVIEWER not in get_user_roles(reviewer_user.id, session):
+        reason = report_reviewers.reviewer_ineligibility_reason(session, reviewer_user, ctx.tenant_id)
+        if reason is not None:
             raise HTTPException(
                 422,
-                f"User {rid} does not have the '{ROLE_REVIEWER}' role and cannot be assigned as reviewer",
+                f"{reviewer_user.full_name or reviewer_user.username} {reason} y no puede asignarse "
+                f"como revisor (user {rid} does not have the '{ROLE_REVIEWER}' role or is not eligible)",
             )
         new_reviewers.add(UUID(rid))
+
+    # A report that is already in review (or approved, waiting for the signature) may have its
+    # reviewers repaired or replaced, never emptied of eligible reviewers.
+    report_reviewers.require_review_continuity(session, report, ctx.tenant_id, new_reviewers)
 
     # Sync reviewers directly in report_review table
     added, removed = _sync_report_reviewers(

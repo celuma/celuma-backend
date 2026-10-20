@@ -20,7 +20,7 @@ from app.services.report_lifecycle_events import (
     build_publication_event,
     publication_correlation,
 )
-from app.services import report_amendments
+from app.services import report_amendments, report_reviewers
 from app.models.report_amendment import (
     AMENDMENT_STATE_CANCELLED,
     AMENDMENT_STATE_PUBLISHED,
@@ -181,6 +181,7 @@ import copy
 import json
 import re
 from datetime import datetime
+from uuid import UUID
 import logging
 
 logger = logging.getLogger(__name__)
@@ -3070,6 +3071,10 @@ def submit_report(
 
     if not reviewers or len(reviewers) == 0:
         raise HTTPException(400, "Cannot submit report for review without reviewers assigned")
+
+    # Céluma 1.4: an assignment row is not availability. An explicit assignment wins
+    # (never replaced by the default), but at least one assignee must be able to act.
+    report_reviewers.require_eligible_reviewer(session, reviewers, report.tenant_id)
     
     # Reset all reviews to PENDING when re-submitting (allows re-review after
     # changes). Deliberately NOT `_reset_order_reviews_to_pending`: that helper
@@ -3743,6 +3748,12 @@ def open_report_amendment(
                 "review_id": str(r.id),
                 "status": getattr(r.status, "value", r.status),
                 "decision_at": r.decision_at.isoformat() if r.decision_at else None,
+                # Enough to re-create the row if the assignment is replaced during
+                # the amendment (additive JSON keys; older snapshots lack them).
+                "reviewer_user_id": str(r.reviewer_user_id),
+                "assigned_by_user_id": str(r.assigned_by_user_id) if r.assigned_by_user_id else None,
+                "assigned_at": r.assigned_at.isoformat() if r.assigned_at else None,
+                "report_id": str(r.report_id) if r.report_id else None,
             }
             for r in reviews
         ],
@@ -3962,8 +3973,37 @@ def cancel_report_amendment(
     session.add(source)
 
     restored = 0
+    recreated = 0
+    reconciled = 0
     for entry in amendment.reviews_at_opening or []:
         review = session.get(ReportReview, entry.get("review_id"))
+        if review is None and entry.get("reviewer_user_id"):
+            # The assignment was replaced while the amendment was open and its row deleted:
+            # re-create the delivered emission's decision rather than lose the only copy.
+            reviewer = session.get(AppUser, UUID(entry["reviewer_user_id"]))
+            if reviewer is not None and str(reviewer.tenant_id) == str(report.tenant_id):
+                # The same person may have been re-assigned meanwhile (removed, then added back
+                # as a NEW row): reconcile so the order keeps ONE row per reviewer — the
+                # historical row, with its id and decision, replaces that replacement.
+                for replacement_row in session.exec(
+                    select(ReportReview).where(
+                        ReportReview.order_id == report.order_id,
+                        ReportReview.reviewer_user_id == reviewer.id,
+                    )
+                ).all():
+                    session.delete(replacement_row)
+                    reconciled += 1
+                session.flush()
+                review = ReportReview(
+                    id=UUID(entry["review_id"]),
+                    tenant_id=report.tenant_id,
+                    order_id=report.order_id,
+                    report_id=report.id,
+                    reviewer_user_id=reviewer.id,
+                    assigned_by_user_id=UUID(entry["assigned_by_user_id"]) if entry.get("assigned_by_user_id") else None,
+                    assigned_at=datetime.fromisoformat(entry["assigned_at"]) if entry.get("assigned_at") else datetime.utcnow(),
+                )
+                recreated += 1
         if review is None or review.order_id != report.order_id:
             continue
         review.status = ReviewStatus(entry["status"])
@@ -3995,6 +4035,8 @@ def cancel_report_amendment(
             "version_no": source.version_no,
             "reason": amendment.cancel_reason,
             "reviews_restored": restored,
+            "reviews_recreated": recreated,
+            "reviews_reconciled": reconciled,
             "password_confirmed": True,
         },
     )

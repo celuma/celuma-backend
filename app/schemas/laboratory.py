@@ -67,6 +67,8 @@ class ReviewerWithStatus(UserRef):
     """User reference with review status for reviewers"""
     status: str  # "pending", "approved", "rejected"
     review_id: Optional[str] = None
+    #: False when this assignee can no longer act as reviewer (role revoked, inactive…).
+    eligible: Optional[bool] = None
 
 
 class RequestingPhysicianRef(BaseModel):
