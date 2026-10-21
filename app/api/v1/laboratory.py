@@ -100,7 +100,7 @@ from app.schemas.report import ReportMetaResponse
 from app.schemas.patient import PatientFullResponse
 from app.schemas.events import EventCreate, EventResponse, EventsListResponse
 from app.services.s3 import S3Service
-from app.services.image_processing import process_image_bytes
+from app.services.image_processing import ImageProcessingError, process_image_bytes
 # Céluma 1.3 Phase 3, Block F: the domain -> notification integration layer.
 # The only notification symbols this module imports.
 from app.services.notification_integrations import (
@@ -1663,200 +1663,220 @@ def upload_sample_image(
         chunks.append(chunk)
     data = b"".join(chunks)
 
-    processed = process_image_bytes(filename, data)
+    try:
+        processed = process_image_bytes(filename, data)
+    except ImageProcessingError as exc:
+        raise HTTPException(exc.status_code, exc.message)
     is_raw = processed.original_bytes is not None
 
     s3 = S3Service()
-    unique_id = uuid4().hex[:8]
-    base_name, ext = os.path.splitext(filename)
+    # Keys written to storage by THIS request. Storage is written before the
+    # database, so any failure from here to the commit must delete them again:
+    # the rows and the usage delta roll back together, and nothing may be left
+    # in the bucket that no `StorageObject` accounts for.
+    uploaded_keys: list[str] = []
+    try:
+        unique_id = uuid4().hex[:8]
+        base_name, ext = os.path.splitext(filename)
 
-    # Build S3 keys (tenant/branch/sample grouping)
-    base_prefix = f"samples/{sample.tenant_id}/{sample.branch_id}/{sample.id}"
+        # Build S3 keys (tenant/branch/sample grouping)
+        base_prefix = f"samples/{sample.tenant_id}/{sample.branch_id}/{sample.id}"
 
-    # Upload processed and thumbnail
-    processed_key = f"{base_prefix}/processed/{base_name}_{unique_id}.jpg"
-    processed_info = s3.upload_bytes(
-        processed.processed_jpeg_bytes,
-        key=processed_key,
-        content_type="image/jpeg",
-        acl=None,
-    )
-
-    thumb_key = f"{base_prefix}/thumbnails/{base_name}_{unique_id}.jpg"
-    thumb_info = s3.upload_bytes(
-        processed.thumbnail_jpeg_bytes,
-        key=thumb_key,
-        content_type="image/jpeg",
-        acl=None,
-    )
-
-    # Create StorageObject rows
-    processed_storage = StorageObject(
-        provider="aws",
-        region=s3.region,
-        bucket=processed_info.bucket,
-        object_key=processed_info.key,
-        version_id=processed_info.version_id,
-        etag=processed_info.etag,
-        content_type="image/jpeg",
-        size_bytes=processed_info.size_bytes,
-        tenant_id=sample.tenant_id,
-    )
-    session.add(processed_storage)
-    session.flush()
-
-    thumb_storage = StorageObject(
-        provider="aws",
-        region=s3.region,
-        bucket=thumb_info.bucket,
-        object_key=thumb_info.key,
-        version_id=thumb_info.version_id,
-        etag=thumb_info.etag,
-        content_type="image/jpeg",
-        size_bytes=thumb_info.size_bytes,
-        tenant_id=sample.tenant_id,
-    )
-    session.add(thumb_storage)
-    session.flush()
-
-    # Link as SampleImage and renditions
-    sample_image = SampleImage(
-        tenant_id=sample.tenant_id,
-        branch_id=sample.branch_id,
-        sample_id=sample.id,
-        storage_id=processed_storage.id,
-        label=None,
-        is_primary=False,
-    )
-    session.add(sample_image)
-    session.flush()
-
-    rendition_thumb = SampleImageRendition(
-        sample_image_id=sample_image.id,
-        kind="thumbnail",
-        storage_id=thumb_storage.id,
-    )
-    session.add(rendition_thumb)
-
-    original_storage = None
-    if is_raw and processed.original_bytes:
-        raw_key = f"{base_prefix}/raw/{base_name}_{unique_id}{ext.lower()}"
-        raw_info = s3.upload_bytes(
-            processed.original_bytes,
-            key=raw_key,
-            content_type=file.content_type or "application/octet-stream",
+        # Upload processed and thumbnail
+        processed_key = f"{base_prefix}/processed/{base_name}_{unique_id}.jpg"
+        processed_info = s3.upload_bytes(
+            processed.processed_jpeg_bytes,
+            key=processed_key,
+            content_type="image/jpeg",
             acl=None,
         )
-        original_storage = StorageObject(
+        uploaded_keys.append(processed_key)
+
+        thumb_key = f"{base_prefix}/thumbnails/{base_name}_{unique_id}.jpg"
+        thumb_info = s3.upload_bytes(
+            processed.thumbnail_jpeg_bytes,
+            key=thumb_key,
+            content_type="image/jpeg",
+            acl=None,
+        )
+        uploaded_keys.append(thumb_key)
+
+        # Create StorageObject rows
+        processed_storage = StorageObject(
             provider="aws",
             region=s3.region,
-            bucket=raw_info.bucket,
-            object_key=raw_info.key,
-            version_id=raw_info.version_id,
-            etag=raw_info.etag,
-            content_type=file.content_type,
-            size_bytes=raw_info.size_bytes,
+            bucket=processed_info.bucket,
+            object_key=processed_info.key,
+            version_id=processed_info.version_id,
+            etag=processed_info.etag,
+            content_type="image/jpeg",
+            size_bytes=processed_info.size_bytes,
             tenant_id=sample.tenant_id,
         )
-        session.add(original_storage)
+        session.add(processed_storage)
         session.flush()
-        rendition_original = SampleImageRendition(
-            sample_image_id=sample_image.id,
-            kind="original_raw",
-            storage_id=original_storage.id,
-        )
-        session.add(rendition_original)
 
-    # Auto-update sample state to PROCESSING only on first image upload
-    # Check if this is the first image (only the one we just added)
-    existing_images_count = session.exec(
-        select(SampleImage).where(SampleImage.sample_id == sample.id)
-    ).all()
-    is_first_image = len(existing_images_count) == 1
-    if is_first_image and sample.state == SampleState.RECEIVED:
-        sample.state = SampleState.PROCESSING
-        session.add(sample)
+        thumb_storage = StorageObject(
+            provider="aws",
+            region=s3.region,
+            bucket=thumb_info.bucket,
+            object_key=thumb_info.key,
+            version_id=thumb_info.version_id,
+            etag=thumb_info.etag,
+            content_type="image/jpeg",
+            size_bytes=thumb_info.size_bytes,
+            tenant_id=sample.tenant_id,
+        )
+        session.add(thumb_storage)
+        session.flush()
+
+        # Link as SampleImage and renditions
+        sample_image = SampleImage(
+            tenant_id=sample.tenant_id,
+            branch_id=sample.branch_id,
+            sample_id=sample.id,
+            storage_id=processed_storage.id,
+            label=None,
+            is_primary=False,
+        )
+        session.add(sample_image)
+        session.flush()
+
+        rendition_thumb = SampleImageRendition(
+            sample_image_id=sample_image.id,
+            kind="thumbnail",
+            storage_id=thumb_storage.id,
+        )
+        session.add(rendition_thumb)
+
+        original_storage = None
+        if is_raw and processed.original_bytes:
+            raw_key = f"{base_prefix}/raw/{base_name}_{unique_id}{ext.lower()}"
+            raw_info = s3.upload_bytes(
+                processed.original_bytes,
+                key=raw_key,
+                content_type=file.content_type or "application/octet-stream",
+                acl=None,
+            )
+            uploaded_keys.append(raw_key)
+            original_storage = StorageObject(
+                provider="aws",
+                region=s3.region,
+                bucket=raw_info.bucket,
+                object_key=raw_info.key,
+                version_id=raw_info.version_id,
+                etag=raw_info.etag,
+                content_type=file.content_type,
+                size_bytes=raw_info.size_bytes,
+                tenant_id=sample.tenant_id,
+            )
+            session.add(original_storage)
+            session.flush()
+            rendition_original = SampleImageRendition(
+                sample_image_id=sample_image.id,
+                kind="original_raw",
+                storage_id=original_storage.id,
+            )
+            session.add(rendition_original)
+
+        # Auto-update sample state to PROCESSING only on first image upload
+        # Check if this is the first image (only the one we just added)
+        existing_images_count = session.exec(
+            select(SampleImage).where(SampleImage.sample_id == sample.id)
+        ).all()
+        is_first_image = len(existing_images_count) == 1
+        if is_first_image and sample.state == SampleState.RECEIVED:
+            sample.state = SampleState.PROCESSING
+            session.add(sample)
     
-    # Create timeline event for image upload with structured metadata
-    event = OrderEvent(
-        tenant_id=sample.tenant_id,
-        branch_id=sample.branch_id,
-        order_id=sample.order_id,
-        sample_id=sample.id,
-        event_type=EventType.IMAGE_UPLOADED,
-        description="",  # Not used - message built in UI from metadata
-        event_metadata={
-            "filename": filename,
-            "is_raw": is_raw,
-            "file_size": len(data),
-            "sample_id": str(sample.id),
-            "sample_code": sample.sample_code,
-            **_sample_type_event_meta(session, sample),
-            "image_id": str(sample_image.id),
-        },
-        created_by=user.id,
-    )
-    session.add(event)
-    
-    # If state changed, also add state change event
-    if is_first_image and sample.state == SampleState.PROCESSING:
-        state_event = OrderEvent(
+        # Create timeline event for image upload with structured metadata
+        event = OrderEvent(
             tenant_id=sample.tenant_id,
             branch_id=sample.branch_id,
             order_id=sample.order_id,
             sample_id=sample.id,
-            event_type=EventType.SAMPLE_STATE_CHANGED,
+            event_type=EventType.IMAGE_UPLOADED,
             description="",  # Not used - message built in UI from metadata
             event_metadata={
-                "old_state": "RECEIVED",
-                "new_state": "PROCESSING",
+                "filename": filename,
+                "is_raw": is_raw,
+                **({"converted_from": processed.source_format} if processed.source_format else {}),
+                "file_size": len(data),
                 "sample_id": str(sample.id),
                 "sample_code": sample.sample_code,
                 **_sample_type_event_meta(session, sample),
-                "trigger": "first_image_upload",
+                "image_id": str(sample_image.id),
             },
             created_by=user.id,
         )
-        session.add(state_event)
-        # Céluma 1.3 Phase 3, Block F: the automatic RECEIVED -> PROCESSING
-        # transition is a real state change with its own persisted
-        # SAMPLE_STATE_CHANGED event, so it notifies like any other. Notifying
-        # only the explicit PATCH would mean the same visible transition
-        # sometimes reaches assignees and sometimes does not, depending on how
-        # it was triggered. Volume is bounded: this fires once per sample, on
-        # the first image, and only from RECEIVED.
-        notify_sample_status_changed(
+        session.add(event)
+    
+        # If state changed, also add state change event
+        if is_first_image and sample.state == SampleState.PROCESSING:
+            state_event = OrderEvent(
+                tenant_id=sample.tenant_id,
+                branch_id=sample.branch_id,
+                order_id=sample.order_id,
+                sample_id=sample.id,
+                event_type=EventType.SAMPLE_STATE_CHANGED,
+                description="",  # Not used - message built in UI from metadata
+                event_metadata={
+                    "old_state": "RECEIVED",
+                    "new_state": "PROCESSING",
+                    "sample_id": str(sample.id),
+                    "sample_code": sample.sample_code,
+                    **_sample_type_event_meta(session, sample),
+                    "trigger": "first_image_upload",
+                },
+                created_by=user.id,
+            )
+            session.add(state_event)
+            # Céluma 1.3 Phase 3, Block F: the automatic RECEIVED -> PROCESSING
+            # transition is a real state change with its own persisted
+            # SAMPLE_STATE_CHANGED event, so it notifies like any other. Notifying
+            # only the explicit PATCH would mean the same visible transition
+            # sometimes reaches assignees and sometimes does not, depending on how
+            # it was triggered. Volume is bounded: this fires once per sample, on
+            # the first image, and only from RECEIVED.
+            notify_sample_status_changed(
+                session,
+                sample=sample,
+                order=session.get(Order, sample.order_id) if sample.order_id else None,
+                old_state=SampleState.RECEIVED.value,
+                new_state=SampleState.PROCESSING.value,
+                actor=user,
+                occurrence_marker=str(state_event.id),
+            )
+
+        # Update order status based on sample state change (if it changed)
+        if is_first_image and sample.state == SampleState.PROCESSING:
+            update_order_status(str(sample.order_id), session)
+
+        # Céluma 1.3 Phase 4, Block C: one aggregated delta for the whole
+        # upload (processed + thumbnail + optional RAW) rather than one
+        # adjustment per StorageObject, in the same transaction as the inserts
+        # above — see storage-flow-accounting-matrix.md "sample image upload".
+        upload_total_bytes = (processed_info.size_bytes or 0) + (thumb_info.size_bytes or 0)
+        if original_storage is not None:
+            upload_total_bytes += original_storage.size_bytes or 0
+        record_storage_delta_with_thresholds(
             session,
-            sample=sample,
-            order=session.get(Order, sample.order_id) if sample.order_id else None,
-            old_state=SampleState.RECEIVED.value,
-            new_state=SampleState.PROCESSING.value,
-            actor=user,
-            occurrence_marker=str(state_event.id),
+            sample.tenant_id,
+            upload_total_bytes,
+            source="sample_image_upload",
+            resource_type="sample_image",
+            actor_id=user.id,
         )
 
-    # Update order status based on sample state change (if it changed)
-    if is_first_image and sample.state == SampleState.PROCESSING:
-        update_order_status(str(sample.order_id), session)
-
-    # Céluma 1.3 Phase 4, Block C: one aggregated delta for the whole
-    # upload (processed + thumbnail + optional RAW) rather than one
-    # adjustment per StorageObject, in the same transaction as the inserts
-    # above — see storage-flow-accounting-matrix.md "sample image upload".
-    upload_total_bytes = (processed_info.size_bytes or 0) + (thumb_info.size_bytes or 0)
-    if original_storage is not None:
-        upload_total_bytes += original_storage.size_bytes or 0
-    record_storage_delta_with_thresholds(
-        session,
-        sample.tenant_id,
-        upload_total_bytes,
-        source="sample_image_upload",
-        resource_type="sample_image",
-        actor_id=user.id,
-    )
-
-    session.commit()
-
+        session.commit()
+    except Exception:
+        session.rollback()
+        for key in uploaded_keys:
+            try:
+                s3.delete_object(key)
+            except Exception:  # best effort; never mask the original failure
+                logger.warning("Could not remove orphaned sample image object %s", key)
+        raise
     urls: Dict[str, str] = {
         "processed": s3.object_public_url(processed_key),
         "thumbnail": s3.object_public_url(thumb_key),

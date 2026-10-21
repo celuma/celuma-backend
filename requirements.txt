@@ -31,6 +31,12 @@ email-validator==2.2.0
 # them. See docs/celuma-1.3/phase-5-block-g/block-g-dependency-disposition.md.
 boto3==1.34.162
 Pillow==12.3.0
+# Céluma 1.4 (#21): HEIC decoding. Pillow has no HEIF support of its own;
+# pillow-heif ships manylinux wheels (x86_64/aarch64, cp312) that bundle
+# libheif, so the slim Debian image needs no extra apt packages. It parses
+# ATTACKER-SUPPLIED containers: it is only invoked after the ISO-BMFF brand
+# sniff and the header-level size checks in app/services/image_processing.py.
+pillow-heif==1.8.1
 rawpy==0.25.1
 imageio==2.34.2
 
