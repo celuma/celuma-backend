@@ -165,6 +165,31 @@ def resolve_sample_codes(session: Session, order: Order) -> str:
     return SAMPLE_CODES_SEPARATOR.join(code for code, _ in ordered)
 
 
+SAMPLE_CODES_STALE_CODE = "report_sample_codes_stale"
+
+
+def stale_sample_codes(session: Session, order: Optional[Order], body: Optional[dict]) -> Optional[tuple[str, str]]:
+    """`(stored, current)` when the report's frozen template declares `sample_codes` and the stored value
+    no longer equals the order's current codes; `None` when the field is not declared or is up to date.
+
+    Used at the one boundary that matters, submission for review (under the order lock): a code can only
+    be corrected while no review/approval/signing evidence exists, so a value that is current at submission
+    stays current for the whole review and signing. A stale one is refused rather than silently rewritten,
+    because the author must see (and save) exactly the content that goes to review."""
+    if order is None or not isinstance(body, dict):
+        return None
+    snapshot = body.get("rendering_snapshot")
+    template = snapshot.get("template") if isinstance(snapshot, dict) else None
+    if SAMPLE_CODES_BASE_KEY not in declared_base_fields(template):
+        return None
+    base = body.get("base")
+    entry = base.get(SAMPLE_CODES_BASE_KEY) if isinstance(base, dict) else None
+    stored = entry.get("value") if isinstance(entry, dict) else ""
+    stored = stored if isinstance(stored, str) else ""
+    current = resolve_sample_codes(session, order)
+    return None if stored == current else (stored, current)
+
+
 def declared_base_fields(template: Optional[dict]) -> dict:
     """The `base` block of an effective template, or `{}` when the template is
     absent or not shaped like one.

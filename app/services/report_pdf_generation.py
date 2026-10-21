@@ -242,6 +242,15 @@ class ReportPdfGenerationService:
                         state="attached",
                     )
                     render_error = page.get_attribute("html", "data-report-render-error")
+                    if render_error and render_error.startswith("LAYOUT_"):
+                        # Independent review R1/R2: the report could not be laid out on real pages (no
+                        # usable body, nothing rendered, or an indivisible unit that would be clipped).
+                        # Never store a warning-only, blank or truncated artifact.
+                        raise ReportPdfGenerationError(
+                            "LAYOUT_RENDER_FAILED",
+                            "The report could not be laid out on its pages without losing content "
+                            f"({render_error}); adjust margins, letterhead bands or repeated fields",
+                        )
                     if render_error:
                         # Never produce an official PDF that misrepresents a
                         # signed report. Failing here leaves the report
