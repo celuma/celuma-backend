@@ -12,6 +12,8 @@ requires the generated report to show:
 
 Céluma 1.4 (#16) adds a fourth server-owned key, `expediente` (the order's optional request
 reference), under exactly the same rules, and makes `requesting_physician` a list of names.
+Céluma 1.4 (#12) adds a fifth, `sample_codes`: the actual codes of the order's linked samples, so the
+author never types them again (see `resolve_sample_codes`).
 
 These are NOT a parallel metadata representation: they are ordinary entries
 in `ReportContent.base` (`docs/celuma-1.3.1/...`; see
@@ -48,6 +50,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date, datetime
 from typing import Optional, Union
 
@@ -71,12 +74,19 @@ PHYSICIAN_NAME_BASE_KEY = "requesting_physician"
 # Céluma 1.4 (#16): the order's optional textual request reference. A separate key — it is never a
 # physician name and never an order/sample code.
 EXPEDIENTE_BASE_KEY = "expediente"
+# Céluma 1.4 (#12): the persisted codes of the order's linked samples. Consumed as-is: allocation,
+# counters and code correction belong to the numbering / correction services, not to this module.
+SAMPLE_CODES_BASE_KEY = "sample_codes"
+#: Separator between codes in the stored value. The renderer wraps at the spaces, so a long list
+#: flows onto further lines instead of being cropped.
+SAMPLE_CODES_SEPARATOR = ", "
 
 #: The three server-owned fields, in the order `DEFAULT_BASE_FIELDS` declares
 #: them (report.ts) and `v1_3_1` §3b writes them.
 _SYSTEM_METADATA_KEYS = (
     PHYSICIAN_NAME_BASE_KEY,
     EXPEDIENTE_BASE_KEY,
+    SAMPLE_CODES_BASE_KEY,
     RECEPTION_DATE_BASE_KEY,
     DELIVERY_DATE_BASE_KEY,
 )
@@ -126,6 +136,58 @@ def resolve_requesting_physician_name(session: Session, order: Order) -> str:
 def resolve_expediente(order: Order) -> str:
     """The order's textual request reference, verbatim (leading zeroes preserved), or empty."""
     return order.expediente or ""
+
+
+def _natural_key(code: str) -> tuple:
+    """Digit-aware sort key, so `M-2` precedes `M-10` (generated codes carry a counter)."""
+    return tuple((0, int(part), "") if part.isdigit() else (1, 0, part)
+                 for part in re.split(r"(\d+)", code) if part != "")
+
+
+def resolve_sample_codes(session: Session, order: Order) -> str:
+    """The actual `sample_code` of every sample linked to the order, as one line.
+
+    Tenant-scoped (a sample of another tenant is never listed), and operationally removed samples
+    are already excluded by the session-wide soft-removal criteria (`app/core/soft_removal.py`).
+    `Sample` carries no registration timestamp, so the stable order is the natural (digit-aware)
+    order of the codes themselves, ties broken by id: deterministic for any set, and the same
+    order the automatic numbering issues them in. No samples means an empty value, never a
+    placeholder. Codes are read, never allocated or altered here."""
+    rows = session.exec(
+        select(Sample.sample_code, Sample.id).where(
+            Sample.order_id == order.id, Sample.tenant_id == order.tenant_id
+        )
+    ).all()
+    ordered = sorted(
+        ((code or "").strip(), str(sample_id)) for code, sample_id in rows if (code or "").strip()
+    )
+    ordered.sort(key=lambda row: (_natural_key(row[0]), row[1]))
+    return SAMPLE_CODES_SEPARATOR.join(code for code, _ in ordered)
+
+
+SAMPLE_CODES_STALE_CODE = "report_sample_codes_stale"
+
+
+def stale_sample_codes(session: Session, order: Optional[Order], body: Optional[dict]) -> Optional[tuple[str, str]]:
+    """`(stored, current)` when the report's frozen template declares `sample_codes` and the stored value
+    no longer equals the order's current codes; `None` when the field is not declared or is up to date.
+
+    Used at the one boundary that matters, submission for review (under the order lock): a code can only
+    be corrected while no review/approval/signing evidence exists, so a value that is current at submission
+    stays current for the whole review and signing. A stale one is refused rather than silently rewritten,
+    because the author must see (and save) exactly the content that goes to review."""
+    if order is None or not isinstance(body, dict):
+        return None
+    snapshot = body.get("rendering_snapshot")
+    template = snapshot.get("template") if isinstance(snapshot, dict) else None
+    if SAMPLE_CODES_BASE_KEY not in declared_base_fields(template):
+        return None
+    base = body.get("base")
+    entry = base.get(SAMPLE_CODES_BASE_KEY) if isinstance(base, dict) else None
+    stored = entry.get("value") if isinstance(entry, dict) else ""
+    stored = stored if isinstance(stored, str) else ""
+    current = resolve_sample_codes(session, order)
+    return None if stored == current else (stored, current)
 
 
 def declared_base_fields(template: Optional[dict]) -> dict:
@@ -186,6 +248,7 @@ def apply_authoritative_report_metadata(
             session, order
         ),
         EXPEDIENTE_BASE_KEY: lambda: resolve_expediente(order),
+        SAMPLE_CODES_BASE_KEY: lambda: resolve_sample_codes(session, order),
         # Not a fact until the report is signed — see the module docstring.
         DELIVERY_DATE_BASE_KEY: lambda: "",
     }

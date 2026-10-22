@@ -133,8 +133,10 @@ from app.services.report_publishing import (
 )
 from app.services.report_default_reviewer import ensure_default_reviewer_assignment
 from app.services.report_metadata import (
+    SAMPLE_CODES_STALE_CODE,
     apply_authoritative_report_metadata,
     embed_delivery_date_at_signing,
+    stale_sample_codes,
 )
 from app.schemas.report import (
     ReportCreate, 
@@ -3025,6 +3027,23 @@ def submit_report(
     amendment, amendment_source = _amendment_scope(session, report)
     if amendment is not None:
         _require_change_note(session, submit_version)
+
+    # Céluma 1.4 (#12): the reviewed content must carry the order's CURRENT sample codes. A code
+    # corrected after the last save (the correction is only possible before review) is refused here,
+    # under the order lock, with an actionable message; nothing is rewritten silently.
+    stale = stale_sample_codes(session, session.get(Order, report.order_id), _version_body(session, submit_version))
+    if stale is not None:
+        raise HTTPException(
+            409,
+            {
+                "code": SAMPLE_CODES_STALE_CODE,
+                "message": (
+                    "Los códigos de muestra de la orden cambiaron desde el último guardado "
+                    f"({stale[0] or 'sin códigos'} → {stale[1] or 'sin códigos'}). "
+                    "Guarda el reporte de nuevo y vuelve a enviarlo a revisión."
+                ),
+            },
+        )
 
     # Fifth post-Phase-2 remediation (§3.5): submit-for-review is the
     # moment the letterhead is FROZEN, so it is also the last moment to
