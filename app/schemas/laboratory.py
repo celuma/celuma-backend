@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from app.schemas.iso_input import require_iso_date_input
 from app.schemas.report import ReportMetaResponse, ReportDetailResponse
 from app.schemas.patient import PatientFullResponse
 from app.schemas.sample_type import SampleTypeRef
@@ -14,6 +15,19 @@ def _reject_retired_type_field(data):
     if isinstance(data, dict) and "type" in data:
         raise ValueError("'type' was removed in Céluma 1.4; send 'sample_type_id' (an active sample type of your laboratory)")
     return data
+
+
+def _validate_receipt_date(value):
+    """The receipt date of a NEW sample is required and must be an ISO date or date-time.
+
+    Accepted: a date-only string (`2026-09-30`), a timezone-less datetime or an ISO datetime with an
+    explicit offset. Refused (422, before any record, counter or ledger row exists): missing, null,
+    blank, booleans, numbers, numeric/epoch strings and any other non-ISO text; impossible calendar dates
+    are refused by the parser. No year range is imposed (#33). There is no fallback to the registration
+    time or to today."""
+    return require_iso_date_input(
+        value, message="received_at is required: send the sample's receipt date (YYYY-MM-DD)"
+    )
 
 
 def _reject_typed_codes(data):
@@ -287,7 +301,13 @@ class SampleCreate(BaseModel):
     sample_type_id: str  # required: every new sample has an active catalog type
     notes: Optional[str] = None
     collected_at: Optional[datetime] = None
-    received_at: Optional[datetime] = None
+    #: Required for every NEW sample (Céluma 1.4, #33): it defines the monthly code's period.
+    received_at: datetime
+
+    @field_validator("received_at", mode="before")
+    @classmethod
+    def _receipt_required(cls, value):
+        return _validate_receipt_date(value)
 
     @model_validator(mode="before")
     @classmethod
@@ -350,7 +370,13 @@ class UnifiedSampleCreate(BaseModel):
     sample_type_id: str
     notes: Optional[str] = None
     collected_at: Optional[datetime] = None
-    received_at: Optional[datetime] = None
+    #: Required for every NEW sample (Céluma 1.4, #33): it defines the monthly code's period.
+    received_at: datetime
+
+    @field_validator("received_at", mode="before")
+    @classmethod
+    def _receipt_required(cls, value):
+        return _validate_receipt_date(value)
 
     @model_validator(mode="before")
     @classmethod

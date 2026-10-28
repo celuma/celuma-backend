@@ -252,6 +252,39 @@ def now() -> datetime:
     return _now()
 
 
+def receipt_local(received_at: datetime, zone_name: Optional[str]) -> datetime:
+    """A sample's receipt date as the timezone-less LOCAL wall clock of the numbering zone.
+
+    * Date-only input and timezone-less datetimes already ARE a local calendar date: they are returned
+      unchanged (the registration's own calendar date, never shifted by a browser, server or UTC).
+    * An instant with an explicit offset is converted to the numbering zone first.
+
+    The result both defines the monthly period and is what is stored in `sample.received_at` (a
+    `timestamp without time zone` column), so the stored date, the rendered month/year and the counter
+    period always agree. No year range is imposed; an offset instant whose conversion to the numbering
+    zone is not representable (beyond year 1 or 9999) is refused with 422 `numbering_receipt_date_invalid`.
+    """
+    if received_at.tzinfo is None:
+        local = received_at
+    else:
+        try:
+            local = received_at.astimezone(_zone(zone_name)).replace(tzinfo=None)
+        except (OverflowError, ValueError):
+            local = None
+    if local is None:
+        raise NumberingError(
+            422, "numbering_receipt_date_invalid",
+            "The receipt date cannot be represented in the numbering timezone",
+        )
+    return local
+
+
+def receipt_period(received_at: datetime, zone_name: Optional[str]) -> Period:
+    """The monthly period (year, month) of a sample's receipt date in the numbering zone."""
+    local = receipt_local(received_at, zone_name)
+    return Period(local.year, local.month)
+
+
 # --------------------------------------------------------------------------- settings
 
 
@@ -370,6 +403,10 @@ class AllocationRequest:
     branch_code: str = ""
     #: The registering branch's own zone (used only by a branch-scoped counter).
     branch_timezone: Optional[str] = None
+    #: A SAMPLE's receipt date (date-only/timezone-less = local calendar date; with offset = an instant).
+    #: It alone defines the sample's monthly period; a sample request without it is refused, never
+    #: numbered with the request clock. Orders ignore it and keep the allocation-instant policy.
+    received_at: Optional[datetime] = None
 
 
 @dataclass
@@ -466,19 +503,36 @@ def legacy_high_water(session: Session, tenant_id, scope_id, base_code: str, kin
     return int(max(from_rows or 0, from_ledger or 0))
 
 
+def request_period(settings: NumberingSettings, request: AllocationRequest, instant: datetime) -> Period:
+    """The period a request allocates in. Pure: no database access, so batches can order their locks by it.
+
+    Orders: the allocation instant in the numbering zone (unchanged policy). Samples (#33): the receipt
+    date in the numbering zone (tenant-wide counters: the laboratory zone; branch-scoped: the branch's)."""
+    if settings.scheme == SCHEME_LEGACY:
+        return LEGACY_PERIOD
+    zone = settings.zone_name(request.branch_timezone)
+    if request.kind == SAMPLE:
+        if request.received_at is None:
+            raise NumberingError(
+                422, "numbering_receipt_date_required",
+                "A sample's receipt date is required to number it; the registration time is never used instead",
+            )
+        return receipt_period(request.received_at, zone)
+    return period_in_zone(zone, instant)
+
+
 def _allocate_one(
     session: Session, *, tenant_id, request: AllocationRequest, instant: datetime,
     settings: NumberingSettings, actor_id,
 ) -> Allocation:
     legacy = settings.scheme == SCHEME_LEGACY
     branch = counter_branch(settings, request)
+    period = request_period(settings, request, instant)
     if legacy:
-        period = LEGACY_PERIOD
         # Floor from evidence (never a row count), re-read on every allocation so a code typed or
         # imported later also moves the counter forward; the bump below can only increase it.
         start = legacy_high_water(session, tenant_id, request.scope_id, request.base_code, request.kind) + 1
     else:
-        period = period_in_zone(settings.zone_name(request.branch_timezone), instant)
         start = settings.start_value
     max_len = MAX_LENGTH_BY_KIND[request.kind]
     skipped = 0
@@ -523,18 +577,22 @@ def allocate_batch(
 ) -> Dict[object, Allocation]:
     """Allocate every requested code in one deterministic order.
 
-    Counter rows are locked ordered by `(kind, scope_id, branch)` (orders before
-    samples), keeping the request order inside a counter, so concurrent unified
-    requests take their row locks in the same order and cannot deadlock. Two
-    samples of one type in one order get consecutive values. `instant` is the ONE
-    instant of the request: each kind converts it with its own numbering timezone. (The idempotency
-    lock, when present, is always taken BEFORE any of these.)
+    Counter rows are locked ordered by `(kind, scope_id, branch, period_year, period_month)` (orders
+    before samples), keeping the request order inside a counter, so concurrent unified requests take
+    their row locks in the same order and cannot deadlock, even when their samples span several
+    receipt-date periods. Two samples of one type AND period in one order get consecutive values.
+    `instant` is the ONE instant of the request and defines the period of orders only; each sample
+    uses its own receipt date (#33). Every period is resolved (and an invalid or missing receipt date
+    refused) BEFORE the first counter is touched. (The idempotency lock, when present, is always taken
+    BEFORE any of these.)
     """
     rank = {ORDER: 0, SAMPLE: 1}
+    periods = [request_period(settings_by_kind[r.kind], r, instant) for r in requests]
     indexed = list(enumerate(requests))
     indexed.sort(key=lambda item: (
         rank[item[1].kind], str(item[1].scope_id),
-        str(counter_branch(settings_by_kind[item[1].kind], item[1])), item[0],
+        str(counter_branch(settings_by_kind[item[1].kind], item[1])),
+        periods[item[0]].year, periods[item[0]].month, item[0],
     ))
     results: Dict[object, Allocation] = {}
     for _, req in indexed:

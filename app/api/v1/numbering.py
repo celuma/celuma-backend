@@ -187,7 +187,14 @@ def preview_numbering(
             branch = None
         if branch is None or str(branch.tenant_id) != ctx.tenant_id:
             raise HTTPException(404, "Branch not found")
-    period = numbering.period_in_zone(candidate.zone_name(branch.timezone if branch else None))
+    zone = candidate.zone_name(branch.timezone if branch else None)
+    if kind == numbering.SAMPLE and body.reference_date is not None:
+        # #33: a sample's period is its receipt date in the numbering zone (read-only, like the rest).
+        period = numbering.receipt_period(body.reference_date, zone)
+        date_basis = "receipt_date"
+    else:
+        period = numbering.period_in_zone(zone)
+        date_basis = "allocation_instant"
 
     base_code = "BASE"
     scope = None
@@ -224,6 +231,6 @@ def preview_numbering(
         entity_kind=kind, valid=not problems, errors=problems, format=candidate.format,
         sequence_min_width=candidate.sequence_min_width, scheme=candidate.scheme,
         timezone=candidate.zone_name(branch.timezone if branch else None),
-        period_year=period.year, period_month=period.month, base_code=base_code,
+        period_year=period.year, period_month=period.month, date_basis=date_basis, base_code=base_code,
         examples=examples, estimate=estimate, notice=PREVIEW_NOTICE,
     )

@@ -135,7 +135,7 @@ def race_allocations(engine, lab, n=20):
                 barrier.wait(timeout=30)
                 alloc = numbering.allocate_batch(
                     s, tenant_id=lab.tenant.id, instant=datetime(2026, 10, 15, 18, tzinfo=timezone.utc),
-                    requests=[numbering.AllocationRequest("k", numbering.SAMPLE, lab.sample_types["BX"].id, "BX")],
+                    requests=[numbering.AllocationRequest("k", numbering.SAMPLE, lab.sample_types["BX"].id, "BX", received_at=datetime(2026, 10, 15))],  # #33: a sample is numbered by its receipt date
                     settings_by_kind={numbering.SAMPLE: numbering.NumberingSettings("sample", active=True)}, actor_id=None,
                 )["k"]
                 s.commit()

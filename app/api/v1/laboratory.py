@@ -1289,11 +1289,16 @@ def create_sample(
     ]
 
     # Céluma 1.4 (#8, automatic registration): the sample code is ALWAYS generated, per sample type.
+    # Céluma 1.4 (#33): the monthly period is the sample's RECEIPT date in the numbering zone (not the
+    # registration time). `received_local` is that local wall clock; it is also what is stored.
     sample_settings = numbering.get_settings(session, tenant.id, numbering.SAMPLE)
+    received_local = numbering.receipt_local(
+        sample_data.received_at, sample_settings.zone_name(branch.timezone))
     sample_allocation = numbering.allocate_batch(
         session, tenant_id=tenant.id, instant=numbering.now(),
         requests=[numbering.AllocationRequest(
-            "sample", numbering.SAMPLE, sample_type.id, sample_type.code, branch.id, branch.code, branch.timezone)],
+            "sample", numbering.SAMPLE, sample_type.id, sample_type.code, branch.id, branch.code, branch.timezone,
+            received_at=received_local)],
         settings_by_kind={numbering.SAMPLE: sample_settings}, actor_id=ctx.user_id,
     )["sample"]
 
@@ -1305,7 +1310,7 @@ def create_sample(
         sample_type_id=sample_type.id,
         notes=sample_data.notes,
         collected_at=sample_data.collected_at,
-        received_at=sample_data.received_at
+        received_at=received_local,
     )
     
     session.add(sample)
@@ -1456,10 +1461,15 @@ def create_order_with_samples(
     sample_settings = numbering.get_settings(session, tenant.id, numbering.SAMPLE)
     requests: list = [numbering.AllocationRequest(
         "order", numbering.ORDER, study_type.id, study_type.code, branch.id, branch.code, branch.timezone)]
+    # Céluma 1.4 (#33): each sample numbers by its OWN receipt date (samples of one request may fall in
+    # different months); `received_local` is that local wall clock and is what is stored.
+    sample_zone = sample_settings.zone_name(branch.timezone)
+    received_local = [numbering.receipt_local(s.received_at, sample_zone) for s in payload.samples]
     for idx, s in enumerate(payload.samples):
         st = sample_types[s.sample_type_id]
         requests.append(numbering.AllocationRequest(
-            ("sample", idx), numbering.SAMPLE, st.id, st.code, branch.id, branch.code, branch.timezone))
+            ("sample", idx), numbering.SAMPLE, st.id, st.code, branch.id, branch.code, branch.timezone,
+            received_at=received_local[idx]))
     allocations = numbering.allocate_batch(
         session, tenant_id=tenant.id, instant=numbering.now(), requests=requests,
         settings_by_kind={numbering.ORDER: order_settings, numbering.SAMPLE: sample_settings},
@@ -1499,7 +1509,7 @@ def create_order_with_samples(
             sample_type_id=sample_types[s.sample_type_id].id,
             notes=s.notes,
             collected_at=s.collected_at,
-            received_at=s.received_at,
+            received_at=received_local[idx],
         )
         session.add(sample)
         session.flush()  # Get sample.id for event
