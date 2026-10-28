@@ -19,6 +19,9 @@ SAMPLES = "/api/v1/laboratory/samples/"
 ORDERS = "/api/v1/laboratory/orders/"
 UNIFIED = "/api/v1/laboratory/orders/unified"
 NUMBERING = "/api/v1/numbering"
+#: Céluma 1.4 (#33): every new sample requires its receipt date. The default is the day the allocation
+#: clock is frozen on (`freeze()`), so tests that do not care about the date keep their month.
+RECEIVED = "2026-10-15"
 
 
 class Lab:
@@ -57,16 +60,21 @@ class Lab:
             "patient_id": str(self.patient.id), "requested_by": "Dr. Sintético", **extra,
         }
 
-    def unified(self, sample_codes=("BX",), study_type=None, **extra) -> dict:
+    def unified(self, sample_codes=("BX",), study_type=None, received=None, **extra) -> dict:
         """A unified registration payload. `sample_codes` are the sample TYPE codes of the samples (the
-        codes themselves are always generated; registration accepts none)."""
-        samples = [{"sample_type_id": str(self.sample_types[c].id)} for c in sample_codes]
+        codes themselves are always generated; registration accepts none). `received` is one receipt date
+        for every sample, or a list with one per sample (default: `RECEIVED`)."""
+        dates = received if isinstance(received, (list, tuple)) else [received or RECEIVED] * len(sample_codes)
+        samples = [
+            {"sample_type_id": str(self.sample_types[c].id), "received_at": d}
+            for c, d in zip(sample_codes, dates, strict=True)
+        ]
         return {**self.order_payload(study_type), "samples": samples, **extra}
 
     def sample_payload(self, order_id, type_code="BX", **extra) -> dict:
         return {
             "tenant_id": str(self.tenant.id), "branch_id": str(self.branch.id), "order_id": str(order_id),
-            "sample_type_id": str(self.sample_types[type_code].id), **extra,
+            "sample_type_id": str(self.sample_types[type_code].id), "received_at": RECEIVED, **extra,
         }
 
 

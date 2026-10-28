@@ -138,7 +138,7 @@ def _create_order_with_sample(client, lab, *, sample_code: str = "M-1") -> tuple
         json=_order_payload(
             lab,
             patient_id=patient["id"],
-            samples=[{"sample_type_id": str(lab["sample_type"].id)}],
+            samples=[{"sample_type_id": str(lab["sample_type"].id), "received_at": "2026-10-15"}],
         ),
         headers=lab["headers"],
     )
@@ -226,7 +226,7 @@ class TestOrderAndSampleWorkflow:
                 "tenant_id": str(lab["tenant"].id),
                 "branch_id": str(lab["branch"].id),
                 "order_id": order_body["id"],
-                "sample_type_id": str(lab["sample_type"].id),
+                "sample_type_id": str(lab["sample_type"].id), "received_at": "2026-10-15",
             },
             headers=lab["headers"],
         )
@@ -295,8 +295,8 @@ class TestOrderAndSampleWorkflow:
                 lab,
                 patient_id=patient["id"],
                 samples=[
-                    {"sample_type_id": str(lab["sample_type"].id)},
-                    {"sample_type_id": str(lab["sample_type"].id)},
+                    {"sample_type_id": str(lab["sample_type"].id), "received_at": "2026-10-15"},
+                    {"sample_type_id": str(lab["sample_type"].id), "received_at": "2026-10-15"},
                 ],
             ),
             headers=lab["headers"],
@@ -322,7 +322,7 @@ class TestOrderAndSampleWorkflow:
                 json=_order_payload(
                     context,
                     patient_id=patient["id"],
-                    samples=[{"sample_type_id": str(lab["sample_type"].id)}],
+                    samples=[{"sample_type_id": str(lab["sample_type"].id), "received_at": "2026-10-15"}],
                 ),
                 headers=context["headers"],
             )
@@ -513,7 +513,7 @@ class TestClinicalRoleAuthorization:
                 "tenant_id": str(lab["tenant"].id),
                 "branch_id": str(lab["branch"].id),
                 "order_id": seeded_order.json()["id"],
-                "sample_type_id": str(lab["sample_type"].id),
+                "sample_type_id": str(lab["sample_type"].id), "received_at": "2026-10-15",
             },
             headers=headers,
         )
@@ -599,7 +599,7 @@ class TestClinicalTenantIsolation:
             json=_order_payload(
                 other_lab,
                 patient_id=patient["id"],
-                samples=[{"sample_type_id": str(other_lab["sample_type"].id)}],
+                samples=[{"sample_type_id": str(other_lab["sample_type"].id), "received_at": "2026-10-15"}],
             ),
             headers=other_lab["headers"],
         )
@@ -681,7 +681,7 @@ class TestClinicalTenantIsolation:
                 "tenant_id": str(other_lab["tenant"].id),
                 "branch_id": str(other_lab["branch"].id),
                 "order_id": foreign_order.json()["id"],
-                "sample_type_id": str(other_lab["sample_type"].id),
+                "sample_type_id": str(other_lab["sample_type"].id), "received_at": "2026-10-15",
             },
             headers=lab["headers"],
         )
@@ -703,7 +703,7 @@ class TestClinicalTenantIsolation:
             json=_order_payload(
                 other_lab,
                 patient_id=foreign_patient["id"],
-                samples=[{"sample_type_id": str(other_lab["sample_type"].id)}],
+                samples=[{"sample_type_id": str(other_lab["sample_type"].id), "received_at": "2026-10-15"}],
             ),
             headers=lab["headers"],
         )

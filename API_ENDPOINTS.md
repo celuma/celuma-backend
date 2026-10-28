@@ -1246,6 +1246,8 @@ Returns `orders` array with enriched `branch` and `patient` objects and summary 
 
 > **Céluma 1.4 (issue #17):** a sample's type is a catalog entry. Requests send `sample_type_id` (required; an active type of the caller's tenant — 404 if unknown/foreign, 400 if inactive; the old `type` field is refused with 422) and responses return `sample_type: {id, code, name, is_active}` or `null` ("Sin tipo", legacy samples) instead of `type`. List filter `type` became `sample_type_id` (`none` = Sin tipo). Catalog endpoints: `/api/v1/sample-types/` (list/get: `lab:read`; create/update/delete, `/export`, `/import/{preview,confirm}`, `/copy-from-study-types/{preview,confirm}`: `admin:manage_catalog`) and `GET /api/v1/study-types/export`. Contract: `celuma-engineering/specs/laboratory/sample-types.md` and `catalog-transfer.md`.
 
+> **Céluma 1.4 (issue #33) — receipt date numbers the sample.** `received_at` is **required** for every new sample (`POST /laboratory/samples/` and each sample of `POST /laboratory/orders/unified`; 422 when missing, null, blank, not an ISO date/date-time (numeric or epoch strings such as `"1790000000"` are refused), an impossible calendar date, or an offset whose conversion to the numbering zone is not representable — nothing is created or numbered; there is no year range and future dates are accepted). The sample's monthly code takes its month/year **and** its counter period from that date in the numbering timezone (the laboratory's, or the branch's for a branch-scoped counter), not from the registration time: receipt `2026-09-30` registered on `2026-10-01` → `CU010926`. Send a **date-only** value (`"2026-09-30"`, the local calendar date) or a timezone-less datetime; a value with an offset (`…Z`, `…-06:00`) is an instant converted to the numbering zone, so `2026-10-01T00:00:00Z` is September 30 in Mexico City. `collected_at` stays optional and never affects the code. Orders keep their allocation-instant policy. `POST /numbering/preview` accepts `reference_date` for samples and reports `date_basis`. Issued codes never change when a date is later corrected. Contract: `celuma-engineering/specs/laboratory/monthly-numbering.md`.
+
 ### POST /api/v1/laboratory/samples/
 **Create a new sample**
 ### POST /api/v1/laboratory/orders/unified
@@ -1263,15 +1265,14 @@ Returns `orders` array with enriched `branch` and `patient` objects and summary 
   "created_by": "user-uuid-here",
   "samples": [
     {
-      "sample_code": "SAMP001",
       "sample_type_id": "sample-type-uuid-here",
       "notes": "",
-      "collected_at": "2025-08-18T10:00:00Z",
-      "received_at": "2025-08-18T11:00:00Z"
+      "collected_at": "2025-08-17",
+      "received_at": "2025-08-18"
     },
     {
-      "sample_code": "SAMP002",
-      "sample_type_id": "sample-type-uuid-here"
+      "sample_type_id": "sample-type-uuid-here",
+      "received_at": "2025-08-18"
     }
   ]
 }
@@ -1477,11 +1478,10 @@ Returns `orders` array with enriched `branch` and `patient` objects and summary 
   "tenant_id": "tenant-uuid-here",
   "branch_id": "branch-uuid-here",
   "order_id": "order-uuid-here",
-  "sample_code": "SAMP001",
   "sample_type_id": "sample-type-uuid-here",
   "notes": "Blood sample for CBC",
-  "collected_at": "2025-08-18T10:00:00Z",
-  "received_at": "2025-08-18T11:00:00Z"
+  "collected_at": "2025-08-17",
+  "received_at": "2025-08-18"
 }
 ```
 

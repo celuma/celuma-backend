@@ -80,6 +80,9 @@ echo -e "${YELLOW}4. Creando orden con tipo de estudio $STUDY_TYPE_CODE...${NC}"
 # Céluma 1.4 (#8): creation requires an Idempotency-Key. ONE key for this one logical request; a retry
 # after a transport failure reuses it, so a response lost after the commit is replayed, not duplicated.
 IDEMPOTENCY_KEY="$(uuidgen)"
+# Céluma 1.4 (#33): every new sample requires its RECEIPT date (YYYY-MM-DD, the local calendar date). Fixed ONCE
+# here so every retry of this logical request carries the identical payload; override with RECEIVED_DATE=YYYY-MM-DD.
+RECEIVED_DATE="${RECEIVED_DATE:-$(date +%F)}"
 ORDER_PAYLOAD='{
     "tenant_id": "'$TENANT_ID'",
     "branch_id": "'$BRANCH_ID'",
@@ -89,6 +92,7 @@ ORDER_PAYLOAD='{
     "notes": "Prueba de verificación de facturación",
     "samples": [{
         "sample_type_id": "'$SAMPLE_TYPE_ID'",
+        "received_at": "'$RECEIVED_DATE'",
         "notes": "Muestra de prueba"
     }]
 }'

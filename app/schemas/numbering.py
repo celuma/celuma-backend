@@ -1,7 +1,10 @@
 """Schemas of the monthly numbering configuration and preview API (issue #8)."""
+from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, StrictInt
+from pydantic import BaseModel, StrictInt, field_validator
+
+from app.schemas.iso_input import require_iso_date_input
 
 
 class NumberingConfigResponse(BaseModel):
@@ -58,6 +61,17 @@ class NumberingPreviewRequest(BaseModel):
     scope_id: Optional[str] = None
     #: Branch whose timezone defines the period and whose code feeds `{BRANCH}`.
     branch_id: Optional[str] = None
+    #: SAMPLES only (#33): the receipt date the registration form shows (date-only `YYYY-MM-DD`, a
+    #: timezone-less datetime or an ISO datetime with offset). It defines the period shown, exactly as
+    #: the allocation will; without it the period is the current month in the numbering zone and
+    #: `date_basis` says so. Orders ignore it. Never consumes a number.
+    reference_date: Optional[datetime] = None
+
+    @field_validator("reference_date", mode="before")
+    @classmethod
+    def _strict_reference_date(cls, value):
+        """Omission (null) stays allowed; a PROVIDED value has the same strict ISO shape as `received_at`."""
+        return None if value is None else require_iso_date_input(value, message="reference_date must be a date (YYYY-MM-DD) or ISO date-time")
 
 
 class NumberingExample(BaseModel):
@@ -84,6 +98,9 @@ class NumberingPreviewResponse(BaseModel):
     timezone: str = ""
     period_year: int
     period_month: int
+    #: What defined the period: "receipt_date" (a sample preview given `reference_date`) or
+    #: "allocation_instant" (orders, and samples previewed without a date: the current month).
+    date_basis: str = "allocation_instant"
     base_code: str
     examples: List[NumberingExample]
     estimate: Optional[NumberingEstimate] = None
