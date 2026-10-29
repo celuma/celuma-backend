@@ -38,7 +38,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence
 from uuid import UUID
 
-from sqlalchemy import update as sa_update
+from sqlalchemy import exists, update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlmodel import Session, select
 
@@ -49,6 +49,7 @@ from app.models.notification import (
     NotificationDeliveryStatus,
     NotificationType,
 )
+from app.models.laboratory_cleanup import OPEN_STATUSES, LaboratoryCleanupOperation
 from app.models.user import AppUser
 from app.services.notification_policies import email_supported
 from app.services.notification_preferences import (
@@ -406,6 +407,15 @@ def select_due_delivery_ids(
     rows = session.exec(
         select(NotificationDelivery.id)
         .where(
+            # Céluma 1.4 (#39): a laboratory in cleanup maintenance sends nothing — its pending deliveries
+            # are about to be deleted and must not be delivered as obsolete content.
+            ~exists(
+                select(1).where(
+                    LaboratoryCleanupOperation.tenant_id == NotificationDelivery.tenant_id,
+                    LaboratoryCleanupOperation.status.in_(OPEN_STATUSES),
+                    LaboratoryCleanupOperation.database_cleaned_at.is_(None),
+                )
+            ),
             NotificationDelivery.status.in_([status.value for status in statuses]),
             NotificationDelivery.next_attempt_at.is_not(None),
             NotificationDelivery.next_attempt_at <= now,
@@ -461,6 +471,28 @@ def claim_pending_deliveries(
     if not delivery_ids:
         session.commit()
         return []
+
+    # Céluma 1.4 (#39): the discovery query above is a SNAPSHOT; a laboratory-content cleanup may have raised its
+    # gate (and even finished its writer barrier) since. Claiming is the moment a delivery becomes work in flight,
+    # so it takes the same maintenance protocol as every other writer: the tenant's SHARED maintenance lock, then a
+    # fresh gate read, in this very transaction. A claim that commits before the barrier is seen by the cleanup as
+    # SENDING (it refuses and waits); a claim that would commit after the gate rose is skipped here.
+    from app.core.maintenance_guard import tenants_in_maintenance
+
+    blocked = tenants_in_maintenance(
+        session,
+        {str(t) for (t,) in session.execute(
+            select(NotificationDelivery.tenant_id).where(NotificationDelivery.id.in_(delivery_ids)).distinct()
+        ).all()},
+    )
+    if blocked:
+        delivery_ids = [
+            did for did in delivery_ids
+            if str(session.execute(select(NotificationDelivery.tenant_id).where(NotificationDelivery.id == did)).scalar()) not in blocked
+        ]
+        if not delivery_ids:
+            session.commit()
+            return []
 
     session.exec(
         sa_update(NotificationDelivery)

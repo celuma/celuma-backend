@@ -76,6 +76,18 @@ class Settings(BaseSettings):
     password_confirmation_max_failures: int = 5
     password_confirmation_window_seconds: int = 900
 
+    # Céluma 1.4 (#39): privileged laboratory-content cleanup. The capability belongs to the person who created
+    # the laboratory at initial registration (`tenant.created_by_user_id`), not to a role or a configuration list;
+    # see app/services/laboratory_cleanup_authority.py.
+    # How long a read-only preview may be confirmed.
+    laboratory_cleanup_preview_ttl_seconds: int = 900
+    # A running cleanup holds a lease this long; after it expires (process
+    # death) `retry` may take the operation over.
+    laboratory_cleanup_lease_seconds: int = 120
+    # How long the writer barrier waits for in-flight writers before the
+    # operation is marked retryable (nothing has been deleted at that point).
+    laboratory_cleanup_barrier_timeout_seconds: int = 30
+
     # Céluma 1.3 Phase 2, Block E: official PDF generation. `pdf_generator_base_url`
     # is the origin of the frontend the headless browser navigates to render
     # `/internal/report-render/...` — intentionally has no localhost default so an

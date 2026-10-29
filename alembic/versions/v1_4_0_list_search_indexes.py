@@ -237,6 +237,47 @@ that 1.3.1 cannot represent. Restore the pre-upgrade snapshot instead. Without
 amendments it deletes any `REPORT_REPUBLISHED` preference rows (user settings
 only; no such notification can exist without an amendment), restores both
 constraints to the `v1_3_0` set, and drops the column and the table.
+
+==================================================================================================================================================
+§7 — Laboratory-content cleanup (issue #39)
+===========================================================================
+
+Specification: `celuma-engineering/specs/laboratory/laboratory-content-cleanup.md`;
+decision record: `celuma-engineering/adr/0021-laboratory-content-cleanup.md`;
+operator procedure: `celuma-engineering/runbooks/laboratory-content-cleanup.md`.
+
+ADDITIVE ONLY: three empty tables, one nullable tenant column and one trigger.
+Nothing existing is rewritten and no laboratory is cleaned.
+
+**§7a — `tenant.created_by_user_id`.** The persisted binding to the person who
+CREATED the laboratory during initial registration (owner decision, 2026-10-28):
+the only holder of the cleanup capability. Set atomically by
+`POST /auth/register/unified`. It is NULL for every existing laboratory — there
+is no reliable provenance for "who created it" in the 1.3.1 schema (the oldest
+or the current `superuser` account would be a guess), so the feature FAILS CLOSED
+for them until a controlled, explicit one-time backfill (runbook). A trigger makes
+the column WRITE-ONCE: NULL -> value is allowed (registration, or the documented
+backfill), changing or clearing a value is refused for every client, API or SQL.
+
+**§7b — `laboratory_cleanup_operation`.** The durable state machine of one
+confirmed cleanup (status, phase, lease, approved preview counts, reason, safe
+errors). A partial unique index allows at most one OPEN (QUEUED/RUNNING/FAILED)
+operation per tenant, which is also what rejects a duplicate concurrent start. It
+references only the tenant: it is independent technical evidence that outlives the
+graph it removed and holds no business or clinical payload.
+
+**§7c — `laboratory_cleanup_object`.** The object-store deletion outbox, written
+in the same transaction as the database deletion, with a copy of bucket/key
+(the `storage_object` row is gone by then). No foreign key to storage.
+
+**§7d — `laboratory_cleanup_retired_code`.** Every order/sample code a cleanup
+removed, consulted by numbering availability so manual/legacy codes the ledger
+never saw are never reissued.
+
+DOWNGRADE is refused while any operation row exists (they are evidence of an
+irreversible action); with none, the objects are dropped (the creator binding is
+lost with its column). A `v1_4_0` stamp does not prove §7 ran: check the objects
+(runbooks/migrations.md).
 """
 from typing import Sequence, Union
 
@@ -554,7 +595,105 @@ def upgrade() -> None:
     op.execute("CREATE INDEX ix_report_version_amendment_id ON public.report_version USING btree (amendment_id)")
     # §6c — admit the republication notification type
     _notification_type_checks(V1_3_NOTIFICATION_TYPES + (REPUBLISHED_NOTIFICATION_TYPE,))
-
+    # §7a-§7d — laboratory-content cleanup (#39): empty tables, one nullable column, one write-once trigger.
+    op.execute("ALTER TABLE public.tenant ADD COLUMN created_by_user_id uuid")
+    op.execute(
+        "ALTER TABLE ONLY public.tenant ADD CONSTRAINT fk_tenant_created_by_user_id_app_user "
+        "FOREIGN KEY (created_by_user_id) REFERENCES public.app_user(id) ON DELETE SET NULL"
+    )
+    op.execute("""
+        CREATE FUNCTION public.tenant_creator_write_once() RETURNS trigger LANGUAGE plpgsql AS $fn$
+        BEGIN
+            IF OLD.created_by_user_id IS NOT NULL AND NEW.created_by_user_id IS DISTINCT FROM OLD.created_by_user_id THEN
+                RAISE EXCEPTION 'tenant.created_by_user_id is write-once' USING ERRCODE = 'integrity_constraint_violation';
+            END IF;
+            RETURN NEW;
+        END
+        $fn$
+    """)
+    op.execute(
+        "CREATE TRIGGER trg_tenant_creator_write_once BEFORE UPDATE OF created_by_user_id ON public.tenant "
+        "FOR EACH ROW EXECUTE FUNCTION public.tenant_creator_write_once()"
+    )
+    op.execute("""
+        CREATE TABLE public.laboratory_cleanup_operation (
+            id                       uuid NOT NULL,
+            tenant_id                uuid NOT NULL,
+            actor_user_id            uuid NOT NULL,
+            status                   character varying(16) NOT NULL,
+            phase                    character varying(16) NOT NULL,
+            reason                   text NOT NULL,
+            laboratory_name          character varying(255) NOT NULL,
+            scope_revision           character varying(64) NOT NULL,
+            confirmation_jti         character varying(64) NOT NULL,
+            confirmation_fingerprint character varying(64) NOT NULL,
+            approved_counts          json NOT NULL,
+            executed_counts          json,
+            error_code               character varying(64),
+            error_message            character varying(500),
+            attempts                 integer NOT NULL DEFAULT 0,
+            lease_owner              character varying(64),
+            lease_expires_at         timestamp without time zone,
+            created_at               timestamp without time zone NOT NULL,
+            updated_at               timestamp without time zone NOT NULL,
+            started_at               timestamp without time zone,
+            database_cleaned_at      timestamp without time zone,
+            completed_at             timestamp without time zone,
+            cancelled_at             timestamp without time zone,
+            CONSTRAINT laboratory_cleanup_operation_pkey PRIMARY KEY (id),
+            CONSTRAINT uq_laboratory_cleanup_confirmation_jti UNIQUE (confirmation_jti),
+            CONSTRAINT laboratory_cleanup_operation_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenant(id),
+            CONSTRAINT ck_laboratory_cleanup_operation_status
+                CHECK (status IN ('QUEUED','RUNNING','FAILED','COMPLETED','CANCELLED')),
+            CONSTRAINT ck_laboratory_cleanup_operation_phase
+                CHECK (phase IN ('QUIESCE','DATABASE','OBJECTS','DONE'))
+        )
+    """)
+    op.execute("CREATE INDEX ix_laboratory_cleanup_operation_tenant_id ON public.laboratory_cleanup_operation USING btree (tenant_id)")
+    op.execute(
+        "CREATE UNIQUE INDEX uq_laboratory_cleanup_open_per_tenant ON public.laboratory_cleanup_operation "
+        "USING btree (tenant_id) WHERE status IN ('QUEUED','RUNNING','FAILED')"
+    )
+    op.execute("""
+        CREATE TABLE public.laboratory_cleanup_object (
+            id                uuid NOT NULL,
+            operation_id      uuid NOT NULL,
+            tenant_id         uuid NOT NULL,
+            storage_object_id uuid NOT NULL,
+            provider          character varying(50) NOT NULL,
+            bucket            character varying(255) NOT NULL,
+            object_key        character varying(1000) NOT NULL,
+            size_bytes        bigint,
+            category          character varying(32) NOT NULL,
+            status            character varying(10) NOT NULL,
+            attempts          integer NOT NULL DEFAULT 0,
+            error_code        character varying(64),
+            created_at        timestamp without time zone NOT NULL,
+            deleted_at        timestamp without time zone,
+            CONSTRAINT laboratory_cleanup_object_pkey PRIMARY KEY (id),
+            CONSTRAINT uq_laboratory_cleanup_object_key UNIQUE (operation_id, bucket, object_key),
+            CONSTRAINT laboratory_cleanup_object_operation_id_fkey FOREIGN KEY (operation_id) REFERENCES public.laboratory_cleanup_operation(id),
+            CONSTRAINT laboratory_cleanup_object_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenant(id),
+            CONSTRAINT ck_laboratory_cleanup_object_status CHECK (status IN ('PENDING','DELETED','ABSENT','KEPT','FAILED'))
+        )
+    """)
+    op.execute("CREATE INDEX ix_laboratory_cleanup_object_operation_id ON public.laboratory_cleanup_object USING btree (operation_id)")
+    op.execute("CREATE INDEX ix_laboratory_cleanup_object_tenant_status ON public.laboratory_cleanup_object USING btree (tenant_id, status)")
+    op.execute("""
+        CREATE TABLE public.laboratory_cleanup_retired_code (
+            id           uuid NOT NULL,
+            tenant_id    uuid NOT NULL,
+            entity_kind  character varying(16) NOT NULL,
+            code         character varying(100) NOT NULL,
+            operation_id uuid NOT NULL,
+            created_at   timestamp without time zone NOT NULL,
+            CONSTRAINT laboratory_cleanup_retired_code_pkey PRIMARY KEY (id),
+            CONSTRAINT uq_laboratory_cleanup_retired_code UNIQUE (tenant_id, entity_kind, code),
+            CONSTRAINT laboratory_cleanup_retired_code_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenant(id),
+            CONSTRAINT laboratory_cleanup_retired_code_operation_id_fkey FOREIGN KEY (operation_id) REFERENCES public.laboratory_cleanup_operation(id)
+        )
+    """)
+    op.execute("CREATE INDEX ix_laboratory_cleanup_retired_code_tenant_id ON public.laboratory_cleanup_retired_code USING btree (tenant_id)")
 
 def downgrade() -> None:
     """Returns the database to the `v1_3_1` contract.
@@ -584,6 +723,22 @@ def downgrade() -> None:
             f"Downgrade refused: {amendments} report amendment record(s) cannot be represented in 1.3.1. "
             "Restore from a pre-upgrade snapshot instead (celuma-engineering/runbooks/migrations.md)."
         )
+    # §7's refusal, also before anything is dropped: a cleanup operation is evidence of an
+    # irreversible action and of retired codes the 1.3.1 schema cannot protect.
+    cleanups = bind.exec_driver_sql("SELECT count(*) FROM public.laboratory_cleanup_operation").scalar()
+    if cleanups:
+        raise RuntimeError(
+            f"Downgrade refused: {cleanups} laboratory-cleanup operation(s) are evidence of an irreversible action. "
+            "Restore from a pre-upgrade snapshot instead (celuma-engineering/runbooks/migrations.md)."
+        )
+    # §7
+    op.execute("DROP TABLE public.laboratory_cleanup_retired_code")
+    op.execute("DROP TABLE public.laboratory_cleanup_object")
+    op.execute("DROP TABLE public.laboratory_cleanup_operation")
+    op.execute("DROP TRIGGER trg_tenant_creator_write_once ON public.tenant")
+    op.execute("DROP FUNCTION public.tenant_creator_write_once()")
+    op.execute("ALTER TABLE public.tenant DROP CONSTRAINT fk_tenant_created_by_user_id_app_user")
+    op.execute("ALTER TABLE public.tenant DROP COLUMN created_by_user_id")
     # §6
     op.execute(
         f"DELETE FROM public.notification_preference WHERE notification_type = '{REPUBLISHED_NOTIFICATION_TYPE}'"

@@ -5783,6 +5783,7 @@ class TestListSearchAndIndexesMigration:
             "sample_type", "numbering_config", "numbering_counter", "numbering_allocation", "idempotency_receipt",
             "order_requesting_physician", "sample_code_correction",  # §4 (#9/#10/#11/#16)
             "report_amendment",  # §6 (#13)
+            "laboratory_cleanup_operation", "laboratory_cleanup_object", "laboratory_cleanup_retired_code",  # §7 (#39)
         }
         assert before - after == set(), "the revision must not remove an existing table"
 

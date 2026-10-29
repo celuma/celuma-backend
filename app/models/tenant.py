@@ -86,6 +86,26 @@ class Tenant(BaseModel, TimestampMixin, table=True):
         ),
     )
 
+    # Céluma 1.4 (#39, owner decision 2026-10-28): the person who CREATED this laboratory during initial
+    # registration — the sole holder of the laboratory-content cleanup capability. Set atomically by
+    # `POST /auth/register/unified`; NULL for laboratories that predate it (the feature then fails closed until a
+    # controlled one-time backfill). Write-once at the database (trigger `trg_tenant_creator_write_once`): no role,
+    # custom role, user, invitation or tenant-update API can set or change it. Never derived from roles.
+    created_by_user_id: Optional[UUID] = Field(
+        default=None,
+        sa_column=Column(
+            "created_by_user_id",
+            PGUUID(as_uuid=True),
+            ForeignKey(
+                "app_user.id",
+                name="fk_tenant_created_by_user_id_app_user",
+                use_alter=True,
+                ondelete="SET NULL",
+            ),
+            nullable=True,
+        ),
+    )
+
     # Basic relationships only - will add more as we fix the models
     branches: List["Branch"] = Relationship(back_populates="tenant")
     # `foreign_keys` disambiguates from `default_reviewer_id` above: after

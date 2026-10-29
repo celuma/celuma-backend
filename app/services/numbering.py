@@ -379,11 +379,24 @@ def retired_by_correction(session: Session, tenant_id, code: str) -> bool:
     ).scalar())
 
 
+def retired_by_cleanup(session: Session, tenant_id, kind: str, code: str) -> bool:
+    """A code removed by a laboratory-content cleanup (#39) stays retired for the tenant, even a manual or
+    legacy one the ledger never saw."""
+    return bool(session.execute(
+        text("SELECT EXISTS (SELECT 1 FROM laboratory_cleanup_retired_code "
+             "WHERE tenant_id = :t AND entity_kind = :k AND code = :c)"),
+        {"t": str(tenant_id), "k": kind, "c": code},
+    ).scalar())
+
+
 def is_occupied(session: Session, tenant_id, kind: str, code: str) -> bool:
     """A row of the tenant carries `code` (legacy, manual or generated; REMOVED rows count, they are
-    tombstones), the ledger has ever issued it, or a correction retired it."""
+    tombstones), the ledger has ever issued it, a correction retired it, or a laboratory-content
+    cleanup removed it."""
     live = session.execute(text(_OCCUPIED_SQL[kind]), {"t": str(tenant_id), "c": code}).scalar()
     if live or ledger_has(session, tenant_id, kind, code):
+        return True
+    if retired_by_cleanup(session, tenant_id, kind, code):
         return True
     return kind == SAMPLE and retired_by_correction(session, tenant_id, code)
 
@@ -476,7 +489,8 @@ def legacy_high_water(session: Session, tenant_id, scope_id, base_code: str, kin
        included) whose code is exactly `<base code>-<digits>` (1-9 digits; irregular or manual shapes
        such as `CU-7x`, `CU--3`, `CU-007-A` are ignored, and never altered);
     2. the highest `sequence_value` the permanent ledger recorded for this type under
-       the compatibility scheme (so a code issued and later deleted is never forgotten).
+       the compatibility scheme (so a code issued and later deleted is never forgotten);
+    3. the highest `<n>` among codes a laboratory-content cleanup (#39) removed and retired.
 
     The result is only a floor: allocation takes `GREATEST(counter + 1, floor + 1)` atomically,
     so counters only move forward. History deleted BEFORE the ledger existed leaves no
@@ -500,7 +514,15 @@ def legacy_high_water(session: Session, tenant_id, scope_id, base_code: str, kin
         ),
         {"t": str(tenant_id), "k": kind, "s": str(scope_id)},
     ).scalar()
-    return int(max(from_rows or 0, from_ledger or 0))
+    from_cleanup = session.execute(
+        text(
+            "SELECT max(CASE WHEN substr(code, :n) ~ :rx THEN substr(code, :n)::bigint END) "
+            "FROM laboratory_cleanup_retired_code WHERE tenant_id = :t AND entity_kind = :k AND code LIKE :like ESCAPE '\\'"
+        ),
+        {"n": suffix_from, "rx": f"^[0-9]{{1,{_LEGACY_SUFFIX_DIGITS}}}$", "t": str(tenant_id), "k": kind,
+         "like": _like_escape(prefix) + "%"},
+    ).scalar()
+    return int(max(from_rows or 0, from_ledger or 0, from_cleanup or 0))
 
 
 def request_period(settings: NumberingSettings, request: AllocationRequest, instant: datetime) -> Period:

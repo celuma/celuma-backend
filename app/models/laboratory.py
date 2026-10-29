@@ -41,7 +41,6 @@ class Order(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     removed_at: Optional[datetime] = Field(default=None)
     removed_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
     removal_reason: Optional[str] = Field(default=None)
-
     # Basic relationships only
     samples: List["Sample"] = Relationship(back_populates="order")
     # No Order.report relationship: use order.report_id + session.get(Report, order.report_id)

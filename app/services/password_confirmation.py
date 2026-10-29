@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
+from uuid import UUID
 
 from fastapi import HTTPException
 from sqlmodel import Session, select
@@ -177,3 +178,94 @@ def require_password_confirmation(
         "La contraseña no es correcta. No se realizó ningún cambio.",
     )
 
+
+# --------------------------------------------------------------------------- non-report subjects
+#
+# Céluma 1.4 (#39): the laboratory-content cleanup uses the same protected-action
+# pattern for a subject that is not a report (a tenant). Same codes, same shared
+# per-actor throttle (the failures are counted from the same audit action), same
+# guarantees: the password is never logged, stored or echoed, and a refused request
+# commits nothing except the credential-free failure row, written in its own session.
+
+
+def _record_failure_for(
+    session: Session, *, user: AppUser, tenant_id: UUID, entity_type: str, entity_id: UUID, attempted_action: str
+) -> None:
+    with Session(session.get_bind()) as audit_session:
+        audit_session.add(
+            AuditLog(
+                tenant_id=tenant_id,
+                branch_id=None,
+                actor_user_id=user.id,
+                action=PASSWORD_CONFIRMATION_FAILED_ACTION,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                new_values={"attempted_action": attempted_action, "failure": "invalid_password"},
+            )
+        )
+        audit_session.commit()
+
+
+def require_actor_password(
+    session: Session,
+    *,
+    user: AppUser,
+    tenant_id: UUID,
+    entity_type: str,
+    entity_id: UUID,
+    attempted_action: str,
+    password: Optional[str],
+) -> None:
+    """Raise unless `password` is the actor's current password (see `require_password_confirmation`)."""
+    if not password:
+        raise _refuse(403, REQUIRED_CODE, "Confirma la acción con tu contraseña actual.")
+
+    now = datetime.utcnow()
+    max_failures = settings.password_confirmation_max_failures
+    failures = _recent_failures(session, user.id, now)
+    if max_failures > 0 and len(failures) >= max_failures:
+        window = timedelta(seconds=settings.password_confirmation_window_seconds)
+        retry_after = max(1, int((failures[max_failures - 1] + window - now).total_seconds()) + 1)
+        logger.warning(
+            "Password confirmation throttled",
+            extra={
+                "event": "password_confirmation.throttled",
+                "entity_type": entity_type,
+                "user_id": str(user.id),
+                "attempted_action": attempted_action,
+            },
+        )
+        raise _refuse(
+            429,
+            THROTTLED_CODE,
+            "Demasiados intentos con contraseña incorrecta. Espera unos minutos "
+            "antes de volver a intentarlo.",
+            retry_after_seconds=retry_after,
+        )
+
+    try:
+        verified = (
+            len(password) <= MAX_PASSWORD_LENGTH
+            and bool(user.hashed_password)
+            and verify_password(password, user.hashed_password)
+        )
+    except (ValueError, TypeError):
+        verified = False
+
+    if verified:
+        return
+
+    _record_failure_for(
+        session, user=user, tenant_id=tenant_id, entity_type=entity_type, entity_id=entity_id,
+        attempted_action=attempted_action,
+    )
+    logger.warning(
+        "Password confirmation failed",
+        extra={
+            "event": "password_confirmation.failed",
+            "entity_type": entity_type,
+            "user_id": str(user.id),
+            "attempted_action": attempted_action,
+        },
+    )
+    raise _refuse(403, INVALID_CODE, "La contraseña no es correcta. No se realizó ningún cambio.")
