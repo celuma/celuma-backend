@@ -572,6 +572,15 @@ def _delete_one_object(session: Session, s3, row: LaboratoryCleanupObject) -> st
     if row.bucket != s3.bucket:
         # Never delete in a bucket this process is not configured for.
         raise CleanupError("bucket_mismatch", "El objeto pertenece a otro bucket.", retryable=False)
+    # Reference/deletion protocol (`maintenance_guard.ASSET_PROTOCOL`): the global asset lock is taken EXCLUSIVELY
+    # and held by this transaction across the re-check AND the object-store delete + verification. A writer that
+    # committed a reference earlier is seen below (KEPT); one that arrives later waits here and is then refused,
+    # because this row is still PENDING/FAILED (and DELETED/ABSENT afterwards). The caller ends the transaction
+    # (releasing the lock) right after this returns; the operation row is NOT locked meanwhile.
+    try:
+        lock_assets_exclusive(session, settings.laboratory_cleanup_barrier_timeout_seconds)
+    except TimeoutError:
+        raise CleanupError("asset_lock_timeout", "Hay escrituras de configuración en curso; se reintentará.")
     if scope_mod.object_is_still_referenced(session, row.tenant_id, row.bucket, row.object_key):
         return OBJECT_KEPT
     if s3.head_object(row.object_key) is None:

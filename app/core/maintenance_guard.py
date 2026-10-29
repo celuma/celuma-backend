@@ -35,7 +35,7 @@ from typing import Dict, Iterable, Optional, Set, Tuple
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import event, text
+from sqlalchemy import event, inspect, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session as _OrmSession
 
@@ -57,7 +57,9 @@ from app.models.report_amendment import ReportAmendment
 from app.models.report_letterhead_version import ReportLetterheadVersion
 from app.models.report_review import ReportReview
 from app.models.report_template_version import ReportTemplateVersion
-from app.models.storage import SampleImageRendition
+from app.models.storage import SampleImageRendition, StorageObject
+from app.models.tenant import Tenant
+from app.models.user import AppUser
 
 logger = logging.getLogger(__name__)
 
@@ -87,12 +89,36 @@ PARENT_MODELS: Dict[type, Tuple[str, str]] = {
 #: Every guarded model — also what the guard test compares against the FK graph.
 GUARDED_MODELS = tuple(TENANT_MODELS) + tuple(PARENT_MODELS)
 
-#: Preserved CONFIGURATION that can name a managed object by key inside JSON (any laboratory). Writers of these
-#: models take the global asset lock (shared) and refuse to persist a reference to an object a cleanup has
-#: scheduled for deletion. See `lock_assets_exclusive`.
-CONFIG_MODELS = (ReportTemplate, ReportTemplateVersion, ReportLetterheadVersion)
+#: Every ORM writer that can PERSIST a reference to a managed object by key (any laboratory), with the attribute
+#: that carries it: configuration JSON, a surviving report's template snapshot, public URL columns, and a new
+#: `storage_object` row for the same key. Writers of these take the global asset lock (shared) from the first
+#: flush that changes the attribute until they commit, and refuse to persist a reference to an object a cleanup
+#: has scheduled for deletion or already deleted. See `lock_assets_exclusive` and `ASSET_PROTOCOL`.
+REFERENCE_ATTRIBUTES: Dict[type, Tuple[str, ...]] = {
+    ReportTemplate: ("template_json",),
+    ReportTemplateVersion: ("configuration",),
+    ReportLetterheadVersion: ("configuration",),
+    Report: ("template",),
+    Tenant: ("logo_url",),
+    AppUser: ("avatar_url",),
+    StorageObject: ("object_key",),
+}
+CONFIG_MODELS = tuple(REFERENCE_ATTRIBUTES)
+
+#: Outbox states in which a NEW reference to the key is refused: the object is scheduled (PENDING/FAILED) or gone
+#: (DELETED/ABSENT). KEPT is not listed: a referenced object is never deleted, so a reference to it is fine.
+REFUSED_OBJECT_STATUSES = "('PENDING','FAILED','DELETED','ABSENT')"
 
 ASSET_LOCK_KEY = "lab-cleanup-assets"
+ASSET_PROTOCOL = """Reference / physical-deletion protocol (one global advisory lock, `ASSET_LOCK_KEY`):
+  * a WRITER that persists a reference (REFERENCE_ATTRIBUTES) takes the lock SHARED at its first such flush, holds it
+    until it commits, and refuses keys whose outbox row is PENDING/FAILED/DELETED/ABSENT;
+  * the cleanup's DATABASE phase holds it EXCLUSIVE while it resolves objects and writes the outbox;
+  * the cleanup's OBJECT phase holds it EXCLUSIVE, per object, across [reference re-check -> HEAD -> DELETE -> verify].
+Hence for any key either the reference committed first (the re-check sees it, the object is KEPT) or the deletion
+holds the lock first (the writer waits, then finds the row scheduled/deleted and is refused): never both
+successful with the bytes gone. Lock order: no holder of the exclusive lock waits for a tenant lock. Uncoordinated:
+writers that bypass the ORM (hand-written SQL, scripts) are only covered by the re-check, not serialized."""
 ASSET_SCHEDULED_CODE = "asset_scheduled_for_deletion"
 
 _OPEN_GATE_SQL = text(
@@ -112,39 +138,57 @@ def gate_is_up(session, tenant_id) -> bool:
     return session.execute(_OPEN_GATE_SQL, {"t": str(tenant_id)}).first() is not None
 
 
-def lock_assets_exclusive(session) -> None:
+def lock_assets_exclusive(session, timeout_seconds: Optional[int] = None) -> None:
     """The cleanup's database phase takes this for its whole transaction, BEFORE it resolves which objects are
     exclusively owned. Preserved-configuration writers hold the same lock SHARED from their first flush until they
     commit, so (a) a reference committed before the resolution is visible to it and keeps the object, and (b) a
     writer arriving later waits for the cleanup's commit and then finds the key scheduled (outbox row) and is
     refused. It is global (not per tenant) because a template of ANY laboratory may name an object of the target."""
     if _is_postgres(session):
-        session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": ASSET_LOCK_KEY})
+        if timeout_seconds is not None:
+            session.execute(text(f"SET LOCAL lock_timeout = '{int(timeout_seconds) * 1000}ms'"))
+        try:
+            session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": ASSET_LOCK_KEY})
+        except OperationalError as exc:  # lock_timeout: retryable, nothing was deleted
+            session.rollback()
+            raise TimeoutError("asset lock timed out") from exc
 
 
-def _config_text(obj) -> str:
-    """The JSON of a configuration row as text (what the object-reference scans read)."""
+def _changed(session, obj, attribute: str) -> bool:
+    if obj in session.new:
+        return True
+    return bool(inspect(obj).attrs[attribute].history.has_changes())
+
+
+def _config_text(session, obj) -> str:
+    """The text a pending write would PERSIST for the reference-carrying attributes of `obj` (only those that
+    actually change in this flush)."""
     parts = []
-    for attr in ("template_json", "configuration"):
-        value = getattr(obj, attr, None)
-        if value is not None:
-            parts.append(json.dumps(value, default=str))
+    for attribute in REFERENCE_ATTRIBUTES.get(type(obj), ()):
+        if not _changed(session, obj, attribute):
+            continue
+        value = getattr(obj, attribute, None)
+        if value is None:
+            continue
+        parts.append(value if isinstance(value, str) else json.dumps(value, default=str))
     return "\n".join(parts)
 
 
 def assert_no_scheduled_asset_reference(session, config_objects) -> None:
+    """The WRITER side of the reference/physical-deletion protocol (`ASSET_PROTOCOL`)."""
     if session.info.get(EXECUTOR_KEY) or not config_objects:
+        return
+    bodies = [(obj, _config_text(session, obj)) for obj in config_objects]
+    bodies = [(obj, body) for obj, body in bodies if body]
+    if not bodies:
         return
     if _is_postgres(session) and not session.info.get("_laboratory_cleanup_assets_locked"):
         session.execute(text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": ASSET_LOCK_KEY})
         session.info["_laboratory_cleanup_assets_locked"] = True
-    for obj in config_objects:
-        body = _config_text(obj)
-        if not body:
-            continue
+    for _obj, body in bodies:
         hit = session.execute(
-            text("SELECT 1 FROM laboratory_cleanup_object WHERE status IN ('PENDING','FAILED') "
-                 "AND position(object_key in :body) > 0 LIMIT 1"),
+            text("SELECT 1 FROM laboratory_cleanup_object WHERE status IN " + REFUSED_OBJECT_STATUSES +
+                 " AND position(object_key in :body) > 0 LIMIT 1"),
             {"body": body},
         ).first()
         if hit is not None:
@@ -227,7 +271,7 @@ def _guard_operational_writes(session, flush_context, instances) -> None:
     config = [
         obj for obj in changed
         if isinstance(obj, CONFIG_MODELS) and (obj in session.new or session.is_modified(obj)) and obj not in session.deleted
-    ]
+    ]  # `_config_text` keeps only the writes that change a reference-carrying attribute
     if config:
         assert_no_scheduled_asset_reference(session, config)
     relevant = [obj for obj in changed if type(obj) in PARENT_MODELS or isinstance(obj, TENANT_MODELS)]

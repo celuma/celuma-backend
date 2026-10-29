@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlmodel import Session
 
 from app.core import maintenance_guard
+from app.core.config import settings
 from app.models.report import ReportTemplate
 from app.services import laboratory_cleanup as service
 from app.services import laboratory_cleanup_scope as scope_mod
@@ -380,3 +381,251 @@ class TestUsageReconciliationAndTheBarrier:
         r.join(timeout=120)
         quiesce.join(timeout=120)
         assert "run" in outcome
+
+
+# ------------------------------------------------------------------------------------------ R2b: physical deletion
+
+
+from sqlmodel import select  # noqa: E402
+
+from app.models.laboratory_cleanup import LaboratoryCleanupObject  # noqa: E402
+from app.models.report import Report  # noqa: E402
+from app.models.storage import StorageObject  # noqa: E402
+from app.models.tenant import Tenant  # noqa: E402
+from app.models.user import AppUser  # noqa: E402
+
+#: Every ORM writer that can persist a reference to an object key, as (id, how the OTHER laboratory writes it).
+REFERENCE_WRITERS = ["report_template_snapshot", "tenant_logo_url", "user_avatar_url", "storage_object_row", "report_template_json"]
+
+
+def write_reference(writer: Session, world, kind: str, key: str) -> None:
+    """Stage (do not commit) an ORM write by the OTHER laboratory that references `key`."""
+    other = world.other
+    if kind == "report_template_snapshot":
+        report = writer.exec(select(Report).where(Report.order_id == other.orders["O1"])).one()
+        report.template = {"presentation": {"header": {"logo_key": key}}}
+        writer.add(report)
+    elif kind == "tenant_logo_url":
+        tenant = writer.get(Tenant, other.tenant.id)
+        tenant.logo_url = f"https://cdn.example.invalid/{key}"
+        writer.add(tenant)
+    elif kind == "user_avatar_url":
+        user = writer.get(AppUser, other.admin.id)
+        user.avatar_url = f"https://cdn.example.invalid/{key}"
+        writer.add(user)
+    elif kind == "storage_object_row":
+        writer.add(StorageObject(provider="aws", region="mx-test-1", bucket="celuma-test-bucket", object_key=key,
+                                 content_type="image/png", size_bytes=3, tenant_id=other.tenant.id))
+    else:
+        template = writer.exec(select(ReportTemplate).where(ReportTemplate.tenant_id == other.tenant.id)).first()
+        template.template_json = {"logo_key": key}
+        writer.add(template)
+
+
+def referenced_by_other(session, world, kind: str, key: str) -> bool:
+    session.rollback()
+    queries = {
+        "report_template_snapshot": "SELECT count(*) FROM report WHERE tenant_id = :t AND position(:k in template::text) > 0",
+        "tenant_logo_url": "SELECT count(*) FROM tenant WHERE id = :t AND position(:k in coalesce(logo_url, '')) > 0",
+        "user_avatar_url": "SELECT count(*) FROM app_user WHERE tenant_id = :t AND position(:k in coalesce(avatar_url, '')) > 0",
+        "storage_object_row": "SELECT count(*) FROM storage_object WHERE tenant_id = :t AND object_key = :k",
+        "report_template_json": "SELECT count(*) FROM report_template WHERE tenant_id = :t AND position(:k in template_json::text) > 0",
+    }
+    return session.execute(text(queries[kind]), {"t": str(world.other.tenant.id), "k": key}).scalar() > 0
+
+
+def outbox_row(session, op, key):
+    session.rollback()
+    row = session.exec(select(LaboratoryCleanupObject).where(
+        LaboratoryCleanupObject.operation_id == op.id, LaboratoryCleanupObject.object_key == key)).one()
+    session.expunge(row)
+    return row
+
+
+def start_deleter(bind, row, outcome):
+    def run():
+        with service._executor_session(bind) as s:
+            try:
+                outcome["status"] = service._delete_one_object(s, FakeS3Service(), row)
+            except Exception as exc:  # noqa: BLE001
+                outcome["error"] = exc
+            finally:
+                s.rollback()
+
+    t = threading.Thread(target=run)
+    t.start()
+    return t
+
+
+@pytest.mark.parametrize("kind", REFERENCE_WRITERS)
+class TestPhysicalDeletionAgainstEveryReferenceWriter:
+    def test_reference_wins_when_its_writer_holds_the_lock_first(self, session, world, kind):
+        """Writer in flight (holds the shared asset lock) when deletion starts: the deleter waits, then sees the
+        committed reference, KEEPS the object, and the bytes survive."""
+        key = processed_key(world)
+        op, claimed, bind = run_until_objects(session, world)
+        row = outbox_row(session, op, key)
+        staged, release, outcome = threading.Event(), threading.Event(), {}
+
+        def writer():
+            with Session(bind) as w:
+                try:
+                    write_reference(w, world, kind, key)
+                    w.flush()
+                    staged.set()
+                    release.wait(timeout=60)
+                    w.commit()
+                    outcome["writer"] = "committed"
+                except HTTPException as exc:
+                    w.rollback()
+                    staged.set()
+                    outcome["writer"] = exc.detail["code"]
+
+        w = threading.Thread(target=writer)
+        w.start()
+        assert staged.wait(timeout=30)
+        if outcome.get("writer"):   # the key was already scheduled and the writer refused up front: deletion-wins ordering
+            w.join(timeout=30)
+            assert outcome["writer"] == "asset_scheduled_for_deletion"
+            return
+        d = start_deleter(bind, row, outcome)
+        time.sleep(1.0)
+        assert d.is_alive() and "status" not in outcome, "the deleter must wait for the in-flight reference writer"
+        release.set()
+        w.join(timeout=30)
+        d.join(timeout=60)
+        assert outcome.get("writer") == "committed" and outcome.get("status") == "KEPT", outcome
+        assert key in FakeS3Service.store
+        assert referenced_by_other(session, world, kind, key)
+
+    def test_deletion_wins_when_it_holds_the_lock_first_and_the_writer_is_refused(self, session, world, kind, monkeypatch):
+        """Deletion in flight (holds the exclusive lock across HEAD/DELETE): the writer waits, then finds the row
+        scheduled and is refused; no reference to the removed object is ever persisted."""
+        key = processed_key(world)
+        op, claimed, bind = run_until_objects(session, world)
+        row = outbox_row(session, op, key)
+        inside, proceed, outcome = threading.Event(), threading.Event(), {}
+        real_head = FakeS3Service.head_object
+
+        def slow_head(self, k):
+            if k == key and not inside.is_set():
+                inside.set()
+                proceed.wait(timeout=60)
+            return real_head(self, k)
+
+        monkeypatch.setattr(FakeS3Service, "head_object", slow_head)
+        d = start_deleter(bind, row, outcome)
+        assert inside.wait(timeout=30)
+
+        def writer():
+            with Session(bind) as w:
+                try:
+                    write_reference(w, world, kind, key)
+                    w.flush()
+                    w.commit()
+                    outcome["writer"] = "committed"
+                except HTTPException as exc:
+                    w.rollback()
+                    outcome["writer"] = exc.detail["code"]
+
+        w = threading.Thread(target=writer)
+        w.start()
+        time.sleep(1.0)
+        assert w.is_alive() and "writer" not in outcome, "the writer must wait while the object is being deleted"
+        proceed.set()
+        d.join(timeout=60)
+        w.join(timeout=60)
+        assert outcome.get("status") == "DELETED" and outcome.get("writer") == "asset_scheduled_for_deletion", outcome
+        assert key not in FakeS3Service.store
+        assert not referenced_by_other(session, world, kind, key)
+
+    def test_the_two_orderings_never_end_with_a_reference_and_missing_bytes(self, session, world, kind):
+        """Whatever the interleaving, a persisted reference implies surviving bytes (checked on a real race)."""
+        key = processed_key(world)
+        op, claimed, bind = run_until_objects(session, world)
+        row = outbox_row(session, op, key)
+        go, outcome = threading.Event(), {}
+
+        def writer():
+            with Session(bind) as w:
+                go.wait(timeout=30)
+                try:
+                    write_reference(w, world, kind, key)
+                    w.commit()
+                    outcome["writer"] = "committed"
+                except HTTPException as exc:
+                    w.rollback()
+                    outcome["writer"] = exc.detail["code"]
+
+        w = threading.Thread(target=writer)
+        w.start()
+        d = start_deleter(bind, row, outcome)
+        go.set()
+        w.join(timeout=60)
+        d.join(timeout=60)
+        referenced = referenced_by_other(session, world, kind, key)
+        assert not (referenced and key not in FakeS3Service.store), (outcome, "dangling reference")
+        assert outcome["writer"] in ("committed", "asset_scheduled_for_deletion")
+
+    def test_a_reference_written_after_the_cleanup_completed_is_refused(self, session, world, kind):
+        key = processed_key(world)
+        op, claimed, bind = run_until_objects(session, world)
+        service._phase_objects(bind, claimed, "step-worker")
+        service._complete(bind, claimed, "step-worker")
+        assert op_row(session, op.id).status == "COMPLETED" and key not in FakeS3Service.store
+        with Session(bind) as w:
+            write_reference(w, world, kind, key)
+            with pytest.raises(HTTPException) as exc:
+                w.flush()
+            assert exc.value.status_code == 409 and exc.value.detail["code"] == "asset_scheduled_for_deletion"
+            w.rollback()
+        assert not referenced_by_other(session, world, kind, key)
+
+
+def test_a_reference_to_a_kept_object_is_still_allowed_afterwards(session, world):
+    """KEPT means 'referenced, never deleted': new references to it are legitimate."""
+    key = processed_key(world)
+    op, claimed, bind = run_until_objects(session, world)
+    with Session(bind) as w:  # committed raw reference -> KEPT
+        w.execute(text("UPDATE report_template SET template_json = CAST(:v AS json) WHERE tenant_id = :t"),
+                  {"v": json.dumps({"logo_key": key}), "t": str(world.other.tenant.id)})
+        w.commit()
+    service._phase_objects(bind, claimed, "step-worker")
+    assert key in FakeS3Service.store
+    with Session(bind) as w:
+        write_reference(w, world, "tenant_logo_url", key)
+        w.commit()
+    assert referenced_by_other(session, world, "tenant_logo_url", key)
+
+
+def test_the_deleter_gives_up_retryably_when_a_writer_holds_the_asset_lock_too_long(session, world, monkeypatch):
+    monkeypatch.setattr(settings, "laboratory_cleanup_barrier_timeout_seconds", 1)
+    key = processed_key(world)
+    op, claimed, bind = run_until_objects(session, world)
+    row = outbox_row(session, op, key)
+    staged, release = threading.Event(), threading.Event()
+
+    def writer():
+        with Session(bind) as w:
+            write_reference(w, world, "tenant_logo_url", "elsewhere/unrelated.png")
+            w.flush()
+            staged.set()
+            release.wait(timeout=60)
+            w.rollback()
+
+    w = threading.Thread(target=writer)
+    w.start()
+    assert staged.wait(timeout=30)
+    outcome = {}
+    start_deleter(bind, row, outcome).join(timeout=30)
+    release.set()
+    w.join(timeout=30)
+    assert getattr(outcome.get("error"), "code", None) == "asset_lock_timeout" and key in FakeS3Service.store
+
+
+def test_every_preserved_reference_source_the_resolver_scans_has_a_coordinated_writer():
+    """A source the resolver protects but whose ORM writer does not take the asset lock would reopen R2b."""
+    covered = {(m.__tablename__, a) for m, attrs in maintenance_guard.REFERENCE_ATTRIBUTES.items() for a in attrs}
+    sources = {(t, c) for t, c, _p in scope_mod.CONFIG_JSON_COLUMNS} | set(scope_mod.URL_REFERENCE_COLUMNS)
+    assert sources <= covered, f"uncoordinated reference sources: {sorted(sources - covered)}"
+    assert ("storage_object", "object_key") in covered
