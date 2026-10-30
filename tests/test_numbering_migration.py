@@ -101,10 +101,10 @@ class TestUpgrade:
             after = conn.execute(text(
                 "SELECT id, tenant_id, branch_id, order_id, sample_code, state::text, notes FROM sample ORDER BY id")).all()
             assert [r[0] for r in after] == [r[0] for r in samples_before]
-            # §7 appended the nullable creator column at the END; every pre-existing value is identical
+            # no section alters `tenant` (#42 removed the §7 creator column): same columns, same values
             after_tenants = snapshot(conn, "tenant")
-            assert [tuple(r)[:len(tenants_before[0])] for r in after_tenants] == [tuple(r) for r in tenants_before]
-            assert all(tuple(r)[len(tenants_before[0]):] == (None,) for r in after_tenants)
+            assert after_tenants[0]._fields == tenants_before[0]._fields
+            assert after_tenants == tenants_before
             for table in TABLES:
                 assert conn.execute(text(f"SELECT count(*) FROM {table}")).scalar_one() == 0, table
             codes = conn.execute(text('SELECT order_code FROM "order"')).scalars().all()
