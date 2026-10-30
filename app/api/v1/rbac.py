@@ -24,6 +24,7 @@ from app.core.rbac import (
     ROLE_SUPERUSER,
     ROLE_ADMIN,
     ROLE_REVIEWER,
+    ProtectedRoleAssignmentError,
 )
 from app.models.permission import Permission
 from app.models.role import Role
@@ -181,7 +182,7 @@ def set_user_roles(
 
     Rules enforced:
     - Actor must have admin:manage_users.
-    - Only superuser may assign or remove the superuser role.
+    - The superuser role is onboarding-only; nobody may assign or remove it here.
     - Nobody may grant themselves the clinical `reviewer` role (1.3.1 A7).
     - Cannot remove all roles from a user (at least one required).
     """
@@ -194,16 +195,15 @@ def set_user_roles(
     if not body.roles:
         raise HTTPException(400, "At least one role must be assigned")
 
-    # Only superuser can assign/take away the superuser role
-    actor_roles = set(get_user_roles(actor.id, session))
+    # Preserve onboarding-only membership while allowing all other role edits.
     target_current_roles = set(get_user_roles(target.id, session))
     requested_roles = set(body.roles)
 
     superuser_being_added = ROLE_SUPERUSER in (requested_roles - target_current_roles)
     superuser_being_removed = ROLE_SUPERUSER in (target_current_roles - requested_roles)
 
-    if (superuser_being_added or superuser_being_removed) and ROLE_SUPERUSER not in actor_roles:
-        raise HTTPException(403, "Only a superuser can assign or remove the superuser role")
+    if superuser_being_added or superuser_being_removed:
+        raise HTTPException(403, "The superuser role is assigned automatically and cannot be changed manually")
 
     # Céluma 1.3.1 Block A / A7 — reviewer self-escalation (Block 0 finding
     # F-5). This endpoint requires only `admin:manage_users`, so before 1.3.1
@@ -261,6 +261,8 @@ def set_user_roles(
             session, target.tenant_id, source="user_roles_replaced", actor_id=actor.id
         )
         session.commit()
+    except ProtectedRoleAssignmentError as exc:
+        raise HTTPException(403, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc))
 

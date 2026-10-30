@@ -1,8 +1,8 @@
 """Privileged laboratory-content cleanup endpoints (Céluma 1.4, issue #39; ADR 0021).
 
 Every route re-checks the authority in the backend (`laboratory_cleanup_authority.require_operator`):
-the path tenant must be the caller's own tenant and the caller the ACTIVE person who created that laboratory
-at its initial registration (`tenant.created_by_user_id`). Hiding the UI entry point is a convenience, never authorization.
+the path tenant must be the caller's own tenant and the caller an ACTIVE holder of the protected system
+Superadministrator (`superuser`) role. Hiding the UI entry point is a convenience, never authorization.
 
 This router is separate from ordinary order/sample/report deletion on purpose: no existing
 lifecycle endpoint gained a parameter, and signed-report immutability is untouched.

@@ -76,8 +76,8 @@ class Settings(BaseSettings):
     password_confirmation_max_failures: int = 5
     password_confirmation_window_seconds: int = 900
 
-    # Céluma 1.4 (#39): privileged laboratory-content cleanup. The capability belongs to the person who created
-    # the laboratory at initial registration (`tenant.created_by_user_id`), not to a role or a configuration list;
+    # Céluma 1.4 (#39): privileged laboratory-content cleanup. The capability requires an active user holding
+    # the system Superadministrator (`superuser`) role in the same laboratory;
     # see app/services/laboratory_cleanup_authority.py.
     # How long a read-only preview may be confirmed.
     laboratory_cleanup_preview_ttl_seconds: int = 900

@@ -307,3 +307,35 @@ def test_permission_granted_after_role_assignment(session: Session, domain: str,
     session.commit()
 
     assert has_permission(user_id, perm_code, session)
+
+
+class TestReservedSuperadministratorRole:
+    def test_only_registration_can_grant_the_role(self, session):
+        from app.core.rbac import ProtectedRoleAssignmentError
+        _seed_role(session, "superuser", "Superadministrator")
+        user_id = uuid.uuid4()
+        with pytest.raises(ProtectedRoleAssignmentError):
+            assign_role_by_code(user_id, "superuser", session)
+        assert get_user_roles(user_id, session) == []
+        assign_role_by_code(user_id, "superuser", session, registration=True)
+        session.flush()
+        assert get_user_roles(user_id, session) == ["superuser"]
+        assign_role_by_code(user_id, "superuser", session)  # idempotent existing membership
+
+    def test_replacement_preserves_the_reserved_role_and_other_roles_remain_editable(self, session):
+        from app.core.rbac import ProtectedRoleAssignmentError, remove_role_by_code
+        _seed_role(session, "superuser", "Superadministrator")
+        _seed_role(session, "viewer", "Viewer")
+        user_id = uuid.uuid4()
+        with pytest.raises(ProtectedRoleAssignmentError):
+            replace_user_roles(user_id, ["superuser"], session)
+        assign_role_by_code(user_id, "superuser", session, registration=True)
+        session.flush()
+        replace_user_roles(user_id, ["superuser", "viewer"], session)
+        session.flush()
+        assert set(get_user_roles(user_id, session)) == {"superuser", "viewer"}
+        with pytest.raises(ProtectedRoleAssignmentError):
+            replace_user_roles(user_id, ["viewer"], session)
+        with pytest.raises(ProtectedRoleAssignmentError):
+            remove_role_by_code(user_id, "superuser", session)
+        assert set(get_user_roles(user_id, session)) == {"superuser", "viewer"}

@@ -47,95 +47,81 @@ def register(client, suffix: str) -> dict:
     return {**r.json(), "token": login.json()["access_token"], "headers": {"Authorization": f"Bearer {login.json()['access_token']}"}}
 
 
-class TestCreatorBinding:
-    """Owner decision (2026-10-28): the capability belongs to the person who CREATED the laboratory at its initial
-    registration, persisted and write-once; no role, custom role, user, invitation or tenant-update path can grant it."""
+class TestSuperadministratorRole:
+    def test_onboarding_grants_the_role_atomically(self, session, fresh_client):
+        from uuid import UUID
+        from app.core.rbac import get_user_roles
 
-    def test_onboarding_records_the_creator_atomically(self, session, fresh_client):
         lab = register(fresh_client, "a1")
-        session.expire_all()
-        creator = session.execute(text("SELECT created_by_user_id::text FROM tenant WHERE id = :t"), {"t": lab["tenant_id"]}).scalar()
-        assert creator == lab["user_id"]
+        assert "superuser" in get_user_roles(UUID(lab["user_id"]), session)
         flow = Flow(fresh_client, type("W", (), {"tenant": type("T", (), {"id": lab["tenant_id"], "name": "x"})()})(), headers=lab["headers"])
         assert flow.authorization().json() == {"authorized": True}
         assert flow.preview().status_code == 200
 
-    def test_a_failed_onboarding_leaves_no_tenant_and_therefore_no_dangling_binding(self, session, fresh_client, monkeypatch):
+    def test_failed_onboarding_rolls_back_tenant_user_and_role(self, session, fresh_client, monkeypatch):
         from app.services.usage_thresholds import UsageThresholdService
 
-        before = session.execute(text("SELECT count(*) FROM tenant")).scalar(), session.execute(text("SELECT count(*) FROM app_user")).scalar()
+        before = tuple(session.execute(text(f"SELECT count(*) FROM {t}")).scalar() for t in ("tenant", "app_user", "user_role"))
 
         def boom(*args, **kwargs):
-            raise RuntimeError("onboarding failed after the creator was bound")
+            raise RuntimeError("onboarding failed after role assignment")
 
         monkeypatch.setattr(UsageThresholdService, "evaluate_users", boom)
         body = {"tenant": {"name": "Laboratorio Fallido"}, "branch": {"code": "MAIN", "name": "Sede"},
                 "admin_user": {"email": "fallido@example.com", "password": "Creator!2026", "full_name": "F"}}
         assert fresh_client.post("/api/v1/auth/register/unified", json=body).status_code == 500
         session.expire_all()
-        assert (session.execute(text("SELECT count(*) FROM tenant")).scalar(), session.execute(text("SELECT count(*) FROM app_user")).scalar()) == before
+        assert tuple(session.execute(text(f"SELECT count(*) FROM {t}")).scalar() for t in ("tenant", "app_user", "user_role")) == before
 
-    def test_a_laboratory_without_a_recorded_creator_fails_closed_for_everyone(self, session, fresh_client, world):
-        """Every laboratory that predates the binding: nobody — not the oldest user, not a current superuser — may clean it."""
-        # a legacy row is one the trigger never saw: simulate it by pausing the trigger for this synthetic row only
-        session.execute(text("ALTER TABLE tenant DISABLE TRIGGER trg_tenant_creator_write_once"))
-        session.execute(text("UPDATE tenant SET created_by_user_id = NULL WHERE id = :t"), {"t": str(world.target.tenant.id)})
-        session.execute(text("ALTER TABLE tenant ENABLE TRIGGER trg_tenant_creator_write_once"))
-        session.commit()
-        flow = Flow(fresh_client, world.target)
-        for headers in (world.target.lab.headers, auth_headers(world.target.admin), auth_headers(world.target.reviewer)):
-            assert flow.authorization(headers=headers).json() == {"authorized": False}
-            assert flow.preview(headers=headers).status_code == 403
-        assert flow.start("x" * 20).status_code == 403
-
-    def test_the_binding_is_write_once_for_every_client(self, session, world):
-        t = str(world.target.tenant.id)
-        stranger = str(world.target.admin.id)
-        with pytest.raises(Exception, match="write-once"):
-            session.execute(text("UPDATE tenant SET created_by_user_id = :u WHERE id = :t"), {"u": stranger, "t": t})
-            session.commit()
-        session.rollback()
-        with pytest.raises(Exception, match="write-once"):
-            session.execute(text("UPDATE tenant SET created_by_user_id = NULL WHERE id = :t"), {"t": t})
-            session.commit()
-        session.rollback()
-        # setting the SAME value is a no-op; the first assignment (NULL -> user) is the only transition allowed
-        session.execute(text("UPDATE tenant SET created_by_user_id = created_by_user_id WHERE id = :t"), {"t": t})
-        session.commit()
-        assert session.execute(text("SELECT created_by_user_id::text FROM tenant WHERE id = :t"), {"t": t}).scalar() == str(world.target.operator.id)
-
-    def test_no_application_path_can_make_another_user_the_creator(self, session, fresh_client, world):
+    @pytest.mark.parametrize("actor_kind", ["admin", "superuser"])
+    def test_no_management_route_can_grant_or_remove_the_reserved_role(self, session, fresh_client, world, actor_kind):
+        from app.core.rbac import get_user_roles
+        actor = world.target.admin if actor_kind == "admin" else world.target.operator
         admin = world.target.admin
-        t = str(world.target.tenant.id)
-        create_user(session, world.target.tenant, email="admin2@x.invalid", roles=("admin",))   # so admin is not the last one
-        h = auth_headers(admin)
+        h = auth_headers(actor)
+        before = untouched(session, world)
         attempts = [
-            # tenant update (admin:manage_tenant): an unknown field is not a column
-            fresh_client.patch(f"/api/v1/tenants/{t}", headers=h, json={"created_by_user_id": str(admin.id), "name": world.target.tenant.name}),
-            # role routes, including the self-escalation the legacy model allows
             fresh_client.put(f"/api/v1/users/{admin.id}", headers=h, json={"role": "superuser"}),
-            fresh_client.put(f"/api/v1/rbac/users/{admin.id}/roles", headers=auth_headers(world.target.operator), json={"roles": ["admin", "superuser"]}),
-            # user creation and invitations carry a role code, never an identity binding
+            fresh_client.put(f"/api/v1/rbac/users/{admin.id}/roles", headers=h, json={"roles": ["admin", "superuser"]}),
             fresh_client.post("/api/v1/users/", headers=h, json={
-                "email": "nuevo@x.invalid", "password": "Nuevo!2026", "full_name": "Nuevo", "first_name": "N", "last_name": "N",
-                "role": "superuser", "created_by_user_id": str(admin.id)}),
+                "email": "nuevo@x.invalid", "password": "Nuevo!2026", "first_name": "N", "last_name": "N", "role": "superuser"}),
             fresh_client.post("/api/v1/users/invitations", headers=h, json={
-                "email": "inv@x.invalid", "full_name": "Inv", "role": "superuser", "created_by_user_id": str(admin.id)}),
+                "email": "inv@x.invalid", "full_name": "Inv", "role": "superuser"}),
+            fresh_client.put(f"/api/v1/users/{world.target.operator.id}", headers=h, json={"role": "admin"}),
+            fresh_client.put(f"/api/v1/rbac/users/{world.target.operator.id}/roles", headers=h, json={"roles": ["admin"]}),
         ]
-        assert any(r.status_code == 200 for r in attempts)   # (the legacy routes do run; they just cannot touch the binding)
+        assert [r.status_code for r in attempts] == [403] * len(attempts), [r.text for r in attempts]
         session.expire_all()
-        assert session.execute(text("SELECT created_by_user_id::text FROM tenant WHERE id = :t"), {"t": t}).scalar() == str(world.target.operator.id)
-        assert Flow(fresh_client, world.target).authorization(headers=h).json() == {"authorized": False}
-        assert Flow(fresh_client, world.target).preview(headers=h).status_code == 403
+        assert "superuser" not in get_user_roles(admin.id, session)
+        assert "superuser" in get_user_roles(world.target.operator.id, session)
+        assert untouched(session, world) == before
 
-    def test_the_creator_loses_the_capability_only_by_being_deactivated(self, session, fresh_client, world):
+    def test_a_preexisting_superuser_invitation_is_refused_at_acceptance(self, session, fresh_client, world):
+        from datetime import datetime, timedelta
+        from app.models.invitation import UserInvitation
+        invitation = UserInvitation(tenant_id=world.target.tenant.id, email="legacy-inv@x.invalid",
+            full_name="Synthetic", role_code="superuser", token="synthetic-reserved-invitation-token",
+            expires_at=datetime.utcnow()+timedelta(days=1), invited_by=world.target.operator.id)
+        session.add(invitation)
+        session.commit()
+        before = untouched(session, world)
+        r = fresh_client.post(f"/api/v1/users/invitations/{invitation.token}/accept", json={"password": "Nuevo!2026", "username": "syntheticnew"})
+        assert r.status_code == 403, r.text
+        assert untouched(session, world) == before
+
+    def test_other_roles_of_an_existing_superadministrator_remain_editable(self, session, fresh_client, world):
+        flow = Flow(fresh_client, world.target)
+        r = fresh_client.put(f"/api/v1/rbac/users/{world.target.operator.id}/roles", headers=auth_headers(world.target.operator), json={"roles": ["superuser", "admin", "viewer"]})
+        assert r.status_code == 200, r.text
+        assert flow.authorization().json() == {"authorized": True}
+
+    def test_live_role_removal_or_deactivation_removes_access(self, session, fresh_client, world):
         flow = Flow(fresh_client, world.target)
         assert flow.preview().status_code == 200
-        # roles are irrelevant in both directions: dropping every role does not remove it...
         session.execute(text("DELETE FROM user_role WHERE user_id = :u"), {"u": str(world.target.operator.id)})
         session.commit()
-        assert flow.authorization().json() == {"authorized": True}
-        # ...an inactive account does (and an inactive user cannot even authenticate)
+        assert flow.authorization().json() == {"authorized": False}
+        assert flow.preview().status_code == 403
         session.execute(text("UPDATE app_user SET is_active = false WHERE id = :u"), {"u": str(world.target.operator.id)})
         session.commit()
         assert flow.authorization().status_code == 401
@@ -151,14 +137,18 @@ class TestAuthorizationMatrix:
             out[role] = create_user(session, world.target.tenant, email=f"{role}@x.invalid", roles=(role,))
         return out
 
-    def test_only_the_creator_of_the_laboratory_passes(self, session, fresh_client, world):
+    def test_only_active_superadministrators_of_the_laboratory_pass(self, session, fresh_client, world):
         flow = Flow(fresh_client, world.target)
         assert flow.authorization().json() == {"authorized": True}
         assert flow.preview().status_code == 200
         users = self.roles(session, world)
         before = untouched(session, world)
-        for role, user in users.items():   # every other user of the laboratory, `superuser` and `admin` included
+        for role, user in users.items():
             headers = auth_headers(user)
+            if role == "superuser":
+                assert flow.authorization(headers=headers).json() == {"authorized": True}
+                assert flow.preview(headers=headers).status_code == 200
+                continue
             for response in (flow.preview(headers=headers), flow.start("x" * 20, headers=headers),
                              flow.client.get(f"{flow.base}/operations", headers=headers)):
                 assert response.status_code == 403, (role, response.text)
@@ -167,24 +157,21 @@ class TestAuthorizationMatrix:
         assert untouched(session, world) == before
 
     def test_a_tenant_admin_cannot_obtain_the_authority_by_escalating_to_superuser(self, session, fresh_client, world):
-        """The legacy user routes let an `admin` make themselves `superuser` (OD4, not fixed here). It does not matter:
-        the capability is the creator binding, not a role."""
         flow = Flow(fresh_client, world.target)
         admin = world.target.admin
-        create_user(session, world.target.tenant, email="admin2@x.invalid", roles=("admin",))  # not the last administrator
-        escalate = fresh_client.put(f"/api/v1/users/{admin.id}", headers=auth_headers(admin), json={"role": "superuser"})
-        assert escalate.status_code == 200, escalate.text
+        r = fresh_client.put(f"/api/v1/users/{admin.id}", headers=auth_headers(admin), json={"role": "superuser"})
+        assert r.status_code == 403, r.text
         assert flow.authorization(headers=auth_headers(admin)).json() == {"authorized": False}
         assert flow.preview(headers=auth_headers(admin)).status_code == 403
 
     def test_the_path_tenant_is_never_a_source_of_authority(self, session, fresh_client, world):
         target, other = world.target, world.other
         before = untouched(session, world)
-        # Each creator is the operator of their OWN laboratory...
+        # Each superadministrator is the operator of their OWN laboratory...
         assert Flow(fresh_client, target).preview().status_code == 200
         assert Flow(fresh_client, other).preview().status_code == 200
         # ...and a 404 (revealing nothing) for the other's, for every endpoint.
-        cross = Flow(fresh_client, other, headers=target.lab.headers)  # target's creator, other's path
+        cross = Flow(fresh_client, other, headers=target.lab.headers)  # target's superadministrator, other's path
         assert cross.preview().status_code == 404
         assert cross.start("x" * 20).status_code == 404
         assert cross.authorization().status_code == 404
@@ -195,7 +182,7 @@ class TestAuthorizationMatrix:
 
     def test_an_operation_id_of_another_tenant_is_not_found(self, session, fresh_client, world):
         op = Flow(fresh_client, world.target).run()
-        theirs = Flow(fresh_client, world.other)  # the other laboratory's creator, on their OWN path
+        theirs = Flow(fresh_client, world.other)  # the other laboratory's superadministrator, on their OWN path
         assert fresh_client.get(f"{theirs.base}/operations/{op['id']}", headers=theirs.headers).status_code == 404
         assert theirs.retry(op["id"]).status_code == 404
         assert theirs.cancel(op["id"]).status_code == 404
@@ -277,8 +264,8 @@ class TestConfirmation:
         flipped = body[:-2] + ("A" if body[-2] != "A" else "B") + body[-1]
         for bad in (f"{flipped}.{sig}", f"{body}.{sig[:-2]}AA", "garbage-token-value", body, "." * 12, f"{body}.{sig}x"):
             self.refused(session, world, flow.start(bad), 409, "preview_stale")
-        # the token is the creator's alone: any other user is refused before the token is even read
-        assert flow.start(token, headers=auth_headers(second)).status_code == 403
+        # A second authorized superadministrator still cannot reuse someone else's preview.
+        assert flow.start(token, headers=auth_headers(second)).status_code == 409
         # tenant bound: the other laboratory's token is useless here
         self.refused(session, world, flow.start(foreign), 409, "preview_stale")
         # expiry

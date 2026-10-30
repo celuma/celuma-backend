@@ -99,8 +99,6 @@ class TestUpgrade:
         with mdb.connect() as conn:
             for name in TABLES:
                 assert conn.execute(text(f"SELECT count(*) FROM {name}")).scalar_one() == 0, name
-            # every existing laboratory has NO recorded creator: there is no reliable provenance, so it fails closed
-            assert conn.execute(text("SELECT count(*) FROM tenant WHERE created_by_user_id IS NOT NULL")).scalar_one() == 0
             assert read(conn) == before
 
     def test_models_match_the_migrated_columns(self, mdb):
@@ -111,32 +109,16 @@ class TestUpgrade:
             model = {c.name: c.nullable for c in SQLModel.metadata.tables[name].columns}
             assert migrated == model, name
         tenant_columns = {c["name"]: c["nullable"] for c in inspector.get_columns("tenant")}
-        assert tenant_columns["created_by_user_id"] is True
+        assert "created_by_user_id" not in tenant_columns
         assert {c.name for c in SQLModel.metadata.tables["tenant"].columns} == set(tenant_columns)
         # the order table is untouched by this section: no tombstone marker exists any more
         assert "cleanup_operation_id" not in {c["name"] for c in inspector.get_columns("order")}
 
-    def test_the_creator_binding_is_write_once_and_backfillable_exactly_once(self, mdb):
-        up(HOTFIX_REVISION)
-        with mdb.begin() as conn:
-            ids = seed(conn)
-            other = insert(conn, "app_user", tenant_id=ids["tenant"])["id"]
+    def test_no_creator_column_function_or_trigger_is_added(self, mdb):
         up()
-        set_creator = text("UPDATE tenant SET created_by_user_id = :u WHERE id = :t")
-        with mdb.begin() as conn:   # the one allowed transition: NULL -> a user (registration, or the documented backfill)
-            conn.execute(set_creator, {"u": ids["user"], "t": ids["tenant"]})
-        with mdb.begin() as conn:   # idempotent re-assertion of the same value
-            conn.execute(set_creator, {"u": ids["user"], "t": ids["tenant"]})
-        for value in (other, None):
-            with pytest.raises(Exception, match="write-once"):
-                with mdb.begin() as conn:
-                    conn.execute(set_creator, {"u": value, "t": ids["tenant"]})
         with mdb.connect() as conn:
-            assert str(conn.execute(text("SELECT created_by_user_id FROM tenant WHERE id = :t"), {"t": ids["tenant"]}).scalar_one()) == str(ids["user"])
-        with pytest.raises(IntegrityError):   # a real foreign key
-            with mdb.begin() as conn:
-                fresh = insert(conn, "tenant")["id"]
-                conn.execute(text("UPDATE tenant SET created_by_user_id = gen_random_uuid() WHERE id = :t"), {"t": fresh})
+            assert conn.execute(text("SELECT to_regprocedure('public.tenant_creator_write_once()')")).scalar() is None
+            assert conn.execute(text("SELECT count(*) FROM pg_trigger WHERE tgname='trg_tenant_creator_write_once'")).scalar() == 0
 
     def test_constraints(self, mdb):
         up(HOTFIX_REVISION)
@@ -215,10 +197,10 @@ class TestRunbookSql:
         sql = next(b for b in blocks if b.lstrip().startswith("-- post-upgrade, laboratory cleanup objects"))
         up(HOTFIX_REVISION)
         with mdb.connect() as conn:  # on v1_3_1 the objects are absent
-            assert tuple(conn.execute(text(sql)).one()) == (False, False, False, False)
+            assert tuple(conn.execute(text(sql)).one()) == (False, False, False)
         up()
         with mdb.connect() as conn:
-            assert tuple(conn.execute(text(sql)).one()) == (True, True, True, True)
+            assert tuple(conn.execute(text(sql)).one()) == (True, True, True)
 
 
 # --------------------------------------------------------------------------- classification of the whole schema

@@ -93,7 +93,18 @@ def count_active_users_with_role(session: Session, tenant_id, role_code: str) ->
 # Role management helpers
 # ---------------------------------------------------------------------------
 
-def assign_role_by_code(user_id: UUID, role_code: str, session: Session) -> None:
+class ProtectedRoleAssignmentError(ValueError):
+    """The onboarding-only Superadministrator role cannot change through role management."""
+
+
+def validate_superuser_role_change(current_roles, requested_roles) -> None:
+    if (ROLE_SUPERUSER in current_roles) != (ROLE_SUPERUSER in requested_roles):
+        raise ProtectedRoleAssignmentError(
+            "The superuser role is assigned automatically at laboratory registration and cannot be changed manually"
+        )
+
+
+def assign_role_by_code(user_id: UUID, role_code: str, session: Session, *, registration: bool = False) -> None:
     """Assign a role to a user if not already assigned. Raises ValueError if role not found."""
     role = session.exec(select(Role).where(Role.code == role_code)).first()
     if not role:
@@ -106,6 +117,8 @@ def assign_role_by_code(user_id: UUID, role_code: str, session: Session) -> None
         )
     ).first()
     if not existing:
+        if role_code == ROLE_SUPERUSER and not registration:
+            raise ProtectedRoleAssignmentError("The superuser role can only be assigned at laboratory registration")
         session.add(UserRoleLink(user_id=user_id, role_id=role.id))
 
 
@@ -121,11 +134,14 @@ def remove_role_by_code(user_id: UUID, role_code: str, session: Session) -> None
         )
     ).first()
     if link:
+        if role_code == ROLE_SUPERUSER:
+            raise ProtectedRoleAssignmentError("The superuser role cannot be removed manually")
         session.delete(link)
 
 
 def replace_user_roles(user_id: UUID, role_codes: List[str], session: Session) -> None:
     """Replace all roles for a user with the given list. Validates all codes exist first."""
+    validate_superuser_role_change(get_user_roles(user_id, session), role_codes)
     # Deduplicate while preserving order to avoid duplicate-key errors on insert
     unique_codes = list(dict.fromkeys(role_codes))
 

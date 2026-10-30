@@ -12,6 +12,9 @@ from app.core.rbac import (
     user_has_full_branch_access,
     count_active_users_with_role,
     ROLE_REVIEWER,
+    ROLE_SUPERUSER,
+    ProtectedRoleAssignmentError,
+    validate_superuser_role_change,
 )
 from app.models.user import AppUser, UserBranch
 from app.models.invitation import UserInvitation
@@ -217,6 +220,8 @@ def create_user(
     # Assign role via RBAC catalog
     try:
         assign_role_by_code(new_user.id, user_data.role, session)
+    except ProtectedRoleAssignmentError as exc:
+        raise HTTPException(403, str(exc)) from exc
     except ValueError:
         raise HTTPException(400, f"Unknown role: {user_data.role}")
 
@@ -272,6 +277,12 @@ def update_user(
         raise HTTPException(404, "User not found")
     if str(target_user.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "User does not belong to your tenant")
+
+    if user_data.role is not None:
+        try:
+            validate_superuser_role_change(get_user_roles(target_user.id, session), [user_data.role])
+        except ProtectedRoleAssignmentError as exc:
+            raise HTTPException(403, str(exc)) from exc
 
     # Céluma 1.3.1 Block A / A7 — the SECOND reviewer self-escalation route.
     # `PUT /rbac/users/{id}/roles` is the obvious one, but this endpoint also
@@ -330,6 +341,8 @@ def update_user(
     if user_data.role is not None:
         try:
             replace_user_roles(target_user.id, [user_data.role], session)
+        except ProtectedRoleAssignmentError as exc:
+            raise HTTPException(403, str(exc)) from exc
         except ValueError:
             raise HTTPException(400, f"Unknown role: {user_data.role}")
 
@@ -474,6 +487,9 @@ def create_invitation(
     if not has_permission(user.id, "admin:manage_invitations", session):
         raise HTTPException(403, "Permission required: admin:manage_invitations")
 
+    if invitation_data.role == ROLE_SUPERUSER:
+        raise HTTPException(403, "The superuser role cannot be granted by invitation")
+
     # Validate role code exists in catalog
     if not session.exec(select(Role).where(Role.code == invitation_data.role)).first():
         raise HTTPException(400, f"Unknown role: {invitation_data.role}")
@@ -574,6 +590,9 @@ def accept_invitation(
     if invitation.expires_at < datetime.utcnow():
         raise HTTPException(400, "Invitation has expired")
 
+    if invitation.role_code == ROLE_SUPERUSER:
+        raise HTTPException(403, "The superuser role cannot be granted by invitation")
+
     if accept_data.username and session.exec(select(AppUser).where(
         AppUser.username == accept_data.username,
         AppUser.tenant_id == invitation.tenant_id,
@@ -597,6 +616,8 @@ def accept_invitation(
     # Assign role from invitation
     try:
         assign_role_by_code(new_user.id, invitation.role_code, session)
+    except ProtectedRoleAssignmentError as exc:
+        raise HTTPException(403, str(exc)) from exc
     except ValueError:
         raise HTTPException(400, f"Unknown role in invitation: {invitation.role_code}")
 
