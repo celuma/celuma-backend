@@ -427,13 +427,7 @@ def unified_registration(payload: RegistrationRequest, session: Session = Depend
             session.flush()
             # Assign the admin role (and superuser role) via RBAC
             assign_role_by_code(user.id, "admin", session)
-            assign_role_by_code(user.id, "superuser", session)
-            # Céluma 1.4 (#39): bind the laboratory to the person who creates it, in this same transaction. This is
-            # the persisted, write-once identity behind the laboratory-content cleanup capability; it is never
-            # taken from the request or derived from a role.
-            tenant.created_by_user_id = user.id
-            session.add(tenant)
-            session.flush()
+            assign_role_by_code(user.id, "superuser", session, registration=True)
             logger.info("Admin user created", extra={"event": "auth.register_unified.user_created", "user_id": str(user.id), "tenant_id": str(tenant.id)})
 
             # Céluma 1.3 Phase 4, Block G: wired for completeness of the

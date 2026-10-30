@@ -168,10 +168,6 @@ def build_lab(session: Session, client, stub_pdf_render, *, name: str, tenant_na
     session.commit()
     configure(session, lab)
     tenant, branch = lab.tenant, lab.branch
-    # The laboratory's creator (owner decision 2026-10-28): what `POST /auth/register/unified` records atomically.
-    tenant.created_by_user_id = lab.user.id
-    session.add(tenant)
-    session.commit()
     world = LabWorld(lab=lab)
     world.admin = create_user(session, tenant, email=f"admin@{lab_slug}.invalid", roles=("admin",))
     world.tech = create_user(session, tenant, email=f"tech@{lab_slug}.invalid", roles=("lab_tech",))

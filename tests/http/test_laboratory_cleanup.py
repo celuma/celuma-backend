@@ -360,9 +360,6 @@ class TestLegacyNumberingStaysAboveRemovedCodes:
         session.commit()
         codes_before = sorted(r[0] for r in session.execute(text('SELECT order_code FROM "order"')))
         assert codes_before == ["CU-1", "CU-2", "CU-50"]
-        lab.tenant.created_by_user_id = lab.user.id   # what registration records
-        session.add(lab.tenant)
-        session.commit()
         world = LabWorld(lab=lab)
         assert Flow(fresh_client, world).run()["status"] == "COMPLETED"
         assert session.execute(text('SELECT count(*) FROM "order"')).scalar() == 0

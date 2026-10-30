@@ -246,18 +246,10 @@ Specification: `celuma-engineering/specs/laboratory/laboratory-content-cleanup.m
 decision record: `celuma-engineering/adr/0021-laboratory-content-cleanup.md`;
 operator procedure: `celuma-engineering/runbooks/laboratory-content-cleanup.md`.
 
-ADDITIVE ONLY: three empty tables, one nullable tenant column and one trigger.
-Nothing existing is rewritten and no laboratory is cleaned.
-
-**§7a — `tenant.created_by_user_id`.** The persisted binding to the person who
-CREATED the laboratory during initial registration (owner decision, 2026-10-28):
-the only holder of the cleanup capability. Set atomically by
-`POST /auth/register/unified`. It is NULL for every existing laboratory — there
-is no reliable provenance for "who created it" in the 1.3.1 schema (the oldest
-or the current `superuser` account would be a guess), so the feature FAILS CLOSED
-for them until a controlled, explicit one-time backfill (runbook). A trigger makes
-the column WRITE-ONCE: NULL -> value is allowed (registration, or the documented
-backfill), changing or clearing a value is refused for every client, API or SQL.
+ADDITIVE ONLY: three empty tables. Existing roles already authorize an active
+Superadministrator (`superuser`) of their own laboratory; no creator binding,
+permission backfill or business-data rewrite is needed (owner clarification,
+2026-10-29). No laboratory is cleaned by this migration.
 
 **§7b — `laboratory_cleanup_operation`.** The durable state machine of one
 confirmed cleanup (status, phase, lease, approved preview counts, reason, safe
@@ -275,8 +267,7 @@ removed, consulted by numbering availability so manual/legacy codes the ledger
 never saw are never reissued.
 
 DOWNGRADE is refused while any operation row exists (they are evidence of an
-irreversible action); with none, the objects are dropped (the creator binding is
-lost with its column). A `v1_4_0` stamp does not prove §7 ran: check the objects
+irreversible action); with none, the three tables are dropped. A `v1_4_0` stamp does not prove §7 ran: check the objects
 (runbooks/migrations.md).
 """
 from typing import Sequence, Union
@@ -595,26 +586,7 @@ def upgrade() -> None:
     op.execute("CREATE INDEX ix_report_version_amendment_id ON public.report_version USING btree (amendment_id)")
     # §6c — admit the republication notification type
     _notification_type_checks(V1_3_NOTIFICATION_TYPES + (REPUBLISHED_NOTIFICATION_TYPE,))
-    # §7a-§7d — laboratory-content cleanup (#39): empty tables, one nullable column, one write-once trigger.
-    op.execute("ALTER TABLE public.tenant ADD COLUMN created_by_user_id uuid")
-    op.execute(
-        "ALTER TABLE ONLY public.tenant ADD CONSTRAINT fk_tenant_created_by_user_id_app_user "
-        "FOREIGN KEY (created_by_user_id) REFERENCES public.app_user(id) ON DELETE SET NULL"
-    )
-    op.execute("""
-        CREATE FUNCTION public.tenant_creator_write_once() RETURNS trigger LANGUAGE plpgsql AS $fn$
-        BEGIN
-            IF OLD.created_by_user_id IS NOT NULL AND NEW.created_by_user_id IS DISTINCT FROM OLD.created_by_user_id THEN
-                RAISE EXCEPTION 'tenant.created_by_user_id is write-once' USING ERRCODE = 'integrity_constraint_violation';
-            END IF;
-            RETURN NEW;
-        END
-        $fn$
-    """)
-    op.execute(
-        "CREATE TRIGGER trg_tenant_creator_write_once BEFORE UPDATE OF created_by_user_id ON public.tenant "
-        "FOR EACH ROW EXECUTE FUNCTION public.tenant_creator_write_once()"
-    )
+    # §7 — laboratory-content cleanup (#39): three empty technical tables.
     op.execute("""
         CREATE TABLE public.laboratory_cleanup_operation (
             id                       uuid NOT NULL,
@@ -735,10 +707,6 @@ def downgrade() -> None:
     op.execute("DROP TABLE public.laboratory_cleanup_retired_code")
     op.execute("DROP TABLE public.laboratory_cleanup_object")
     op.execute("DROP TABLE public.laboratory_cleanup_operation")
-    op.execute("DROP TRIGGER trg_tenant_creator_write_once ON public.tenant")
-    op.execute("DROP FUNCTION public.tenant_creator_write_once()")
-    op.execute("ALTER TABLE public.tenant DROP CONSTRAINT fk_tenant_created_by_user_id_app_user")
-    op.execute("ALTER TABLE public.tenant DROP COLUMN created_by_user_id")
     # §6
     op.execute(
         f"DELETE FROM public.notification_preference WHERE notification_type = '{REPUBLISHED_NOTIFICATION_TYPE}'"

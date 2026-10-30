@@ -106,7 +106,7 @@ def create_user(
     session.add(user)
     session.flush()
     for role_code in roles:
-        assign_role_by_code(user.id, role_code, session)
+        assign_role_by_code(user.id, role_code, session, registration=(role_code == "superuser"))
     session.commit()
     session.refresh(user)
     return user
