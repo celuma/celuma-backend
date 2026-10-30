@@ -76,10 +76,12 @@ from datetime import datetime, timedelta
 from typing import Optional, Sequence, Set
 from uuid import UUID
 
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.core.config import settings
+from app.core.maintenance_guard import tenants_in_maintenance
 from app.models.storage import StorageObject
 from app.models.tenant import Tenant
 from app.models.tenant_usage import TenantUsage
@@ -385,6 +387,20 @@ class UsageReconciliationService:
         # A dead process's abandoned row would otherwise block this tenant
         # forever, via the one-RUNNING-per-tenant index.
         recover_stale_runs(session, tenant_id=tenant_id, now=started_at)
+
+        # Céluma 1.4 (#39): a laboratory in cleanup maintenance is not reconciled (the cleanup recomputes its own
+        # usage from what remains). The check and the RUNNING row are ONE protocol: take the tenant's shared
+        # maintenance lock, read the gate, and insert-and-commit the run in the same transaction. A cleanup barrier
+        # then either waits for this run's start (and its DATABASE phase sees the RUNNING row and refuses), or comes
+        # first (and the gate is seen here). Reported through the existing "another run is active" outcome.
+        if tenants_in_maintenance(session, {tenant_id}):
+            session.rollback()
+            logger.info(
+                "Usage reconciliation refused: laboratory cleanup in progress",
+                extra={"event": "usage_reconciliation.skipped", "tenant_id": str(tenant_id),
+                       "error_code": ERROR_CONCURRENT_RECONCILIATION},
+            )
+            raise ConcurrentReconciliationError(tenant_id)
 
         run = self._start_run(session, tenant_id, started_at)
         logger.info(
@@ -717,13 +733,22 @@ class UsageReconciliationService:
         billable_objects = tuple(
             StorageBillingService.get_billable_storage_objects(session, tenant_id)
         )
+        # Céluma 1.4 (#39): objects a laboratory cleanup has queued for deletion and not yet deleted are
+        # tracked (their `storage_object` rows are already gone); they are not orphans, just pending.
+        pending_cleanup_keys = session.execute(
+            text(
+                "SELECT object_key FROM laboratory_cleanup_object "
+                "WHERE tenant_id = :t AND status NOT IN ('DELETED','ABSENT')"
+            ),
+            {"t": str(tenant_id)},
+        ).scalars().all()
         tracked_keys = frozenset(
             session.exec(
                 select(StorageObject.object_key).where(
                     StorageObject.tenant_id == tenant_id
                 )
             ).all()
-        )
+        ) | frozenset(pending_cleanup_keys)
         logo_errors, legacy_unresolved = self._check_logo_integrity(session, tenant_id)
 
         session.commit()

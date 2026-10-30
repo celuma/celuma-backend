@@ -3740,5 +3740,22 @@ Contract: `celuma-engineering/specs/laboratory/order-sample-management.md`. Allo
 
 Order responses add `requesting_physicians[]` and `expediente`; `requesting_physician` is set only when exactly one physician is listed. Creation bodies accept `requesting_physician_ids[]` and `expediente` (the old `requesting_physician_id` remains a one-element alias).
 
+## Laboratory-content cleanup (Céluma 1.4, #39)
+
+Contract: `celuma-engineering/specs/laboratory/laboratory-content-cleanup.md`, ADR 0021. Authority is *not* a role and needs no deployment setting: it belongs to the **person who created the laboratory at its initial registration** (`tenant.created_by_user_id`, written atomically by `POST /auth/register/unified`, write-once in the database). Every route requires that the path tenant is the caller's own tenant (another tenant: 404) and that the caller is that creator and still active (otherwise 403 `laboratory_cleanup_not_authorized`). A laboratory with no recorded creator (created before the binding existed) fails closed for everyone until the documented, explicit one-time backfill. No role, custom role, invitation, user or tenant-update API can set or change the binding. Base path: `/api/v1/maintenance/tenants/{tenant_id}/laboratory-cleanup`.
+
+The cleanup has **no options**: it always deletes the scoped orders, samples, images, reports and *all* their invoices, items and payments, **and the historical audit rows of those records** (nothing is redacted or retained as a placeholder). It never touches the SaaS plan/subscription, master prices or any other master data, and keeps the numbering counters, the issued/retired-code ledger and the idempotency receipts. A request that still sends the obsolete `include_finance` (either value) is rejected with 422 `include_finance_not_supported`; unknown body fields are rejected.
+
+| Route | Notes |
+|---|---|
+| `GET /authorization` | `{authorized}` for the caller (UI convenience only) |
+| `POST /preview` | `{}`; read-only counts (including `delete.audit_rows`, `delete.invoices|invoice_items|payments`), objects, blockers, warnings, `scope_revision`, 15-minute signed `preview_token` (null while blockers exist) |
+| `POST /operations` | `{preview_token, reason (10–1000), confirm_name, password}` → 202 operation; the actor's own current password (throttled like signing); stale/tampered/expired token 409 `preview_stale`; a duplicate submission replays the same operation (`Idempotent-Replayed: true`) |
+| `GET /operations`, `GET /operations/{id}` | status, phase, safe counts, objects summary (`pending`, `deleted`, `absent`, `kept`, `failed`), `can_retry`/`can_cancel`, `writers_blocked` |
+| `POST /operations/{id}/retry` | resume a `FAILED` or lease-expired operation (409 `operation_in_progress` while a worker holds the lease) |
+| `POST /operations/{id}/cancel` | only before the database phase committed (409 `cancel_not_allowed` afterwards); atomic with the database phase and fenced against a superseded worker |
+
+While an operation holds the gate, ordinary writes of that laboratory answer `423 laboratory_cleanup_in_progress`; reads and other laboratories are unaffected. Notification delivery claims and usage reconciliation for that laboratory stand down under the same protocol. A write that would reference an object already scheduled for deletion answers 409 `asset_scheduled_for_deletion`.
+
 ### GET /api/v1/report-letterheads/legacy/export
 **Retired (Céluma 1.4, #22).** Returns **410** `{"detail": {"code": "legacy_letterhead_export_retired", ...}}` after authentication and the `reports:manage_templates` check. V2 letterhead export (`GET /report-letterheads/{letterhead_id}/versions/{version_id}/export`) and `POST /report-letterheads/import` are unchanged.

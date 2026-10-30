@@ -20,6 +20,11 @@ from .study_type import StudyType
 from .sample_type import SampleType
 from .numbering import NumberingConfig, NumberingCounter, NumberingAllocation, IdempotencyReceipt
 from .order_management import OrderRequestingPhysician, SampleCodeCorrection
+from .laboratory_cleanup import (
+    LaboratoryCleanupOperation,
+    LaboratoryCleanupObject,
+    LaboratoryCleanupRetiredCode,
+)
 from .price_catalog import PriceCatalog
 from .billing import Invoice, Payment, InvoiceItem
 from .audit import AuditLog
@@ -83,6 +88,9 @@ __all__ = [
     "Label",
     "OrderLabel",
     "SampleLabel",
+    "LaboratoryCleanupOperation",
+    "LaboratoryCleanupObject",
+    "LaboratoryCleanupRetiredCode",
     "Report",
     "ReportVersion",
     "ReportTemplate",

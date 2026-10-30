@@ -217,6 +217,9 @@ def _patch_s3(monkeypatch):
     # S3Service import — the same pattern as `report_presentation` above.
     # Tests DO reach this line on every successful sign-and-publish.
     monkeypatch.setattr("app.services.report_metadata.S3Service", FakeS3Service)
+    # Céluma 1.4 (#39): the laboratory-cleanup executor deletes its recorded outbox objects through its own
+    # S3Service import. Never the real bucket in a test.
+    monkeypatch.setattr("app.services.laboratory_cleanup.S3Service", FakeS3Service)
 
 
 # ---------------------------------------------------------------------------
