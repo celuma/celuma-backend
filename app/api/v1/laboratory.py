@@ -1923,9 +1923,13 @@ def list_sample_images(
 
     s3 = S3Service()
 
-    # Fetch images and renditions with simple selects
+    # Fetch images and renditions with simple selects. The sample gallery and
+    # the report image picker show this order as-is, so it must not depend on
+    # the heap: oldest upload first, image id as the tie-break.
     images = session.exec(
-        select(SampleImage).where(SampleImage.sample_id == sample.id)
+        select(SampleImage)
+        .where(SampleImage.sample_id == sample.id)
+        .order_by(SampleImage.created_at, SampleImage.id)
     ).all()
 
     results = []
