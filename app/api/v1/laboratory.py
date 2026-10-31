@@ -47,6 +47,7 @@ from app.services.list_pagination import (
     uuid_filter,
 )
 from app.services import idempotency, numbering, order_lifecycle, order_management, report_amendments, report_reviewers
+from app.services import order_report_template
 from app.services.usage import UsageService
 from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from datetime import datetime
@@ -55,6 +56,8 @@ from app.schemas.laboratory import (
     OrderResponse,
     OrderDetailResponse,
     OrderNotesUpdate,
+    OrderReportTemplateSelection,
+    ReportTemplateRef,
     CommentCreate,
     CommentResponse,
     CommentsListResponse,
@@ -426,6 +429,11 @@ def create_order(
         raise HTTPException(404, "Study type not found")
     if str(study_type.tenant_id) != str(order_data.tenant_id):
         raise HTTPException(403, "Study type does not belong to this tenant")
+    # Céluma 1.4.1: an explicit report template is optional; when sent it must be this tenant's and active.
+    explicit_template = (
+        order_report_template.require_selectable(session, ctx.tenant_id, order_data.report_template_id)
+        if order_data.report_template_id else None
+    )
 
     # Céluma 1.4 (#8, automatic registration): the order code is ALWAYS generated here; it is never
     # typed (see celuma-engineering/specs/laboratory/monthly-numbering.md).
@@ -446,7 +454,8 @@ def create_order(
         expediente=order_data.expediente,
         notes=order_data.notes,
         created_by=order_data.created_by,
-        study_type_id=order_data.study_type_id
+        study_type_id=order_data.study_type_id,
+        report_template_id=explicit_template.id if explicit_template else None,
     )
 
     session.add(order)
@@ -472,6 +481,27 @@ def create_order(
                       resources=[{"kind": "order", "id": str(order.id)}])
     session.commit()
     return response
+
+def _template_ref(template) -> Optional[ReportTemplateRef]:
+    if template is None:
+        return None
+    return ReportTemplateRef(id=str(template.id), name=template.name, is_active=bool(template.is_active))
+
+
+def template_selection(session: Session, order: Order) -> OrderReportTemplateSelection:
+    """The order's report-template selection as every order detail shows it (Céluma 1.4.1)."""
+    resolution = order_report_template.resolve(session, order)
+    return OrderReportTemplateSelection(
+        report_template_id=str(order.report_template_id) if order.report_template_id else None,
+        status=resolution.status,
+        source=resolution.source,
+        template=_template_ref(resolution.template),
+        candidates=[_template_ref(t) for t in resolution.candidates],
+        default_status=resolution.default_status,
+        default_source=resolution.default_source,
+        default_template=_template_ref(resolution.default_template),
+    )
+
 
 def _order_detail_response(session: Session, order: Order, tenant_id: str) -> OrderDetailResponse:
     """The order detail representation (shared by the read endpoint and the edit endpoints)."""
@@ -506,6 +536,8 @@ def _order_detail_response(session: Session, order: Order, tenant_id: str) -> Or
         report_id=str(order.report_id) if order.report_id else None,
         invoice_id=str(order.invoice_id) if order.invoice_id else None,
         study_type_id=str(order.study_type_id) if order.study_type_id else None,
+        report_template_id=str(order.report_template_id) if order.report_template_id else None,
+        report_template=template_selection(session, order),
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
@@ -1453,6 +1485,13 @@ def create_order_with_samples(
     sample_types = require_active_sample_types(
         session, ctx.tenant_id, [s.sample_type_id for s in payload.samples]
     )
+    # Céluma 1.4.1: the study type's template is an optional default, never a prerequisite. An EXPLICIT choice
+    # is stored only when the user made one (the form does not send its suggestion), so a later catalog fix
+    # still reaches orders that merely followed a default. Validated before anything is written.
+    explicit_template = (
+        order_report_template.require_selectable(session, ctx.tenant_id, payload.report_template_id)
+        if payload.report_template_id else None
+    )
 
     # Céluma 1.4 (#8, automatic registration): the order code and EVERY sample code are generated,
     # allocated in one deterministic order (order first, then sample counters by type id), so
@@ -1488,6 +1527,7 @@ def create_order_with_samples(
         notes=payload.notes,
         created_by=payload.created_by,
         study_type_id=payload.study_type_id,
+        report_template_id=explicit_template.id if explicit_template else None,
     )
     session.add(order)
     session.flush()  # get order.id for samples
@@ -2118,6 +2158,8 @@ def build_order_full_detail(
         report_id=str(order.report_id) if order.report_id else None,
         invoice_id=str(order.invoice_id) if order.invoice_id else None,
         study_type_id=str(order.study_type_id) if order.study_type_id else None,
+        report_template_id=str(order.report_template_id) if order.report_template_id else None,
+        report_template=template_selection(session, order),
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
@@ -2872,6 +2914,8 @@ def update_order_assignees(
         report_id=str(order.report_id) if order.report_id else None,
         invoice_id=str(order.invoice_id) if order.invoice_id else None,
         study_type_id=str(order.study_type_id) if order.study_type_id else None,
+        report_template_id=str(order.report_template_id) if order.report_template_id else None,
+        report_template=template_selection(session, order),
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
@@ -3011,6 +3055,8 @@ def update_order_reviewers(
         report_id=str(order.report_id) if order.report_id else None,
         invoice_id=str(order.invoice_id) if order.invoice_id else None,
         study_type_id=str(order.study_type_id) if order.study_type_id else None,
+        report_template_id=str(order.report_template_id) if order.report_template_id else None,
+        report_template=template_selection(session, order),
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],
@@ -3128,6 +3174,8 @@ def update_order_labels(
         report_id=str(order.report_id) if order.report_id else None,
         invoice_id=str(order.invoice_id) if order.invoice_id else None,
         study_type_id=str(order.study_type_id) if order.study_type_id else None,
+        report_template_id=str(order.report_template_id) if order.report_template_id else None,
+        report_template=template_selection(session, order),
         assignees=[UserRef(id=str(u.id), name=u.full_name, email=u.email, avatar_url=u.avatar_url) for u in assignee_users],
         reviewers=reviewers_with_status,
         labels=[LabelResponse(id=str(l.id), name=l.name, color=l.color, tenant_id=str(l.tenant_id), created_at=l.created_at) for l in labels],

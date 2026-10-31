@@ -14,20 +14,21 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
 from app.api.v1.auth import AuthContext, current_user, get_auth_ctx
-from app.api.v1.laboratory import _order_detail_response
+from app.api.v1.laboratory import _order_detail_response, _template_ref
 from app.core.db import get_session
 from app.core.rbac import has_permission
 from app.models.enums import EventType
 from app.models.events import OrderEvent
 from app.models.laboratory import Order, Sample
 from app.models.patient import Patient
-from app.models.report import Report
+from app.models.report import Report, ReportTemplate
 from app.models.user import AppUser
 from app.schemas.laboratory import OrderDetailResponse
 from app.schemas.order_management import (
     ActionState,
     BlockerOut,
     OrderManagementState,
+    OrderReportDefaultsResponse,
     OrderUpdate,
     RemovalRequest,
     RemovalResponse,
@@ -38,6 +39,7 @@ from app.schemas.order_management import (
     SampleManagementState,
 )
 from app.services import capture_removal, order_lifecycle, order_management, sample_code_correction, sample_dates
+from app.services import order_report_template, report_defaults
 from app.services import numbering
 from app.services.numbering import MANUAL_CODE_PERMISSION
 from app.services.sample_types import record_audit
@@ -45,6 +47,7 @@ from app.services.sample_types import record_audit
 router = APIRouter(prefix="/laboratory")
 
 REMOVE_PERMISSION = "lab:remove_capture"
+REPORT_TEMPLATE_LOCKED = "report_template_locked"
 
 
 def _require(user_id, code: str, session: Session) -> None:
@@ -86,16 +89,37 @@ def get_order_management_state(
     order = _own_order(session, order_id, ctx.tenant_id)
     eligibility = order_lifecycle.evaluate(session, order)
     removal_blockers = list(eligibility.blockers) + capture_removal.invoice_blockers(session, order)
+    template_blockers = list(eligibility.blockers) + _template_blockers(session, order)
     samples = session.exec(select(Sample.id).where(Sample.order_id == order.id)).all()
+    can_edit = has_permission(user.id, "lab:update_order", session)
     return OrderManagementState(
         order_id=str(order.id), order_code=order.order_code, status=getattr(order.status, "value", str(order.status)),
-        edit=ActionState(permitted=has_permission(user.id, "lab:update_order", session),
-                         allowed=eligibility.allowed, blockers=_blockers(eligibility.blockers)),
+        edit=ActionState(permitted=can_edit, allowed=eligibility.allowed, blockers=_blockers(eligibility.blockers)),
         removal=ActionState(permitted=has_permission(user.id, REMOVE_PERMISSION, session),
                             allowed=not removal_blockers, blockers=_blockers(removal_blockers)),
+        report_template=ActionState(permitted=can_edit, allowed=not template_blockers,
+                                    blockers=_blockers(template_blockers)),
         sample_count=len(samples), has_report=bool(eligibility.report_ids),
         removal_consequences=_order_removal_consequences(len(samples), len(eligibility.report_ids)),
     )
+
+
+def _existing_report_id(session: Session, order: Order):
+    return session.exec(select(Report.id).where(Report.order_id == order.id)).first()
+
+
+def _template_blockers(session: Session, order: Order) -> list:
+    """Céluma 1.4.1: once a report exists its template is frozen in its own snapshot (and an order has at most
+    one report), so the order's choice can no longer change what it uses; changing it is refused instead of
+    leaving the order saying one template and its report another."""
+    report_id = _existing_report_id(session, order)
+    if report_id is None:
+        return []
+    return [order_lifecycle.Blocker(
+        code=REPORT_TEMPLATE_LOCKED,
+        message="La orden ya tiene un reporte; su plantilla quedó fijada al crearlo y no cambia con la orden.",
+        report_id=str(report_id),
+    )]
 
 
 def _order_removal_consequences(samples: int, reports: int) -> List[str]:
@@ -146,6 +170,51 @@ def get_sample_management_state(
     )
 
 
+@router.get("/orders/{order_id}/report-defaults", response_model=OrderReportDefaultsResponse)
+def get_order_report_defaults(
+    order_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Everything the report editor needs to bootstrap a NEW report of this order, in one read (requires
+    lab:read). Céluma 1.4.1: the clinical template is the order's effective one — the persisted explicit
+    choice, else the unambiguous sample-type default, else the study-type default — and the letterhead is
+    resolved for it exactly as `create_report` will. A read: nothing is written, nothing is reserved, and
+    `create_report` re-checks the choice under the order lock. Never raises for an unconfigured order;
+    `v2_blocked_reason` says what is missing."""
+    _require(user.id, "lab:read", session)
+    order = _own_order(session, order_id, ctx.tenant_id)
+    resolution = order_report_template.resolve(session, order)
+    usable = resolution.usable
+    letterhead = report_defaults.resolve_letterhead_defaults(session, ctx.tenant_id, usable)
+
+    blocked_reason = None
+    blocked_detail = None
+    if letterhead.misconfigured:
+        blocked_reason, blocked_detail = "LETTERHEAD_MISCONFIGURED", letterhead.misconfigured_detail
+    elif resolution.status == order_report_template.AMBIGUOUS:
+        blocked_reason = "TEMPLATE_AMBIGUOUS"
+    elif resolution.status == order_report_template.INACTIVE:
+        blocked_reason = "TEMPLATE_INACTIVE"
+    elif usable is None:
+        blocked_reason = "NO_TEMPLATE"
+    elif not letterhead.resolved:
+        blocked_reason = "NO_LETTERHEAD"
+
+    return OrderReportDefaultsResponse(
+        template_id=str(usable.id) if usable else None,
+        template_name=resolution.template.name if resolution.template else None,
+        template_source=resolution.source,
+        template_status=resolution.status,
+        template_candidates=[_template_ref(t) for t in resolution.candidates],
+        active_template_version_id=report_defaults.active_template_version_id(session, usable),
+        **letterhead.response_fields(),
+        v2_blocked_reason=blocked_reason,
+        v2_blocked_detail=blocked_detail,
+    )
+
+
 # --------------------------------------------------------------------------- #9 / #16 order edit
 
 
@@ -159,9 +228,13 @@ def update_order(
 ):
     """Controlled basic order edit (requires lab:update_order).
 
-    Allowlist: `patient_id`, `requesting_physician_ids`, `expediente`, `notes`. Allowed only from Reception through
-    Diagnosis and while no related report has review/approval/signing/publication evidence; checked
-    under the order lock, so a concurrent submission cannot bypass it. An unchanged request writes nothing.
+    Allowlist: `patient_id`, `requesting_physician_ids`, `expediente`, `notes`, `report_template_id`. Allowed only
+    from Reception through Diagnosis and while no related report has review/approval/signing/publication evidence;
+    checked under the order lock, so a concurrent submission cannot bypass it. An unchanged request writes nothing.
+
+    `report_template_id` (Céluma 1.4.1): a template of this tenant, active, becomes the explicit choice; `null`
+    clears it (reset to the catalog defaults). A change is refused once the order has a report (409
+    `report_template_locked`): report creation takes the same order lock, so the two cannot interleave.
     """
     _require(user.id, "lab:update_order", session)
     _own_order(session, order_id, ctx.tenant_id)
@@ -169,6 +242,7 @@ def update_order(
 
     changes_old: dict = {}
     changes_new: dict = {}
+    template_names: dict = {}
     fields = data.model_fields_set
 
     if "patient_id" in fields and data.patient_id != (str(order.patient_id) if order.patient_id else None):
@@ -201,6 +275,23 @@ def update_order(
     if "notes" in fields and data.notes != order.notes:
         changes_old["notes"], changes_new["notes"] = order.notes, data.notes
         order.notes = data.notes
+    current_template = str(order.report_template_id) if order.report_template_id else None
+    if "report_template_id" in fields and data.report_template_id != current_template:
+        report_id = _existing_report_id(session, order)
+        if report_id is not None:
+            raise order_management.ManagementError(
+                409, REPORT_TEMPLATE_LOCKED,
+                "La orden ya tiene un reporte; su plantilla quedó fijada al crearlo y no cambia con la orden.",
+            )
+        template = (order_report_template.require_selectable(session, order.tenant_id, data.report_template_id)
+                    if data.report_template_id else None)
+        new_template = str(template.id) if template else None
+        if new_template != current_template:
+            changes_old["report_template_id"], changes_new["report_template_id"] = current_template, new_template
+            previous = session.get(ReportTemplate, order.report_template_id) if order.report_template_id else None
+            # Names as they were at the time, for the timeline; ids stay the authoritative values.
+            template_names = {"old": previous.name if previous else None, "new": template.name if template else None}
+            order.report_template_id = template.id if template else None
 
     if changes_new:
         session.add(order)
@@ -208,13 +299,16 @@ def update_order(
             tenant_id=order.tenant_id, branch_id=order.branch_id, order_id=order.id, sample_id=None,
             event_type=EventType.ORDER_UPDATED, description="",
             event_metadata={"order_id": str(order.id), "order_code": order.order_code,
-                            "changed_fields": sorted(changes_new), "old": changes_old, "new": changes_new},
+                            "changed_fields": sorted(changes_new), "old": changes_old, "new": changes_new,
+                            **({"report_template_names": template_names} if template_names else {})},
             created_by=user.id,
         ))
         record_audit(
             session, tenant_id=order.tenant_id, user_id=user.id, action="ORDER.UPDATED", entity_type="order",
             entity_id=order.id, description="Order basic fields updated",
-            old_values=changes_old, new_values=changes_new, metadata={"order_code": order.order_code},
+            old_values=changes_old, new_values=changes_new,
+            metadata={"order_code": order.order_code,
+                      **({"report_template_names": template_names} if template_names else {})},
         )
     session.commit()
     session.refresh(order)

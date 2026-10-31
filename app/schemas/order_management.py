@@ -7,10 +7,12 @@ from pydantic import BaseModel, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 from app.schemas.iso_input import require_iso_date_input
+from app.schemas.laboratory import ReportTemplateRef
+from app.schemas.study_type import StudyTypeReportDefaultsResponse
 from app.services import order_management
 
 #: The explicit allowlist of `PATCH /laboratory/orders/{id}`. Everything else is refused by name.
-ORDER_EDITABLE_FIELDS = ("patient_id", "requesting_physician_ids", "expediente", "notes")
+ORDER_EDITABLE_FIELDS = ("patient_id", "requesting_physician_ids", "expediente", "notes", "report_template_id")
 
 #: Fields that exist on an order but are NOT editable through this endpoint (each needs its own
 #: decision: identity, numbering, billing, assignment or report effects).
@@ -24,11 +26,16 @@ _NOT_EDITABLE = (
 class OrderUpdate(BaseModel):
     """Controlled basic order edit. Only the fields present in the request change; a field sent as
     `null` clears it (`patient_id`, `expediente`, `notes`); `requesting_physician_ids` replaces the whole set.
-    An order keeps at least a patient or a requesting physician."""
+    An order keeps at least a patient or a requesting physician.
+
+    `report_template_id` (Céluma 1.4.1): omitted = unchanged; a template id = the explicit choice; `null` (or
+    blank) = clear the explicit choice and RESET to the catalog defaults (sample type, then study type), which
+    is not the same as omitting the key."""
     patient_id: Optional[str] = None
     requesting_physician_ids: Optional[List[str]] = None
     expediente: Optional[str] = None
     notes: Optional[str] = None
+    report_template_id: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -65,6 +72,11 @@ class OrderUpdate(BaseModel):
     @classmethod
     def _expediente(cls, v):
         return order_management.normalize_expediente(v)
+
+    @field_validator("report_template_id")
+    @classmethod
+    def _report_template(cls, v):
+        return (v or "").strip() or None
 
     @model_validator(mode="after")
     def _something(self):
@@ -107,6 +119,9 @@ class OrderManagementState(BaseModel):
     editable_fields: List[str] = list(ORDER_EDITABLE_FIELDS)
     sample_count: int
     has_report: bool
+    #: Céluma 1.4.1: changing the report template — the edit window plus "no report exists yet" (a report
+    #: freezes its template at creation, so a later choice could never reach it). Absent on older APIs.
+    report_template: Optional[ActionState] = None
     #: Plain-language consequences of removal, for the confirmation dialog.
     removal_consequences: List[str] = []
 
@@ -173,3 +188,23 @@ class RemovalResponse(BaseModel):
     samples_removed: int = 0
     reports_hidden: int = 0
     invoice_retained: bool = False
+
+
+class OrderReportDefaultsResponse(StudyTypeReportDefaultsResponse):
+    """Céluma 1.4.1: the editor bootstrap of a NEW report of an order (`GET /laboratory/orders/{id}/report-defaults`).
+
+    Same shape as the study-type bootstrap, so the editor reads one contract, but the clinical template is the
+    ORDER's effective one (`app/services/order_report_template.py`): explicit choice > unambiguous sample-type
+    default > study-type default. The letterhead is resolved for that template with the unchanged precedence.
+    `template_id` is set only when the template is usable; the structure and its `template_hash` are read
+    afterwards from `GET /reports/templates/{id}` and echoed on creation.
+
+    `v2_blocked_reason` adds two values to the study-type set: `TEMPLATE_AMBIGUOUS` (the samples suggest
+    different templates and nobody chose one; `template_candidates` lists them) and `TEMPLATE_INACTIVE` (the
+    explicit choice was deactivated). Neither falls back to another template."""
+    template_name: Optional[str] = None
+    #: "ORDER" | "SAMPLE_TYPE" | "STUDY_TYPE" | null
+    template_source: Optional[str] = None
+    #: "RESOLVED" | "AMBIGUOUS" | "INACTIVE" | "NONE"
+    template_status: str
+    template_candidates: List[ReportTemplateRef] = []

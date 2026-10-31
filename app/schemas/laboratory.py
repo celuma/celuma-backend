@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, ClassVar, Tuple
 from datetime import datetime
 from app.schemas.iso_input import require_iso_date_input
 from app.schemas.report import ReportMetaResponse, ReportDetailResponse
@@ -48,13 +48,25 @@ def _reject_typed_codes(data):
 
 
 class _OrderRequestFields(BaseModel):
-    """Requesting physicians and expediente shared by both order-creation payloads (#16)."""
+    """Requesting physicians, expediente and the report template shared by both order-creation payloads."""
+    #: Fields added after a release: left out of the idempotency fingerprint while they are null, so a
+    #: retry of a request built by an older client keeps the fingerprint it had (`idempotency.fingerprint`).
+    IDEMPOTENCY_OMIT_WHEN_NONE: ClassVar[Tuple[str, ...]] = ("report_template_id",)
+
     #: Deprecated single-physician alias of `requesting_physician_ids`.
     requesting_physician_id: Optional[str] = None
     #: External requesting physicians, no primary; display order only.
     requesting_physician_ids: Optional[List[str]] = None
     #: Optional textual request reference; leading zeroes are preserved.
     expediente: Optional[str] = None
+    #: Céluma 1.4.1: the clinical report template the user EXPLICITLY chose. Omitted/null/blank = no explicit
+    #: choice (the catalog defaults apply: sample type, then study type). Same tenant and active, or 404/409.
+    report_template_id: Optional[str] = None
+
+    @field_validator("report_template_id")
+    @classmethod
+    def _report_template(cls, v):
+        return (v or "").strip() or None
 
     @field_validator("requesting_physician_ids")
     @classmethod
@@ -139,6 +151,33 @@ class OrderResponse(BaseModel):
     branch_id: str
 
 
+class ReportTemplateRef(BaseModel):
+    """Lightweight clinical-template reference (no structure: that is read at authoring time)."""
+    id: str
+    name: str
+    is_active: bool = True
+
+
+class OrderReportTemplateSelection(BaseModel):
+    """Céluma 1.4.1: which clinical template a NEW report of the order starts from, and why.
+
+    Resolved by `app/services/order_report_template.py` (explicit choice > unambiguous sample-type default >
+    study-type default). Never describes an existing report: that one keeps its frozen snapshot."""
+    #: The stored explicit choice; null = none (the defaults below apply).
+    report_template_id: Optional[str] = None
+    #: "RESOLVED" | "AMBIGUOUS" (samples disagree, nobody chose) | "INACTIVE" (explicit choice deactivated) | "NONE"
+    status: str
+    #: "ORDER" | "SAMPLE_TYPE" | "STUDY_TYPE" | null
+    source: Optional[str] = None
+    template: Optional[ReportTemplateRef] = None
+    #: The distinct sample-type suggestions when they disagree (display order: name, then id).
+    candidates: List[ReportTemplateRef] = []
+    #: What the catalog alone resolves to: what clearing the explicit choice restores.
+    default_status: str
+    default_source: Optional[str] = None
+    default_template: Optional[ReportTemplateRef] = None
+
+
 class OrderDetailResponse(BaseModel):
     """Schema for detailed order response"""
     id: str
@@ -160,6 +199,9 @@ class OrderDetailResponse(BaseModel):
     report_id: Optional[str] = None
     invoice_id: Optional[str] = None
     study_type_id: Optional[str] = None
+    #: Céluma 1.4.1: the stored explicit template choice (null = follow the catalog defaults).
+    report_template_id: Optional[str] = None
+    report_template: Optional[OrderReportTemplateSelection] = None
     assignees: Optional[List[UserRef]] = None
     reviewers: Optional[List[ReviewerWithStatus]] = None
     labels: Optional[List[LabelResponse]] = None

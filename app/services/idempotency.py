@@ -69,8 +69,16 @@ def validate_key(raw: Optional[str]) -> str:
 
 def fingerprint(payload: BaseModel) -> str:
     """SHA-256 of the canonical request (sorted keys, no whitespace, every field including
-    defaults). Only the hash is stored: the request itself never is."""
-    canonical = json.dumps(payload.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    defaults). Only the hash is stored: the request itself never is.
+
+    A schema may list fields added after a release in `IDEMPOTENCY_OMIT_WHEN_NONE`: while such a field is
+    null it is left out, so the same request from an older client (which never sends it) keeps the
+    fingerprint its receipt was stored with, across the deploy."""
+    data = payload.model_dump(mode="json")
+    for name in getattr(type(payload), "IDEMPOTENCY_OMIT_WHEN_NONE", ()):
+        if data.get(name) is None:
+            data.pop(name, None)
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

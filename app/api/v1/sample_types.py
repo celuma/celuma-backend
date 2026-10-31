@@ -241,7 +241,9 @@ def update_sample_type(
         )).first():
             raise HTTPException(400, f"Sample type with code '{data.code}' already exists")
         row.code = data.code
-    if data.default_report_template_id is not None:
+    # Céluma 1.4.1: the template drives the report defaults of the type's orders, so it must be clearable from
+    # the UI. Same semantics as `description`: omitted = unchanged; an explicit null or blank clears it.
+    if "default_report_template_id" in data.model_fields_set:
         if data.default_report_template_id:
             _owned_template(session, ctx, data.default_report_template_id)
         row.default_report_template_id = data.default_report_template_id or None
