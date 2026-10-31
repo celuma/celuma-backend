@@ -20,6 +20,7 @@ from app.core.rbac import has_permission
 from app.models.enums import EventType
 from app.models.events import OrderEvent
 from app.models.laboratory import Order, Sample
+from app.models.patient import Patient
 from app.models.report import Report
 from app.models.user import AppUser
 from app.schemas.laboratory import OrderDetailResponse
@@ -32,9 +33,12 @@ from app.schemas.order_management import (
     RemovalResponse,
     SampleCodeCorrectionRequest,
     SampleCodeCorrectionResponse,
+    SampleDatesRequest,
+    SampleDatesResponse,
     SampleManagementState,
 )
-from app.services import capture_removal, order_lifecycle, order_management, sample_code_correction
+from app.services import capture_removal, order_lifecycle, order_management, sample_code_correction, sample_dates
+from app.services import numbering
 from app.services.numbering import MANUAL_CODE_PERMISSION
 from app.services.sample_types import record_audit
 
@@ -127,6 +131,11 @@ def get_sample_management_state(
             permitted=has_permission(user.id, "lab:update_sample", session)
             and has_permission(user.id, MANUAL_CODE_PERMISSION, session),
             allowed=eligibility.allowed, blockers=_blockers(eligibility.blockers)),
+        dates=ActionState(
+            permitted=has_permission(user.id, "lab:update_sample", session),
+            allowed=eligibility.allowed, blockers=_blockers(eligibility.blockers)),
+        code_follows_receipt_month=sample_dates.code_follows_receipt_month(
+            session, sample, numbering.get_settings(session, sample.tenant_id, numbering.SAMPLE)),
         removal=ActionState(permitted=has_permission(user.id, REMOVE_PERMISSION, session),
                             allowed=not removal_blockers, blockers=_blockers(removal_blockers)),
         removal_consequences=[
@@ -150,7 +159,7 @@ def update_order(
 ):
     """Controlled basic order edit (requires lab:update_order).
 
-    Allowlist: `requesting_physician_ids`, `expediente`, `notes`. Allowed only from Reception through
+    Allowlist: `patient_id`, `requesting_physician_ids`, `expediente`, `notes`. Allowed only from Reception through
     Diagnosis and while no related report has review/approval/signing/publication evidence; checked
     under the order lock, so a concurrent submission cannot bypass it. An unchanged request writes nothing.
     """
@@ -162,6 +171,18 @@ def update_order(
     changes_new: dict = {}
     fields = data.model_fields_set
 
+    if "patient_id" in fields and data.patient_id != (str(order.patient_id) if order.patient_id else None):
+        # A capture error (the order was registered on the wrong patient). Allowed in the same window as every
+        # direct edit: no report has review/signing/publication evidence, so nothing issued names the old patient.
+        # Draft reports, the samples and the invoice follow the order; the patient portal lists it under the new one.
+        patient = None
+        if data.patient_id is not None:
+            patient = session.get(Patient, data.patient_id)
+            if patient is None or str(patient.tenant_id) != str(order.tenant_id):
+                raise HTTPException(404, "Patient not found")
+        changes_old["patient_id"] = str(order.patient_id) if order.patient_id else None
+        changes_new["patient_id"] = data.patient_id
+        order.patient_id = patient.id if patient else None
     if "requesting_physician_ids" in fields:
         previous = order_management.order_physicians(session, order)
         physicians = order_management.load_physicians(
@@ -172,6 +193,8 @@ def update_order(
             changes_old["requesting_physician_ids"] = [str(p.id) for p in previous]
             changes_new["requesting_physician_ids"] = [str(p.id) for p in physicians]
             order_management.set_order_physicians(session, order, physicians)
+    if "patient_id" in changes_new and not order.patient_id and not order_management.order_physicians(session, order):
+        raise HTTPException(400, "An order without a patient needs at least one requesting physician")
     if "expediente" in fields and data.expediente != order.expediente:
         changes_old["expediente"], changes_new["expediente"] = order.expediente, data.expediente
         order.expediente = data.expediente
@@ -221,6 +244,30 @@ def correct_sample_code(
     return SampleCodeCorrectionResponse(
         sample_id=str(result.sample.id), old_code=result.old_code, sample_code=result.sample.sample_code,
         unchanged=result.unchanged,
+    )
+
+
+@router.patch("/samples/{sample_id}/dates", response_model=SampleDatesResponse)
+def update_sample_dates(
+    sample_id: str,
+    data: SampleDatesRequest,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Correct a sample's receipt and/or collection date after registration (requires lab:update_sample).
+    Same lifecycle window and evidence guard as every direct edit; the receipt date may only move inside
+    its numbering month freely; into another month a monthly-generated code is regenerated in that month (the
+    old code is retired, never reused). Audited with the reason."""
+    _require(user.id, "lab:update_sample", session)
+    result = sample_dates.update_sample_dates(
+        session, sample_id=sample_id, tenant_id=ctx.tenant_id, user=user, fields=set(data.model_fields_set),
+        received_at=data.received_at, collected_at=data.collected_at, reason=data.reason,
+    )
+    return SampleDatesResponse(
+        sample_id=str(result.sample.id), sample_code=result.sample.sample_code, old_code=result.old_code,
+        received_at=result.sample.received_at,
+        collected_at=result.sample.collected_at, unchanged=result.unchanged,
     )
 
 

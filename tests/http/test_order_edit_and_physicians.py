@@ -152,7 +152,7 @@ class TestEdit:
         assert event["changed_fields"] == ["expediente", "requesting_physician_ids"]
 
     @pytest.mark.parametrize("field,value", [
-        ("patient_id", "00000000-0000-0000-0000-000000000001"), ("study_type_id", "x"), ("branch_id", "x"),
+        ("study_type_id", "x"), ("branch_id", "x"),
         ("order_code", "CU-99"), ("status", "CLOSED"), ("requested_by", "Dr. Otro"), ("billed_lock", False),
         ("tenant_id", "x"), ("anything_else", 1),
     ])
@@ -273,7 +273,7 @@ class TestLifecycleGuard:
         reg = register(client, lab)
         state = client.get(f"{LAB}/orders/{reg['order_id']}/management", headers=lab.headers).json()
         assert state["edit"] == {"permitted": True, "allowed": True, "blockers": []}
-        assert state["editable_fields"] == ["requesting_physician_ids", "expediente", "notes"]
+        assert state["editable_fields"] == ["patient_id", "requesting_physician_ids", "expediente", "notes"]
         set_status(session, reg["order_id"], OrderStatus.REVIEW)
         state = client.get(f"{LAB}/orders/{reg['order_id']}/management", headers=lab.headers).json()
         assert state["edit"]["allowed"] is False and state["edit"]["blockers"][0]["code"] == "order_phase"
