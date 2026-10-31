@@ -173,8 +173,11 @@ class TestAdministration:
         assert create(client, lab, code="X", default_report_template_id=str(theirs.id)).status_code == 403
         assert create(client, lab, code="Y", default_report_template_id=str(uuid.uuid4())).status_code == 404
 
-    def test_a_sample_type_template_never_drives_report_defaults(self, client, session, lab):
-        """Study-driven report defaults are untouched: the mirrored column has no effect."""
+    def test_a_sample_type_template_drives_the_order_report_defaults(self, client, session, lab):
+        """Céluma 1.4.1 supersedes the 1.4.0 rule pinned by `test_a_sample_type_template_never_drives_report_defaults`
+        ("the mirrored column has no effect"): the order's bootstrap now prefers the sample type's template over
+        the study type's (owner decision, 2026-10-31). The study-type endpoint itself is unchanged and still
+        answers with the study type's template, for older clients."""
         study_tpl = ReportTemplate(tenant_id=lab.tenant.id, name="De estudio")
         sample_tpl = ReportTemplate(tenant_id=lab.tenant.id, name="De muestra")
         session.add_all([study_tpl, sample_tpl])
@@ -185,8 +188,10 @@ class TestAdministration:
         st = create(client, lab, default_report_template_id=str(sample_tpl.id)).json()
         order = lab.order()
         assert client.post(SAMPLES, json=lab.sample_payload(order, st["id"]), headers=lab.headers).status_code == 200
-        defaults = client.get(f"/api/v1/study-types/{lab.study_type.id}/report-defaults", headers=lab.headers).json()
-        assert defaults["template_id"] == str(study_tpl.id)
+        by_order = client.get(f"/api/v1/laboratory/orders/{order.id}/report-defaults", headers=lab.headers).json()
+        assert (by_order["template_id"], by_order["template_source"]) == (str(sample_tpl.id), "SAMPLE_TYPE")
+        by_study = client.get(f"/api/v1/study-types/{lab.study_type.id}/report-defaults", headers=lab.headers).json()
+        assert by_study["template_id"] == str(study_tpl.id)
 
 
 class TestPermissionsAndIsolation:

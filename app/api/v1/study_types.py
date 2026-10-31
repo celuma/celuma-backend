@@ -6,7 +6,6 @@ from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.core.rbac import has_permission
 from app.models.study_type import StudyType
 from app.models.report import ReportTemplate
-from app.models.report_template_version import ReportTemplateVersion, ReportTemplateVersionStatus
 from app.models.report_letterhead import ReportLetterhead
 from app.models.report_letterhead_version import (
     ReportLetterheadVersion,
@@ -14,11 +13,6 @@ from app.models.report_letterhead_version import (
 )
 from app.models.tenant import Tenant
 from app.models.user import AppUser
-from app.services.letterhead_resolution import (
-    LetterheadResolutionError,
-    resolve_effective_letterhead_version,
-)
-from app.services.letterhead_resources import resolve_letterhead_resources
 from app.schemas.study_type import (
     StudyTypeCreate,
     StudyTypeUpdate,
@@ -28,7 +22,7 @@ from app.schemas.study_type import (
     StudyTypeReportDefaultsResponse,
     TemplateRef,
 )
-from app.services import catalog_transfer
+from app.services import catalog_transfer, report_defaults
 from app.services.sample_types import record_audit
 import logging
 
@@ -247,15 +241,17 @@ def update_study_type(
         
         study_type.code = study_type_data.code.upper()
     
-    # Validate default_report_template_id if provided
-    if study_type_data.default_report_template_id is not None:
+    # Validate default_report_template_id if provided. Céluma 1.4.1: the study type's template is an optional
+    # default, so it must be clearable: omitted = unchanged; an explicit null or blank clears it (before, null was
+    # ignored and a blank reached the UUID column and failed). Same semantics as the sample-type link.
+    if "default_report_template_id" in study_type_data.model_fields_set:
         if study_type_data.default_report_template_id:
             template = session.get(ReportTemplate, study_type_data.default_report_template_id)
             if not template:
                 raise HTTPException(404, "Report template not found")
             if str(template.tenant_id) != ctx.tenant_id:
                 raise HTTPException(403, "Report template does not belong to your tenant")
-        study_type.default_report_template_id = study_type_data.default_report_template_id
+        study_type.default_report_template_id = study_type_data.default_report_template_id or None
     
     # Update fields if provided
     if study_type_data.name is not None:
@@ -374,36 +370,20 @@ def get_study_type_report_defaults(
         raise HTTPException(404, "Study type not found")
 
     template_id = study_type.default_report_template_id
-    active_template_version_id = None
-    owning_template = None
-    if template_id is not None:
-        owning_template = session.get(ReportTemplate, template_id)
-        if owning_template is not None:
-            active_version = session.exec(
-                select(ReportTemplateVersion).where(
-                    ReportTemplateVersion.report_template_id == template_id,
-                    ReportTemplateVersion.status == ReportTemplateVersionStatus.ACTIVE,
-                )
-            ).first()
-            if active_version is not None:
-                active_template_version_id = active_version.id
+    owning_template = session.get(ReportTemplate, template_id) if template_id is not None else None
+    # Shared with the order bootstrap (Céluma 1.4.1): the same `resolve_effective_letterhead_version` as
+    # `create_report`, so the editor's preview and the frozen report cannot diverge.
+    letterhead = report_defaults.resolve_letterhead_defaults(session, ctx.tenant_id, owning_template)
 
-    resolved = None
     blocked_reason = None
     blocked_detail = None
-    try:
-        resolved = resolve_effective_letterhead_version(
-            session, ctx.tenant_id, template=owning_template
-        )
-    except LetterheadResolutionError as exc:
+    if letterhead.misconfigured:
         blocked_reason = "LETTERHEAD_MISCONFIGURED"
-        blocked_detail = exc.message
-
-    if blocked_reason is None:
-        if template_id is None:
-            blocked_reason = "NO_TEMPLATE"
-        elif resolved is None:
-            blocked_reason = "NO_LETTERHEAD"
+        blocked_detail = letterhead.misconfigured_detail
+    elif template_id is None:
+        blocked_reason = "NO_TEMPLATE"
+    elif not letterhead.resolved:
+        blocked_reason = "NO_LETTERHEAD"
     # Céluma 1.3.1 Block C (CEL-131-05): `NO_ACTIVE_TEMPLATE_VERSION` used to
     # sit between these two and was the production regression. A V2 report
     # needs a clinical template and a resolvable letterhead, and nothing else
@@ -418,27 +398,10 @@ def get_study_type_report_defaults(
     # provenance information for the template-administration screens. It is
     # NOT a precondition and the report editor must not treat it as one.
 
-    resolved_resources = None
-    if resolved is not None:
-        resolved_resources = resolve_letterhead_resources(
-            resolved.version.configuration, ctx.tenant_id, session
-        )
-
     return StudyTypeReportDefaultsResponse(
         template_id=str(template_id) if template_id else None,
-        active_template_version_id=(
-            str(active_template_version_id) if active_template_version_id else None
-        ),
-        letterhead_version_id=(resolved.letterhead_version_id if resolved else None),
-        letterhead_name=(resolved.letterhead.name if resolved else None),
-        letterhead_id=(resolved.letterhead_id if resolved else None),
-        letterhead_resolution_source=(resolved.source.value if resolved else None),
-        letterhead_presentation=(
-            resolved.presentation.model_dump(mode="json") if resolved else None
-        ),
-        letterhead_resolved_resources=(
-            resolved_resources.model_dump() if resolved_resources else None
-        ),
+        active_template_version_id=report_defaults.active_template_version_id(session, owning_template),
+        **letterhead.response_fields(),
         v2_blocked_reason=blocked_reason,
         v2_blocked_detail=blocked_detail,
     )

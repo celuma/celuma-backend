@@ -41,6 +41,10 @@ class Order(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=True):
     removed_at: Optional[datetime] = Field(default=None)
     removed_by: Optional[UUID] = Field(foreign_key="app_user.id", default=None)
     removal_reason: Optional[str] = Field(default=None)
+    # Céluma 1.4.1 (`v1_4_1`): the clinical report template the user EXPLICITLY chose for this order.
+    # NULL = no explicit choice; the catalog defaults apply (sample type, then study type). Read only through
+    # app/services/order_report_template.py, which owns the precedence. Never a letterhead.
+    report_template_id: Optional[UUID] = Field(foreign_key="report_template.id", default=None)
     # Basic relationships only
     samples: List["Sample"] = Relationship(back_populates="order")
     # No Order.report relationship: use order.report_id + session.get(Report, order.report_id)

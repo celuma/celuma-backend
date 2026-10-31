@@ -155,10 +155,23 @@ RELEASE_1_4_REVISION = "v1_4_0"
 #: The only file that may define RELEASE_1_4_REVISION.
 RELEASE_1_4_MIGRATION_FILENAME = "v1_4_0_list_search_indexes.py"
 
+#: Céluma 1.4.0 SHIPPED (tag `v1.4.0`, backend c3d928314b505ca195f3b09294ec90cb51478bd5), so `v1_4_0` is
+#: frozen like `v1_3_0`/`v1_3_1`: the git blob id of the published file. Editing it in any way fails
+#: `test_the_released_1_4_migration_file_is_byte_identical_to_the_tag`; a later change needs a new revision.
+RELEASE_1_4_MIGRATION_BLOB = "8066b97e059a0f036990fa3e989e0f72e4dd7453"
+
+#: The Céluma 1.4.1 hotfix revision (the order's explicit report template), and the current head. Same
+#: move as `v1_3_1` on top of `v1_3_0`: a shipped release needs schema, its revision is frozen, so the
+#: hotfix gets its own linear revision.
+HOTFIX_1_4_1_REVISION = "v1_4_1"
+
+#: The only file that may define HOTFIX_1_4_1_REVISION.
+HOTFIX_1_4_1_MIGRATION_FILENAME = "v1_4_1_order_report_template.py"
+
 #: What `alembic upgrade head` lands on. Assertions that mean "the chain is
 #: fully applied" use this; assertions specifically about the 1.3 release
 #: migration's own behaviour keep using RELEASE_REVISION.
-HEAD_REVISION = RELEASE_1_4_REVISION
+HEAD_REVISION = HOTFIX_1_4_1_REVISION
 
 #: Revision ids that existed only on the unreleased `celuma-1.3` branch and
 #: were folded into RELEASE_REVISION. Nothing executable may reference them.
@@ -356,6 +369,7 @@ class TestChainShape:
         script = _script_directory()
         revisions = list(script.walk_revisions())
         assert [r.revision for r in revisions] == [
+            HOTFIX_1_4_1_REVISION,
             RELEASE_1_4_REVISION,
             HOTFIX_REVISION,
             RELEASE_REVISION,
@@ -394,15 +408,26 @@ class TestChainShape:
         ]
         assert children == [RELEASE_1_4_REVISION]
 
-    def test_the_1_4_release_revision_has_no_children(self):
-        """The freeze contract now applies at the new head: a later 1.4 area
-        extends `v1_4_0` until 1.4 ships; anything appended after it is a
-        release decision."""
+    def test_the_only_child_of_the_1_4_release_is_the_1_4_1_hotfix(self):
+        """1.4 shipped and `v1_4_0` froze; the order-template hotfix needed a
+        column, and the deliberate decision was a new revision on top
+        (`v1_4_1`), not an edit. Anything else appended to `v1_4_0` still fails."""
         script = _script_directory()
         children = [
             revision.revision
             for revision in script.walk_revisions()
             if revision.down_revision == RELEASE_1_4_REVISION
+        ]
+        assert children == [HOTFIX_1_4_1_REVISION]
+
+    def test_the_1_4_1_hotfix_revision_has_no_children(self):
+        """The freeze contract at the new head: anything appended after
+        `v1_4_1` is a release decision."""
+        script = _script_directory()
+        children = [
+            revision.revision
+            for revision in script.walk_revisions()
+            if revision.down_revision == HOTFIX_1_4_1_REVISION
         ]
         assert children == []
 
@@ -470,14 +495,52 @@ class TestTheReusedV140Identifier:
 
     def test_only_the_release_migration_references_v1_4_0_in_code(self):
         """The superseded-reference guard, kept for this id with one
-        allowed definition site. Tests may name it through the constant."""
+        allowed definition site. Tests may name it through the constant.
+        The 1.4.1 hotfix may name it exactly once: as its `down_revision`."""
+        # As `_executable_source` renders it (ast.unparse quotes with repr).
+        parent_line = f"down_revision: Union[str, Sequence[str], None] = {RELEASE_1_4_REVISION!r}"
         offenders = []
         for path in list((BACKEND_ROOT / "app").rglob("*.py")) + list(
             (BACKEND_ROOT / "tests").rglob("*.py")
         ) + list(VERSIONS_DIR.rglob("*.py")):
             if path == pathlib.Path(__file__) or path.name == RELEASE_1_4_MIGRATION_FILENAME:
                 continue
-            if RELEASE_1_4_REVISION in _executable_source(path):
+            source = _executable_source(path)
+            if path.name == HOTFIX_1_4_1_MIGRATION_FILENAME:
+                assert source.count(parent_line) == 1
+                source = source.replace(parent_line, "")
+            if RELEASE_1_4_REVISION in source:
+                offenders.append(str(path.relative_to(BACKEND_ROOT)))
+        assert offenders == []
+
+    def test_the_released_1_4_migration_file_is_byte_identical_to_the_tag(self):
+        """`v1_4_0` is a published release migration (tag `v1.4.0`): it is
+        never edited. Compared as the git blob id, so any byte change fails."""
+        import hashlib
+
+        content = (VERSIONS_DIR / RELEASE_1_4_MIGRATION_FILENAME).read_bytes()
+        blob = hashlib.sha1(b"blob %d\0" % len(content) + content).hexdigest()
+        assert blob == RELEASE_1_4_MIGRATION_BLOB
+
+
+class TestThe141HotfixRevision:
+    """`v1_4_1` is the Céluma 1.4.1 hotfix revision, defined once, on `v1_4_0`."""
+
+    def test_exactly_one_file_defines_the_1_4_1_hotfix_revision(self):
+        files = sorted(p.name for p in VERSIONS_DIR.glob(f"{HOTFIX_1_4_1_REVISION}_*.py"))
+        assert files == [HOTFIX_1_4_1_MIGRATION_FILENAME]
+        revision = _script_directory().get_revision(HOTFIX_1_4_1_REVISION)
+        assert pathlib.Path(revision.path).name == HOTFIX_1_4_1_MIGRATION_FILENAME
+        assert revision.down_revision == RELEASE_1_4_REVISION
+
+    def test_only_the_hotfix_migration_references_v1_4_1_in_code(self):
+        offenders = []
+        for path in list((BACKEND_ROOT / "app").rglob("*.py")) + list(
+            (BACKEND_ROOT / "tests").rglob("*.py")
+        ) + list(VERSIONS_DIR.rglob("*.py")):
+            if path == pathlib.Path(__file__) or path.name == HOTFIX_1_4_1_MIGRATION_FILENAME:
+                continue
+            if HOTFIX_1_4_1_REVISION in _executable_source(path):
                 offenders.append(str(path.relative_to(BACKEND_ROOT)))
         assert offenders == []
 

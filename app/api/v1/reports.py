@@ -43,7 +43,7 @@ from app.core.rbac import has_permission
 from app.models.assignment import Assignment
 from app.models.report_review import ReportReview
 from app.services.s3 import S3Service
-from app.services import order_lifecycle
+from app.services import order_lifecycle, order_report_template
 from app.services.managed_tenant_image_service import (
     ManagedTenantImageService,
     InvalidImageError,
@@ -57,6 +57,7 @@ from app.services.report_pdf_generation import (
     load_locked_version,
 )
 from app.models.study_type import StudyType
+from app.models.sample_type import SampleType
 from app.services.report_filename import build_report_pdf_filename
 from app.services.letterhead_resolution import (
     LetterheadArchivedError,
@@ -751,6 +752,12 @@ def create_report(
                 "con una estructura distinta a la que usaste.",
             )
         clinical_structure = owning_template.template_json
+
+    # Céluma 1.4.1: the ORDER decides which clinical template a new report starts from (explicit choice >
+    # unambiguous sample-type default > study-type default). Checked here, under the order lock taken above
+    # and before every durable effect, for both selectors; a mismatch is a 409 like the hash conflict.
+    # Existing reports never come through here: their snapshot is frozen and never re-resolved.
+    order_report_template.ensure_new_report_template(session, order, owning_template)
 
     if report_data.report is None:
         raise HTTPException(
@@ -1763,6 +1770,23 @@ def delete_template(
                 409,
                 "Cannot permanently delete a template with published versions. "
                 "Archive its versions or deactivate the template instead.",
+            )
+        # Céluma 1.4.1: orders (explicit choice), sample types and study types reference templates through
+        # foreign keys without ON DELETE; answer a clear 409 instead of letting the FK fail as a 500. Removed
+        # orders still hold their row, so the check sees them too.
+        referenced = (
+            session.exec(
+                select(Order.id).where(Order.report_template_id == template.id)
+                .execution_options(include_removed=True).limit(1)
+            ).first()
+            or session.exec(select(SampleType.id).where(SampleType.default_report_template_id == template.id).limit(1)).first()
+            or session.exec(select(StudyType.id).where(StudyType.default_report_template_id == template.id).limit(1)).first()
+        )
+        if referenced:
+            raise HTTPException(
+                409,
+                "Cannot permanently delete a template that orders, sample types or study types reference. "
+                "Deactivate the template instead.",
             )
         # Permanently delete the template
         session.delete(template)

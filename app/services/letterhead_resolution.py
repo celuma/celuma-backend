@@ -12,7 +12,9 @@ comes out".
 
 `resolve_effective_letterhead_version` is now the ONLY source of truth;
 it is used by report creation, `GET /study-types/{id}/report-defaults`,
-template auto-versioning, and any future flow. It always returns where
+`GET /laboratory/orders/{id}/report-defaults` (Céluma 1.4.1, through
+`app/services/report_defaults.py`), template auto-versioning, and any future
+flow. It always returns where
 the letterhead came from (`resolution_source`), which makes the result
 diagnosable and assertable in tests.
 

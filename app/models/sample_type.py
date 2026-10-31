@@ -14,10 +14,12 @@ class SampleType(BaseModel, TimestampMixin, TenantMixin, table=True):
     code namespace per tenant. It replaces the retired `SampleType` enum as
     the source of a sample's type.
 
-    `default_report_template_id` mirrors the study-type column for parity and
-    import/copy fidelity only. Report-default resolution reads the *study
-    type* of the order and never this column
-    (`celuma-engineering/specs/laboratory/sample-types.md`).
+    `default_report_template_id` (Céluma 1.4.1): the report template this type
+    suggests. A new report of an order uses it when the order has no explicit
+    choice and its samples agree on one template; it outranks the study type's
+    (`app/services/order_report_template.py`,
+    `celuma-engineering/specs/laboratory/order-report-template.md`). Until
+    1.4.1 the column was mirrored for parity only and had no effect.
     """
     __tablename__ = "sample_type"
     __table_args__ = (
