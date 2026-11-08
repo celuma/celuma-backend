@@ -309,6 +309,15 @@ def resolve_objects(session: Session, tenant_id: str) -> ObjectInventory:
         UNION ALL
         SELECT v.id::text, v.html_storage_id::text, 'report_html' FROM report_version v WHERE v.id IN ({VER}) AND v.html_storage_id IS NOT NULL
         UNION ALL
+        -- The description-title backfill retains the original JSON under a
+        -- separate, non-billable storage row tied to its version in the audit.
+        SELECT v.id::text, o.id::text, 'report_json_backup'
+        FROM report_version v JOIN report r ON r.id = v.report_id
+        JOIN audit_log a ON a.entity_id = v.id AND a.tenant_id = r.tenant_id
+          AND a.action = 'REPORT_VERSION.BACKFILL_DESCRIPTION_LABELS'
+        JOIN storage_object o ON o.id::text = a.old_values ->> 'backup_storage_id' AND o.tenant_id = r.tenant_id
+        WHERE v.id IN ({VER})
+        UNION ALL
         -- Historical official-PDF attempts of a scoped report: retained (and billable) `storage_object` rows that
         -- no version points at any more. Owned by the report through the key the generator writes
         -- (`reports/<tenant>/<report>/...`), matched per SCOPED report id and only for the tenant's own rows.

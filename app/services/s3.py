@@ -33,6 +33,7 @@ class S3HeadInfo:
     size_bytes: Optional[int]
     etag: Optional[str]
     content_type: Optional[str]
+    version_id: Optional[str] = None
 
 
 class S3Service:
@@ -198,6 +199,7 @@ class S3Service:
             ),
             etag=etag.strip('"') if isinstance(etag, str) else None,
             content_type=response.get("ContentType"),
+            version_id=response.get("VersionId"),
         )
 
     def iter_object_keys(self, prefix: str) -> Iterator[str]:

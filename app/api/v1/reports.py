@@ -79,6 +79,10 @@ from app.services.notification_integrations import (
 )
 from app.services.report_template_autoversion import snapshot_and_activate_template_version
 from app.services.report_template_hash import hash_clinical_template_block
+from app.services.report_section_titles import (
+    rename_description_labels,
+    rename_report_description_labels,
+)
 from app.services.list_pagination import (
     MAX_PAGE_SIZE,
     enum_filter,
@@ -807,7 +811,7 @@ def create_report(
     try:
         validated_snapshot = ReportRenderingSnapshotV2(
             schema_version=2,
-            template=clinical_structure,
+            template=rename_description_labels(clinical_structure),
             presentation=resolved_letterhead.presentation,
         )
     except PydanticValidationError as exc:
@@ -849,7 +853,10 @@ def create_report(
         branch_id=report_data.branch_id,
         order_id=report_data.order_id,
         title=report_data.title,
-        template=report_data.template,
+        template=(
+            rename_description_labels(report_data.template)
+            if report_data.template is not None else None
+        ),
         created_by=report_data.created_by,
         published_at=report_data.published_at
     )
@@ -906,7 +913,7 @@ def create_report(
 
     # If a JSON report body is provided, upload to S3 and create initial version (v1)
     if report_data.report is not None:
-        body = dict(report_data.report)
+        body = dict(rename_description_labels(report_data.report))
         # Céluma 1.4 (#13): an original is never an amended document; only the
         # amendment routes write the identification block.
         body.pop(report_amendments.AMENDMENT_KEY, None)
@@ -1117,7 +1124,7 @@ def _carry_forward_v2_metadata(
     if frozen_snapshot is None:
         return report_body, *carried_metadata
 
-    carried_body = dict(report_body)
+    carried_body = dict(rename_description_labels(report_body))
     carried_body["schema_version"] = 2
     carried_body["rendering_snapshot"] = frozen_snapshot
     return carried_body, *carried_metadata
@@ -1602,7 +1609,7 @@ def create_template(
         tenant_id=ctx.tenant_id,
         name=template_data.name,
         description=template_data.description,
-        template_json=template_data.template_json,
+        template_json=rename_description_labels(template_data.template_json),
         created_by=user.id,
         is_active=True,
     )
@@ -1658,7 +1665,7 @@ def update_template(
     if template_data.description is not None:
         template.description = template_data.description
     if template_data.template_json is not None:
-        template.template_json = template_data.template_json
+        template.template_json = rename_description_labels(template_data.template_json)
         flag_modified(template, "template_json")
     if template_data.is_active is not None:
         template.is_active = template_data.is_active
@@ -3806,7 +3813,7 @@ def open_report_amendment(
 
     # D1: a complete re-emission. The new signer's image and the delivery
     # date are set again at signing, never inherited from the original.
-    body = copy.deepcopy(source_body)
+    body = rename_report_description_labels(copy.deepcopy(source_body))
     body.pop(report_amendments.AMENDMENT_KEY, None)
     signature_metadata = body.get(SIGNATURE_METADATA_KEY)
     if isinstance(signature_metadata, dict):
