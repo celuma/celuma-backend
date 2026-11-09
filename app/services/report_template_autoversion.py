@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 def snapshot_and_activate_template_version(
-    session: Session, template: ReportTemplate, actor_id: Optional[UUID]
+    session: Session, template: ReportTemplate, actor_id: Optional[UUID], *, commit: bool = True
 ) -> Optional[ReportTemplateVersion]:
     """Create and activate a `ReportTemplateVersion` reflecting the current
     `template_json`, if it changed relative to the current ACTIVE version.
@@ -103,7 +103,7 @@ def snapshot_and_activate_template_version(
             presentation=resolved.presentation,
         )
     except PydanticValidationError:
-        logger.exception(
+        logger.warning(
             "Skipping template auto-version: resolved letterhead configuration "
             "failed re-validation",
             extra={
@@ -139,16 +139,17 @@ def snapshot_and_activate_template_version(
         activated_at=datetime.utcnow(),
     )
     session.add(new_version)
-    session.commit()
-    session.refresh(new_version)
+    if commit:
+        session.commit()
+        session.refresh(new_version)
 
-    logger.info(
-        "Template auto-versioned and activated",
-        extra={
-            "event": "report_template_version.autoversioned",
-            "template_id": str(template.id),
-            "version_id": str(new_version.id),
-            "version_number": new_version.version_number,
-        },
-    )
+        logger.info(
+            "Template auto-versioned and activated",
+            extra={
+                "event": "report_template_version.autoversioned",
+                "template_id": str(template.id),
+                "version_id": str(new_version.id),
+                "version_number": new_version.version_number,
+            },
+        )
     return new_version

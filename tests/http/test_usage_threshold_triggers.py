@@ -159,10 +159,8 @@ class TestStorageTriggerCoverage:
     def test_every_wrapper_call_site_is_accounted_for(self):
         """The inventory itself, as a number.
 
-        Sixteen production storage flows, matching
-        `usage-threshold-trigger-matrix.md` §Storage. If this count changes,
-        the matrix needs a row added or removed — which is the point of
-        asserting it.
+        Seventeen production storage flows. Keep the documented inventory
+        aligned when a call site is added or removed.
 
         Céluma 1.3.1 Block A added the fourteenth:
         `app/services/report_presentation.py`, the narrow reviewer
@@ -182,6 +180,11 @@ class TestStorageTriggerCoverage:
         JSON body of an amendment's first draft version — a NEW report JSON
         object (full size), like `create_report_new_version`. The signed source
         version's objects are never rewritten, so nothing is subtracted.
+
+        The report description title backfill (#57) adds the seventeenth in
+        `app/services/report_section_titles_backfill.py`. It records the size
+        delta of the active report JSON and retains the original as a
+        non-billable recovery copy.
         """
         call_sites = []
         for relative, path in self._production_modules():
@@ -195,7 +198,7 @@ class TestStorageTriggerCoverage:
                     and node.func.id == "record_storage_delta_with_thresholds"
                 ):
                     call_sites.append(f"{relative}:{node.lineno}")
-        assert len(call_sites) == 16, sorted(call_sites)
+        assert len(call_sites) == 17, sorted(call_sites)
         assert {site.split(":")[0] for site in call_sites} == {
             "app/api/v1/laboratory.py",
             "app/api/v1/report_letterheads.py",
@@ -206,6 +209,7 @@ class TestStorageTriggerCoverage:
             "app/services/report_pdf_generation.py",
             "app/services/report_presentation.py",
             "app/services/report_publishing.py",
+            "app/services/report_section_titles_backfill.py",
         }
 
 

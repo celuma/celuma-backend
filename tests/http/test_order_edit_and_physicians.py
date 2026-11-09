@@ -273,7 +273,9 @@ class TestLifecycleGuard:
         reg = register(client, lab)
         state = client.get(f"{LAB}/orders/{reg['order_id']}/management", headers=lab.headers).json()
         assert state["edit"] == {"permitted": True, "allowed": True, "blockers": []}
-        assert state["editable_fields"] == ["patient_id", "requesting_physician_ids", "expediente", "notes"]
+        assert state["editable_fields"] == [
+            "patient_id", "requesting_physician_ids", "expediente", "notes", "report_template_id",
+        ]
         set_status(session, reg["order_id"], OrderStatus.REVIEW)
         state = client.get(f"{LAB}/orders/{reg['order_id']}/management", headers=lab.headers).json()
         assert state["edit"]["allowed"] is False and state["edit"]["blockers"][0]["code"] == "order_phase"
