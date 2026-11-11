@@ -62,7 +62,7 @@ class Lab:
 
     def unified(self, sample_codes=("BX",), study_type=None, received=None, **extra) -> dict:
         """A unified registration payload. `sample_codes` are the sample TYPE codes of the samples (the
-        codes themselves are always generated; registration accepts none). `received` is one receipt date
+        codes are generated unless a row carries a typed `sample_code`, hotfix 1.4.3). `received` is one receipt date
         for every sample, or a list with one per sample (default: `RECEIVED`)."""
         dates = received if isinstance(received, (list, tuple)) else [received or RECEIVED] * len(sample_codes)
         samples = [

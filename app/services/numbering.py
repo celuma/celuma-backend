@@ -7,7 +7,10 @@ Everything that renders, allocates, previews or validates a generated code
 lives here, so the creation routes (standalone and unified) cannot drift.
 
 Registration is AUTOMATIC (issue #9 follow-up, 2026-10-16): no creation route accepts a typed
-order or sample code. An inactive kind uses the compatibility allocator (`<base code>-<n>`, a
+order code. Hotfix 1.4.3: a SAMPLE row may carry an optional hand-typed code (privileged capability
+`lab:enter_manual_code`); it consumes no number, writes no ledger row and follows the manual-reuse
+policy of the sample-code correction. Rows without one are still generated, and the form can ask
+for a read-only suggestion (`suggest_sample_codes`) that reserves nothing. An inactive kind uses the compatibility allocator (`<base code>-<n>`, a
 race-safe counter plus the permanent ledger) for samples as it always did for orders; an active kind
 uses the configured monthly format. The old manual-code policy no longer affects registration. The
 narrow post-registration sample-code correction lives in `app/services/sample_code_correction.py`.
@@ -56,6 +59,8 @@ SCHEME_LEGACY = "legacy"
 NIL_BRANCH = UUID("00000000-0000-0000-0000-000000000000")
 #: Capability required to type a code while numbering is active (tenant policy AND this).
 MANUAL_CODE_PERMISSION = "lab:enter_manual_code"
+#: Shape of a hand-typed sample code (registration and correction): 1-100 of `A-Za-z0-9._-`.
+MANUAL_CODE_RE = re.compile(r"[A-Za-z0-9._-]{1,100}")
 START_VALUE_LIMITS = (1, 99_999_999)
 
 #: October 2026, base `CU`, sequence 1 -> `CU011026` (no separators).
@@ -545,7 +550,7 @@ def request_period(settings: NumberingSettings, request: AllocationRequest, inst
 
 def _allocate_one(
     session: Session, *, tenant_id, request: AllocationRequest, instant: datetime,
-    settings: NumberingSettings, actor_id,
+    settings: NumberingSettings, actor_id, reserved: frozenset = frozenset(),
 ) -> Allocation:
     legacy = settings.scheme == SCHEME_LEGACY
     branch = counter_branch(settings, request)
@@ -574,7 +579,7 @@ def _allocate_one(
                 settings.format, settings.sequence_min_width, request.base_code, value, period.year, period.month,
                 max_len, request.branch_code,
             )
-        if lock_code(session, tenant_id, request.kind, code, wait=False) and not is_occupied(
+        if code not in reserved and lock_code(session, tenant_id, request.kind, code, wait=False) and not is_occupied(
             session, tenant_id, request.kind, code
         ):
             ledger_id = session.execute(
@@ -596,8 +601,12 @@ def _allocate_one(
 def allocate_batch(
     session: Session, *, tenant_id, requests: Sequence[AllocationRequest], instant: datetime,
     settings_by_kind: Dict[str, NumberingSettings], actor_id=None,
+    reserved_sample_codes: Iterable[str] = (),
 ) -> Dict[object, Allocation]:
     """Allocate every requested code in one deterministic order.
+
+    `reserved_sample_codes`: sample codes typed by hand in the SAME request (hotfix 1.4.3). They are
+    not issued here and consume no number, but a generated sample code never equals one of them.
 
     Counter rows are locked ordered by `(kind, scope_id, branch, period_year, period_month)` (orders
     before samples), keeping the request order inside a counter, so concurrent unified requests take
@@ -616,13 +625,31 @@ def allocate_batch(
         str(counter_branch(settings_by_kind[item[1].kind], item[1])),
         periods[item[0]].year, periods[item[0]].month, item[0],
     ))
+    reserved = frozenset(reserved_sample_codes)
     results: Dict[object, Allocation] = {}
     for _, req in indexed:
+        extra = {"reserved": reserved} if reserved and req.kind == SAMPLE else {}
         results[req.key] = _allocate_one(
             session, tenant_id=tenant_id, request=req, instant=instant,
-            settings=settings_by_kind[req.kind], actor_id=actor_id,
+            settings=settings_by_kind[req.kind], actor_id=actor_id, **extra,
         )
     return results
+
+
+def claim_manual_sample_codes(session: Session, tenant_id, codes: Iterable[str]) -> List[str]:
+    """Take the (waiting) code locks of the sample codes typed in one request, in sorted order.
+
+    Hotfix 1.4.3: a registration may carry hand-typed sample codes. The locks make a concurrent
+    generator SKIP those candidates while this request is in flight (generation only tries a lock),
+    exactly like the post-registration correction. They are taken BEFORE any counter or order lock,
+    in sorted order, so two requests can never wait on each other in a cycle. Typed codes consume no
+    number and write no ledger row; the occupied-code policy of AUTOMATIC numbering is untouched.
+    Returns the distinct codes, sorted.
+    """
+    distinct = sorted(set(codes))
+    for code in distinct:
+        lock_code(session, tenant_id, SAMPLE, code, wait=True)
+    return distinct
 
 
 def attach_entity(session: Session, allocation: Allocation, entity_id) -> None:
@@ -692,6 +719,91 @@ def estimate_next(
             return Estimate(value, code, skipped)
         skipped += 1
     return Estimate(value, render(value), skipped)
+
+
+@dataclass
+class SuggestionRequest:
+    """One sample row of a registration form asking what code it would get."""
+    key: object
+    scope_id: UUID
+    base_code: str
+    received_at: Optional[datetime] = None
+
+
+@dataclass
+class Suggestion:
+    key: object
+    code: Optional[str] = None
+    #: Why there is no code yet: a stable machine reason (`receipt_date_required`, ...).
+    reason: Optional[str] = None
+    period: Optional[Period] = None
+
+
+def suggest_sample_codes(
+    session: Session, *, tenant_id, requests: Sequence[SuggestionRequest], settings: NumberingSettings,
+    branch_id=None, branch_code: str = "", branch_timezone: Optional[str] = None,
+    instant: Optional[datetime] = None, reserved_codes: Iterable[str] = (),
+) -> List[Suggestion]:
+    """What the CURRENT numbering would give each sample row of one registration, read-only.
+
+    Hotfix 1.4.3. Takes no lock, increments nothing, writes no ledger row: the suggestions are NOT
+    reserved. Rows are walked in request order and share their counter (type x period x branch), so the
+    codes of one lot follow the sequence the real allocation would issue (`allocate_batch` assigns the
+    values of one counter in request order too). `reserved_codes` are codes typed by hand in the same
+    lot: they consume no number but are never suggested, matching `allocate_batch(reserved_sample_codes)`.
+    The code finally issued may still differ (a concurrent registration, a changed configuration).
+    """
+    instant = instant or _now()
+    reserved = frozenset(reserved_codes)
+    legacy = settings.scheme == SCHEME_LEGACY
+    limit = MAX_LENGTH_BY_KIND[SAMPLE]
+    if settings.active and settings.scope == SCOPE_BRANCH and branch_id is None:
+        return [Suggestion(r.key, reason="branch_required") for r in requests]
+    cursors: Dict[tuple, int] = {}
+    out: List[Suggestion] = []
+    for req in requests:
+        alloc = AllocationRequest(
+            req.key, SAMPLE, req.scope_id, req.base_code, branch_id, branch_code, branch_timezone,
+            received_at=req.received_at,
+        )
+        try:
+            period = request_period(settings, alloc, instant)
+        except NumberingError as exc:
+            reason = exc.detail["code"].replace("numbering_", "", 1) if isinstance(exc.detail, dict) else "invalid"
+            out.append(Suggestion(req.key, reason=reason))
+            continue
+        branch = counter_branch(settings, alloc)
+        ckey = (str(req.scope_id), str(branch), period.year, period.month)
+        if ckey not in cursors:
+            last = peek_counter(session, tenant_id, SAMPLE, req.scope_id, period, branch)
+            cursors[ckey] = max(last, legacy_high_water(session, tenant_id, req.scope_id, req.base_code, SAMPLE)) if legacy else last
+        value, skipped, found = cursors[ckey], 0, None
+        try:
+            while skipped <= ESTIMATE_LOOKAHEAD:
+                value = max(value + 1, 1 if legacy else settings.start_value)
+                if legacy:
+                    code = f"{req.base_code}-{value}"
+                    if len(code) > limit:
+                        raise NumberingError(409, "numbering_code_too_long", "The generated code would be too long")
+                else:
+                    code = render_code(
+                        settings.format, settings.sequence_min_width, req.base_code, value, period.year, period.month,
+                        limit, branch_code,
+                    )
+                if code not in reserved and not is_occupied(session, tenant_id, SAMPLE, code):
+                    found = code
+                    break
+                skipped += 1
+        except NumberingError as exc:
+            reason = exc.detail["code"].replace("numbering_", "", 1) if isinstance(exc.detail, dict) else "invalid"
+            out.append(Suggestion(req.key, reason=reason, period=period))
+            continue
+        if found is None:
+            out.append(Suggestion(req.key, reason="no_free_code", period=period))
+            continue
+        cursors[ckey] = value
+        out.append(Suggestion(req.key, code=found, period=period))
+    return out
 
 
 def boundary_examples(settings: NumberingSettings, base_code: str, period: Period, branch_code: str = "") -> List[dict]:

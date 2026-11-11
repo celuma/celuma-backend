@@ -349,27 +349,25 @@ def put_config(client, headers, kind="order", **body):
 
 
 class TestRegistrationIsAutomatic:
-    """Céluma 1.4 (owner, 2026-10-16): no registration route accepts a typed order or sample code."""
+    """Céluma 1.4 (owner, 2026-10-16): no registration route accepts a typed ORDER code. Hotfix 1.4.3: a
+    SAMPLE row may carry an optional typed code, with its own capability (see test_manual_sample_codes.py)."""
 
-    @pytest.mark.parametrize("route", ["order", "sample", "unified_order", "unified_sample"])
-    def test_a_typed_code_is_refused_explicitly_and_nothing_is_created_or_consumed(self, client, session, lab, route):
-        existing = client.post(ORDERS, json=lab.order_payload(), headers=lab.headers).json()["id"]
+    @pytest.mark.parametrize("route", ["order", "unified_order"])
+    def test_a_typed_order_code_is_refused_explicitly_and_nothing_is_created_or_consumed(self, client, session, lab, route):
         counters, ledger = counter_rows(session), ledger_rows(session)
         orders = order_codes(session, lab)
         if route == "order":
             res = client.post(ORDERS, json=lab.order_payload(order_code="MAN-1"), headers=lab.headers)
-        elif route == "sample":
-            res = client.post(SAMPLES, json=lab.sample_payload(existing, sample_code="MAN-S"), headers=lab.headers)
-        elif route == "unified_order":
-            res = client.post(UNIFIED, json=lab.unified(order_code="MAN-1"), headers=lab.headers)
         else:
-            payload = lab.unified()
-            payload["samples"][0]["sample_code"] = "MAN-S"
-            res = client.post(UNIFIED, json=payload, headers=lab.headers)
+            res = client.post(UNIFIED, json=lab.unified(order_code="MAN-1"), headers=lab.headers)
         assert res.status_code == 422, res.text
         assert res.json()["detail"][0]["type"] == "numbering_manual_code_not_supported"
         assert "generated automatically" in res.json()["detail"][0]["msg"]
         assert (counter_rows(session), ledger_rows(session), order_codes(session, lab)) == (counters, ledger, orders)
+
+    def test_a_typed_sample_code_beside_the_unified_order_is_still_refused(self, client, session, lab):
+        res = client.post(UNIFIED, json=lab.unified(sample_code="MAN-S"), headers=lab.headers)  # top level, not a row
+        assert res.status_code == 422 and res.json()["detail"][0]["type"] == "numbering_manual_code_not_supported"
 
     def test_a_blank_typed_code_is_refused_too_not_silently_ignored(self, client, lab):
         res = client.post(UNIFIED, json=lab.unified(order_code=""), headers=lab.headers)
