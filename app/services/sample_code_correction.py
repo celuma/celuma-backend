@@ -9,11 +9,9 @@ Rules (contract: `celuma-engineering/specs/laboratory/order-sample-management.md
 - Lifecycle: the linked order must be directly modifiable (`order_lifecycle.lock_and_guard`: window
   Reception through Diagnosis AND no review/approval/signing/publication evidence on any related
   report), checked under the order lock so a concurrent submission cannot slip past.
-- New code: 1-100 characters of `A-Za-z0-9._-` (the generated-code alphabet), not already carried by
-  ANY sample of the tenant (removed ones included), never issued by the numbering ledger, and never
-  retired by an earlier correction. A corrected-away code is therefore never reusable, automatic
-  counters are neither consumed nor lowered, and a correction can collide neither with another
-  correction (the code lock serializes them) nor with a generator (which skips locked/occupied codes).
+- New code: 1-100 characters of `A-Za-z0-9._-`. Manual corrections may reuse existing, issued or
+  retired codes. Automatic numbering still skips occupied or retired codes and its counters and
+  ledger are untouched by corrections.
 - Audit: a `sample_code_correction` row (actor, reason, old and new code, time), a timeline event and
   an `audit_log` row, in the same transaction.
 - Historical issued artifacts are never rewritten: published/signed reports and PDFs keep the code they
@@ -73,7 +71,8 @@ def correct_sample_code(session: Session, *, sample_id, tenant_id, user, new_cod
     if sample is None or str(sample.tenant_id) != str(tenant_id):
         raise HTTPException(404, "Sample not found")
 
-    # Lock order: the code lock is taken (waiting) BEFORE the order lock. Generation only ever TRIES a
+    # Let the generator skip this candidate while the correction is in flight.
+    # The code lock is taken (waiting) BEFORE the order lock. Generation only ever TRIES a
     # code lock, then takes the order's key-share lock for its inserts; because it never waits for a
     # code lock while we wait for the order, no cycle can form.
     numbering.lock_code(session, tenant_id, numbering.SAMPLE, new_code, wait=True)
@@ -90,14 +89,6 @@ def correct_sample_code(session: Session, *, sample_id, tenant_id, user, new_cod
     if new_code == old_code:
         session.rollback()  # nothing to write: release the locks
         return CorrectionResult(sample, old_code, True)
-
-    # The target string is locked (above): check every place a code can already be spoken for.
-    if numbering.is_occupied(session, tenant_id, numbering.SAMPLE, new_code):
-        raise ManagementError(
-            409, "sample_code_unavailable",
-            f"The code '{new_code}' is already used, was issued by automatic numbering, or belongs to a "
-            "corrected or removed sample; choose another code",
-        )
 
     sample.sample_code = new_code
     session.add(sample)

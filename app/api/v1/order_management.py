@@ -164,7 +164,7 @@ def get_sample_management_state(
                             allowed=not removal_blockers, blockers=_blockers(removal_blockers)),
         removal_consequences=[
             "The sample and its code are retained as an auditable record and hidden from lists and searches.",
-            "The code is never reused. Images stay in storage.",
+            "Automatic numbering will not reuse this code. Images stay in storage.",
             "The order keeps its other samples; its status is recalculated.",
         ],
     )
@@ -328,7 +328,7 @@ def correct_sample_code(
 ):
     """Correct ONLY a sample's code after registration (requires lab:update_sample AND the
     privileged identifier capability lab:enter_manual_code). Same lifecycle window and evidence
-    guard as every direct edit; audited with the reason; the old code is retired for good."""
+    guard as every direct edit. Manual reuse is allowed and audited with the reason."""
     _require(user.id, "lab:update_sample", session)
     _require(user.id, MANUAL_CODE_PERMISSION, session)
     result = sample_code_correction.correct_sample_code(
@@ -352,7 +352,7 @@ def update_sample_dates(
     """Correct a sample's receipt and/or collection date after registration (requires lab:update_sample).
     Same lifecycle window and evidence guard as every direct edit; the receipt date may only move inside
     its numbering month freely; into another month a monthly-generated code is regenerated in that month (the
-    old code is retired, never reused). Audited with the reason."""
+    old code is retired from automatic numbering). Audited with the reason."""
     _require(user.id, "lab:update_sample", session)
     result = sample_dates.update_sample_dates(
         session, sample_id=sample_id, tenant_id=ctx.tenant_id, user=user, fields=set(data.model_fields_set),

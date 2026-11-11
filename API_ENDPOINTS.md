@@ -3734,7 +3734,7 @@ Contract: `celuma-engineering/specs/laboratory/order-sample-management.md`. Allo
 | `PATCH /api/v1/laboratory/orders/{id}` | `lab:update_order` | allowlist `requesting_physician_ids` (set, max 10, no primary), `expediente` (text, leading zeroes kept), `notes`; other keys 422 `order_field_not_editable` |
 | `PATCH /api/v1/laboratory/orders/{id}/notes` | `lab:update_order` | same lifecycle guard as above |
 | `GET /api/v1/laboratory/samples/{id}/management` | `lab:read` | correction/removal state |
-| `POST /api/v1/laboratory/samples/{id}/code-correction` | `lab:update_sample` + `lab:enter_manual_code` | `{sample_code, reason}`; only the code changes; the old code is retired (409 `sample_code_unavailable` for any used/issued/retired code) |
+| `POST /api/v1/laboratory/samples/{id}/code-correction` | `lab:update_sample` + `lab:enter_manual_code` | `{sample_code, reason}`; only the code changes; manual corrections may reuse codes, while automatic numbering skips occupied and retired codes |
 | `POST /api/v1/laboratory/orders/{id}/removal` | `lab:remove_capture` | `{reason}`; tombstone, blocked by payments/non-pending invoice/review evidence |
 | `POST /api/v1/laboratory/samples/{id}/removal` | `lab:remove_capture` | `{reason}`; blocked for the order's last sample; retry answers `already_removed` |
 

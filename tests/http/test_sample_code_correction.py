@@ -95,13 +95,14 @@ class TestCorrection:
         assert sample_detail(client, lab, reg["sample_ids"][0])["sample_code"] == reg["sample_codes"][0]
 
 
-class TestUniquenessAndNonReuse:
-    def test_cannot_take_a_code_in_use_anywhere_in_the_tenant(self, client, session, lab):
+class TestManualReuse:
+    def test_can_reuse_a_code_in_another_order(self, client, session, lab):
         a, b = register(client, lab, ("BX",)), register(client, lab, ("BX",))
         res = correct(client, lab, a["sample_ids"][0], b["sample_codes"][0])
-        assert res.status_code == 409 and res.json()["detail"]["code"] == "sample_code_unavailable"
+        assert res.status_code == 200, res.text
+        assert sample_codes(session, lab).count(b["sample_codes"][0]) == 2
 
-    def test_cannot_take_a_code_the_ledger_issued(self, client, session, lab):
+    def test_can_reuse_a_code_the_ledger_issued(self, client, session, lab):
         a = register(client, lab)
         ghost = "BX-777"  # issued by the allocator, its sample later hard-deleted by an operator
         session.execute(text(
@@ -110,9 +111,16 @@ class TestUniquenessAndNonReuse:
             "gen_random_uuid(), gen_random_uuid(), 0, 0, 777, :c, 'legacy', '{BASE}-{N}', 2, now())"),
             {"t": str(lab.tenant.id), "c": ghost})
         session.commit()
-        assert correct(client, lab, a["sample_ids"][0], ghost).status_code == 409
+        assert correct(client, lab, a["sample_ids"][0], ghost).status_code == 200
 
-    def test_a_corrected_away_code_is_retired_for_corrections_and_for_generation(self, client, session, lab):
+    def test_automatic_numbering_skips_a_code_already_set_manually(self, client, session, lab):
+        configure(session, lab)
+        first = register(client, lab)
+        assert first["sample_codes"] == ["BX011026"]
+        assert correct(client, lab, first["sample_ids"][0], "BX021026").status_code == 200
+        assert register(client, lab)["sample_codes"] == ["BX031026"]
+
+    def test_a_corrected_away_code_can_be_reused_manually(self, client, session, lab):
         a = register(client, lab)
         original = a["sample_codes"][0]
         assert original == "BX-1"
@@ -120,13 +128,13 @@ class TestUniquenessAndNonReuse:
         b = register(client, lab)  # generation continues; BX-1 was consumed for good
         assert b["sample_codes"] == ["BX-2"]
         res = correct(client, lab, b["sample_ids"][0], original)
-        assert res.status_code == 409 and res.json()["detail"]["code"] == "sample_code_unavailable"
+        assert res.status_code == 200, res.text
         # a legacy typed code that the ledger never saw is retired too
         session.execute(text("UPDATE sample SET sample_code = 'MANUAL-1' WHERE id = :i"), {"i": b["sample_ids"][0]})
         session.commit()
         assert correct(client, lab, b["sample_ids"][0], "MANUAL-2").status_code == 200
         c = register(client, lab)
-        assert correct(client, lab, c["sample_ids"][0], "MANUAL-1").status_code == 409
+        assert correct(client, lab, c["sample_ids"][0], "MANUAL-1").status_code == 200
 
     def test_corrections_never_touch_the_counters_or_the_ledger(self, client, session, lab):
         configure(session, lab)
@@ -134,17 +142,17 @@ class TestUniquenessAndNonReuse:
         counters = session.execute(text("SELECT * FROM numbering_counter ORDER BY 1,2,3,4,5,6")).all()
         ledger = ledger_rows(session)
         correct(client, lab, reg["sample_ids"][0], "LAB1")
-        correct(client, lab, reg["sample_ids"][1], reg["sample_codes"][0])  # taking the first sample's retired code: refused
+        assert correct(client, lab, reg["sample_ids"][1], reg["sample_codes"][0]).status_code == 200
         assert session.execute(text("SELECT * FROM numbering_counter ORDER BY 1,2,3,4,5,6")).all() == counters
         assert ledger_rows(session) == ledger
         nxt = register(client, lab)
         assert nxt["sample_codes"] == ["BX031026"]  # automatic numbering continues, no gap closed, nothing lowered
 
-    def test_a_removed_samples_code_cannot_be_taken(self, client, session, lab):
+    def test_can_reuse_a_removed_samples_code_in_the_same_order(self, client, session, lab):
         reg = register(client, lab, ("BX", "BX"))
         assert client.post(f"{LAB}/samples/{reg['sample_ids'][1]}/removal", json={"reason": "duplicada"},
                            headers=lab.headers).status_code == 200
-        assert correct(client, lab, reg["sample_ids"][0], reg["sample_codes"][1]).status_code == 409
+        assert correct(client, lab, reg["sample_ids"][0], reg["sample_codes"][1]).status_code == 200
 
 
 class TestLifecycle:
@@ -193,7 +201,7 @@ class TestLifecycle:
 
 
 class TestRaces:
-    def test_two_corrections_to_the_same_code_have_exactly_one_winner(self, fresh_client, session, lab):
+    def test_concurrent_corrections_to_the_same_code_can_all_succeed(self, fresh_client, session, lab):
         reg = register(fresh_client, lab, ("BX", "BX", "BX", "BX"))
         jobs = [
             (lambda c, sid=sid: c.post(f"{LAB}/samples/{sid}/code-correction",
@@ -202,10 +210,10 @@ class TestRaces:
         ]
         results = run_parallel(jobs)
         statuses = sorted(r.status_code for r in results)
-        assert statuses == [200, 409, 409, 409], [getattr(r, "text", r) for r in results]
-        assert sample_codes(session, lab).count("SAME") == 1
+        assert statuses == [200, 200, 200, 200], [getattr(r, "text", r) for r in results]
+        assert sample_codes(session, lab).count("SAME") == 4
 
-    def test_a_correction_racing_automatic_creation_never_yields_a_duplicate(self, fresh_client, session, lab):
+    def test_a_correction_racing_automatic_creation_keeps_generated_codes_distinct(self, fresh_client, session, lab):
         reg = register(fresh_client, lab, ("BX",))
         target = "BX-2"  # exactly the code the generator is about to issue
         jobs = [lambda c: c.post(f"{LAB}/samples/{reg['sample_ids'][0]}/code-correction",
@@ -213,8 +221,10 @@ class TestRaces:
         jobs += [lambda c: c.post(SAMPLES, json=lab.sample_payload(reg["order_id"]), headers=lab.headers) for _ in range(3)]
         results = run_parallel(jobs)
         assert all(not isinstance(r, Exception) and r.status_code == 200 for r in results[1:]), [getattr(r, "text", r) for r in results]
-        codes = sample_codes(session, lab)
-        assert len(codes) == len(set(codes)) == 4
+        assert results[0].status_code == 200, results[0].text
+        assert sample_detail(fresh_client, lab, reg["sample_ids"][0])["sample_code"] == target
+        generated_codes = [r.json()["sample_code"] for r in results[1:]]
+        assert len(set(generated_codes)) == 3
 
     def test_a_correction_racing_a_review_submission_is_serialized_by_the_order_lock(self, engine, client, session, lab):
         """The submission takes the order lock first. While it holds it, a correction waits; once the
