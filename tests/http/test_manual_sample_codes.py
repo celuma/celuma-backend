@@ -320,3 +320,14 @@ def _with_code(lab, code):
     payload = lab.unified(("BX",))
     payload["samples"][0]["sample_code"] = code
     return payload
+
+
+class TestBranchListCarriesItsTimezone:
+    """Hotfix 1.4.3: the registration forms default the receipt date to "today" in the numbering zone, which
+    for a branch-scoped numbering is the branch's own zone."""
+
+    def test_the_branches_of_a_tenant_list_their_timezone(self, client, lab):
+        res = client.get(f"/api/v1/tenants/{lab.tenant.id}/branches", headers=lab.headers)
+        assert res.status_code == 200, res.text
+        row = next(b for b in res.json() if b["id"] == str(lab.branch.id))
+        assert row["timezone"] == lab.branch.timezone and row["code"] == lab.branch.code
