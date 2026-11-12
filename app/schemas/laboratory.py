@@ -6,7 +6,7 @@ from app.schemas.iso_input import require_iso_date_input
 from app.schemas.report import ReportMetaResponse, ReportDetailResponse
 from app.schemas.patient import PatientFullResponse
 from app.schemas.sample_type import SampleTypeRef
-from app.services import order_management
+from app.services import numbering, order_management
 
 
 def _reject_retired_type_field(data):
@@ -28,6 +28,35 @@ def _validate_receipt_date(value):
     return require_iso_date_input(
         value, message="received_at is required: send the sample's receipt date (YYYY-MM-DD)"
     )
+
+
+def _clean_optional_sample_code(value):
+    """Hotfix 1.4.3: a sample row may carry a hand-typed code. Blank/null = none (the code is generated);
+    otherwise 1-100 characters of letters, digits, '.', '_' and '-', trimmed. Nothing else is accepted."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise PydanticCustomError("sample_code_invalid", "A sample code must be text")
+    value = value.strip()
+    if not value:
+        return None
+    if not numbering.MANUAL_CODE_RE.fullmatch(value):
+        raise PydanticCustomError(
+            "sample_code_invalid",
+            "A sample code is 1 to 100 characters: letters, digits, '.', '_' and '-' only",
+        )
+    return value
+
+
+def _reject_typed_order_code(data):
+    """A NEW sample may carry a typed `sample_code` (1.4.3); an `order_code` is still refused."""
+    if isinstance(data, dict) and "order_code" in data:
+        raise PydanticCustomError(
+            "numbering_manual_code_not_supported",
+            "'{field}' is no longer accepted: order codes are generated automatically. Omit it",
+            {"field": "order_code"},
+        )
+    return data
 
 
 def _reject_typed_codes(data):
@@ -345,16 +374,23 @@ class SampleCreate(BaseModel):
     collected_at: Optional[datetime] = None
     #: Required for every NEW sample (Céluma 1.4, #33): it defines the monthly code's period.
     received_at: datetime
+    #: Optional hand-typed code (hotfix 1.4.3, needs `lab:enter_manual_code`). Null/blank = generated.
+    sample_code: Optional[str] = None
 
     @field_validator("received_at", mode="before")
     @classmethod
     def _receipt_required(cls, value):
         return _validate_receipt_date(value)
 
+    @field_validator("sample_code", mode="before")
+    @classmethod
+    def _typed_code(cls, value):
+        return _clean_optional_sample_code(value)
+
     @model_validator(mode="before")
     @classmethod
     def _no_legacy_type(cls, data):
-        return _reject_typed_codes(_reject_retired_type_field(data))
+        return _reject_typed_order_code(_reject_retired_type_field(data))
 
 class SampleResponse(BaseModel):
     """Schema for sample response"""
@@ -414,21 +450,31 @@ class UnifiedSampleCreate(BaseModel):
     collected_at: Optional[datetime] = None
     #: Required for every NEW sample (Céluma 1.4, #33): it defines the monthly code's period.
     received_at: datetime
+    #: Optional hand-typed code (hotfix 1.4.3, needs `lab:enter_manual_code`). Null/blank = generated.
+    sample_code: Optional[str] = None
 
     @field_validator("received_at", mode="before")
     @classmethod
     def _receipt_required(cls, value):
         return _validate_receipt_date(value)
 
+    @field_validator("sample_code", mode="before")
+    @classmethod
+    def _typed_code(cls, value):
+        return _clean_optional_sample_code(value)
+
     @model_validator(mode="before")
     @classmethod
     def _no_legacy_type(cls, data):
-        return _reject_typed_codes(_reject_retired_type_field(data))
+        return _reject_typed_order_code(_reject_retired_type_field(data))
 
 
 class OrderUnifiedCreate(_OrderRequestFields):
     """Unified create: create lab order and one or more samples in one operation.
-    The order code and every sample code are generated."""
+    The order code is generated; a sample code is generated unless its row carries a typed one (1.4.3)."""
+    #: Sample `sample_code` is optional: left out of the fingerprint while null (older clients never send it).
+    IDEMPOTENCY_OMIT_ITEM_FIELDS_WHEN_NONE: ClassVar[Dict[str, Tuple[str, ...]]] = {"samples": ("sample_code",)}
+
     tenant_id: str
     branch_id: str
     patient_id: Optional[str] = None

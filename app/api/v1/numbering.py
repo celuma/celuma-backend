@@ -11,6 +11,7 @@ from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import TypeAdapter, ValidationError
 from sqlmodel import Session, select
 
 from app.api.v1.auth import AuthContext, current_user, get_auth_ctx
@@ -19,6 +20,7 @@ from app.core.rbac import has_permission
 from app.models.numbering import NumberingConfig
 from app.models.sample_type import SampleType
 from app.models.study_type import StudyType
+from app.schemas.iso_input import require_iso_date_input
 from app.models.tenant import Branch
 from app.models.user import AppUser
 from app.schemas.numbering import (
@@ -29,6 +31,9 @@ from app.schemas.numbering import (
     NumberingExample,
     NumberingPreviewRequest,
     NumberingPreviewResponse,
+    SampleCodeSuggestion,
+    SampleCodeSuggestionRequest,
+    SampleCodeSuggestionResponse,
 )
 from app.services import numbering
 from app.services.sample_types import record_audit
@@ -233,4 +238,88 @@ def preview_numbering(
         timezone=candidate.zone_name(branch.timezone if branch else None),
         period_year=period.year, period_month=period.month, date_basis=date_basis, base_code=base_code,
         examples=examples, estimate=estimate, notice=PREVIEW_NOTICE,
+    )
+
+
+SUGGESTION_NOTICE = (
+    "Sugerencia orientativa: no reserva ni consume ningún número. "
+    "Si dejas el código automático, el definitivo se asigna al guardar y puede diferir."
+)
+_DATETIME = TypeAdapter(datetime)
+
+
+def _parse_receipt(raw):
+    """A row's receipt date: None while absent; a strictly ISO value otherwise. Returns (value, invalid)."""
+    if raw is None or not str(raw).strip():
+        return None, False
+    try:
+        return _DATETIME.validate_python(require_iso_date_input(raw)), False
+    except Exception:  # PydanticCustomError / ValidationError: not a date
+        return None, True
+
+
+@router.post("/sample-code-suggestions", response_model=SampleCodeSuggestionResponse)
+def suggest_sample_codes(
+    body: SampleCodeSuggestionRequest,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Hotfix 1.4.3. The code each sample row of a registration form would get from the CURRENT
+    numbering, in row order (rows of one type and month follow the sequence), skipping occupied codes and
+    the codes typed in the same lot. Reads only: no lock, no counter increment, no ledger row. Needs
+    `lab:read` like the preview; a code is only ever typed by someone holding `lab:enter_manual_code`."""
+    _require(user, "lab:read", session)
+    settings = numbering.get_settings(session, ctx.tenant_id, numbering.SAMPLE)
+    branch = None
+    if body.branch_id:
+        try:
+            branch = session.get(Branch, UUID(body.branch_id))
+        except ValueError:
+            branch = None
+        if branch is None or str(branch.tenant_id) != ctx.tenant_id:
+            raise HTTPException(404, "Branch not found")
+
+    results: dict = {}
+    walk: list = []
+    types: dict = {}
+    for item in body.items:
+        if item.sample_type_id not in types:
+            try:
+                row = session.get(SampleType, UUID(item.sample_type_id))
+            except ValueError:
+                row = None
+            types[item.sample_type_id] = row if row is not None and str(row.tenant_id) == ctx.tenant_id else None
+        st = types[item.sample_type_id]
+        if st is None:
+            results[item.key] = SampleCodeSuggestion(key=item.key, reason="sample_type_not_found")
+            continue
+        if not st.is_active:
+            results[item.key] = SampleCodeSuggestion(key=item.key, reason="sample_type_inactive")
+            continue
+        received, invalid = _parse_receipt(item.received_at)
+        if invalid:
+            results[item.key] = SampleCodeSuggestion(key=item.key, reason="receipt_date_invalid")
+            continue
+        if received is not None:
+            try:  # same normalisation as registration (local wall clock of the numbering zone)
+                received = numbering.receipt_local(received, settings.zone_name(branch.timezone if branch else None))
+            except HTTPException:
+                results[item.key] = SampleCodeSuggestion(key=item.key, reason="receipt_date_invalid")
+                continue
+        walk.append(numbering.SuggestionRequest(item.key, st.id, st.code, received))
+
+    reserved = [c.strip() for c in body.reserved_codes if numbering.MANUAL_CODE_RE.fullmatch((c or "").strip())]
+    for sug in numbering.suggest_sample_codes(
+        session, tenant_id=ctx.tenant_id, requests=walk, settings=settings,
+        branch_id=branch.id if branch else None, branch_code=branch.code if branch else "",
+        branch_timezone=branch.timezone if branch else None, reserved_codes=reserved,
+    ):
+        results[sug.key] = SampleCodeSuggestion(
+            key=sug.key, code=sug.code, reason=sug.reason,
+            period_year=sug.period.year if sug.period else None, period_month=sug.period.month if sug.period else None,
+        )
+    return SampleCodeSuggestionResponse(
+        scheme=settings.scheme, suggestions=[results[i.key] for i in body.items if i.key in results],
+        notice=SUGGESTION_NOTICE,
     )

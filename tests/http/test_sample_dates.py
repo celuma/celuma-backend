@@ -160,6 +160,23 @@ class TestMonthlyRegeneration:
         assert res.status_code == 200 and res.json()["old_code"] is None
         assert res.json()["sample_code"] == reg["sample_codes"][0]
 
+    def test_a_manually_restored_code_does_not_follow_the_month(self, client, monthly):
+        reg = register(client, monthly)
+        sid = reg["sample_ids"][0]
+        original_code = reg["sample_codes"][0]
+        for code in ("LAB.7-A", original_code):
+            res = client.post(
+                f"{LAB}/samples/{sid}/code-correction",
+                json={"sample_code": code, "reason": "rotulada"},
+                headers=monthly.headers,
+            )
+            assert res.status_code == 200, res.text
+        state = client.get(f"{LAB}/samples/{sid}/management", headers=monthly.headers).json()
+        assert state["code_follows_receipt_month"] is False
+        res = patch(client, monthly, sid, {"received_at": "2026-09-28", "reason": "otro mes"})
+        assert res.status_code == 200, res.text
+        assert res.json()["sample_code"] == original_code and res.json()["old_code"] is None
+
     def test_a_corrected_code_does_not_follow_the_month(self, client, session, monthly):
         reg = register(client, monthly)
         sid = reg["sample_ids"][0]

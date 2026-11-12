@@ -78,6 +78,12 @@ def fingerprint(payload: BaseModel) -> str:
     for name in getattr(type(payload), "IDEMPOTENCY_OMIT_WHEN_NONE", ()):
         if data.get(name) is None:
             data.pop(name, None)
+    # The same for fields added to the items of a list (e.g. a sample's optional `sample_code`, 1.4.3).
+    for list_name, fields in getattr(type(payload), "IDEMPOTENCY_OMIT_ITEM_FIELDS_WHEN_NONE", {}).items():
+        for item in data.get(list_name) or []:
+            for name in fields:
+                if isinstance(item, dict) and item.get(name) is None:
+                    item.pop(name, None)
     canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

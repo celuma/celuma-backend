@@ -123,7 +123,9 @@ def list_tenant_branches(
     branches = [{
         "id": str(b.id),
         "name": b.name,
-        "code": b.code
+        "code": b.code,
+        # Hotfix 1.4.3: registration forms default the receipt date to "today" in the numbering zone.
+        "timezone": b.timezone,
     } for b in tenant.branches]
     return branches
 

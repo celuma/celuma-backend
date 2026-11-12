@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, StrictInt, field_validator
+from pydantic import BaseModel, Field, StrictInt, field_validator
 
 from app.schemas.iso_input import require_iso_date_input
 
@@ -104,4 +104,51 @@ class NumberingPreviewResponse(BaseModel):
     base_code: str
     examples: List[NumberingExample]
     estimate: Optional[NumberingEstimate] = None
+    notice: str
+
+
+class SampleCodeSuggestionItem(BaseModel):
+    """One sample row of a registration form (hotfix 1.4.3)."""
+    #: Caller's label for the row (echoed back); the form uses the row's field id.
+    key: str = Field(min_length=1, max_length=64)
+    sample_type_id: str
+    #: The row's receipt date as typed (`YYYY-MM-DD` or an ISO datetime); null/blank while the form has none.
+    #: Monthly numbering needs it (the receipt month defines the code); the compatibility scheme does not.
+    received_at: Optional[str] = None
+
+
+class SampleCodeSuggestionRequest(BaseModel):
+    #: The registering branch (its zone/code define the period/`{BRANCH}` of a branch-scoped numbering).
+    branch_id: Optional[str] = None
+    #: In row order: rows of one type and month share a counter, so the codes follow the sequence.
+    #: Send only the rows still on the automatic code; a row with a typed code consumes no number.
+    items: List[SampleCodeSuggestionItem] = Field(max_length=100)
+    #: Codes typed by hand in the same lot: never suggested (they are skipped like occupied ones).
+    reserved_codes: List[str] = Field(default_factory=list, max_length=200)
+
+    @field_validator("items")
+    @classmethod
+    def _unique_keys(cls, items):
+        keys = [i.key for i in items]
+        if len(set(keys)) != len(keys):
+            raise ValueError("item keys must be unique")
+        return items
+
+
+class SampleCodeSuggestion(BaseModel):
+    key: str
+    #: The code the current numbering would issue now; null when it cannot be suggested yet (see `reason`).
+    code: Optional[str] = None
+    #: `receipt_date_required`, `receipt_date_invalid`, `branch_required`, `sample_type_not_found`,
+    #: `sample_type_inactive`, `code_too_long`, `no_free_code`, ... Stable machine values.
+    reason: Optional[str] = None
+    period_year: Optional[int] = None
+    period_month: Optional[int] = None
+    #: Always false: a suggestion never reserves or consumes a number.
+    reserved: bool = False
+
+
+class SampleCodeSuggestionResponse(BaseModel):
+    scheme: str
+    suggestions: List[SampleCodeSuggestion]
     notice: str

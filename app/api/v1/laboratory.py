@@ -48,6 +48,7 @@ from app.services.list_pagination import (
 )
 from app.services import idempotency, numbering, order_lifecycle, order_management, report_amendments, report_reviewers
 from app.services import order_report_template
+from app.services.sample_types import record_audit
 from app.services.usage import UsageService
 from app.services.usage_thresholds import record_storage_delta_with_thresholds
 from datetime import datetime
@@ -1281,6 +1282,10 @@ def create_sample(
     Idempotent: `Idempotency-Key` is required (428 without it); see `create_order`.
     """
     _require(user.id, "lab:create_sample", session)
+    # Hotfix 1.4.3: a hand-typed sample code is a privileged identifier capture (same capability as the
+    # post-registration correction). Refused before anything is read or written.
+    if sample_data.sample_code:
+        _require(user.id, numbering.MANUAL_CODE_PERMISSION, session)
     idem_key = idempotency.validate_key(idempotency_key)
     # Céluma 1.3 Phase 5, Block C (finding C-001) — see `create_order`.
     if str(sample_data.tenant_id) != ctx.tenant_id:
@@ -1311,6 +1316,11 @@ def create_sample(
         idempotency.verify_resources(session, claim)
         return idempotency.replayed(_sample_response(session, session.get(Sample, claim.receipt.resources[0]["id"])))
 
+    # Hotfix 1.4.3: a typed code takes its (waiting) code lock BEFORE the order lock, the same order the
+    # correction uses, so the two can never wait on each other. Typed codes consume no number.
+    if sample_data.sample_code:
+        numbering.claim_manual_sample_codes(session, tenant.id, [sample_data.sample_code])
+
     # Céluma 1.4 (#11): same order lock as removal, edit and review submission, so a sample can never be
     # added to an order that is being removed (taken after the idempotency lock, before any counter).
     order_lifecycle.lock_and_refresh_order(session, order)
@@ -1326,19 +1336,23 @@ def create_sample(
     sample_settings = numbering.get_settings(session, tenant.id, numbering.SAMPLE)
     received_local = numbering.receipt_local(
         sample_data.received_at, sample_settings.zone_name(branch.timezone))
-    sample_allocation = numbering.allocate_batch(
-        session, tenant_id=tenant.id, instant=numbering.now(),
-        requests=[numbering.AllocationRequest(
-            "sample", numbering.SAMPLE, sample_type.id, sample_type.code, branch.id, branch.code, branch.timezone,
-            received_at=received_local)],
-        settings_by_kind={numbering.SAMPLE: sample_settings}, actor_id=ctx.user_id,
-    )["sample"]
+    # Hotfix 1.4.3: a row with a typed code is stored as typed (reuse is allowed, like a correction) and
+    # takes NO automatic number: no counter moves and no ledger row is written for it.
+    sample_allocation = None
+    if not sample_data.sample_code:
+        sample_allocation = numbering.allocate_batch(
+            session, tenant_id=tenant.id, instant=numbering.now(),
+            requests=[numbering.AllocationRequest(
+                "sample", numbering.SAMPLE, sample_type.id, sample_type.code, branch.id, branch.code, branch.timezone,
+                received_at=received_local)],
+            settings_by_kind={numbering.SAMPLE: sample_settings}, actor_id=ctx.user_id,
+        )["sample"]
 
     sample = Sample(
         tenant_id=sample_data.tenant_id,
         branch_id=sample_data.branch_id,
         order_id=sample_data.order_id,
-        sample_code=sample_allocation.code,
+        sample_code=sample_data.sample_code or sample_allocation.code,
         sample_type_id=sample_type.id,
         notes=sample_data.notes,
         collected_at=sample_data.collected_at,
@@ -1347,7 +1361,10 @@ def create_sample(
     
     session.add(sample)
     session.flush()  # Get sample.id for event
-    numbering.attach_entity(session, sample_allocation, sample.id)
+    if sample_allocation is not None:
+        numbering.attach_entity(session, sample_allocation, sample.id)
+    else:
+        _audit_manual_sample_code(session, sample, user)
     
     # Create SAMPLE_CREATED event
     sample_created_event = OrderEvent(
@@ -1363,6 +1380,7 @@ def create_sample(
             "sample_type": sample_type.name,
             "sample_type_id": str(sample_type.id),
             "initial_state": SampleState.RECEIVED.value,
+            **({"code_source": "manual"} if sample_allocation is None else {}),
         },
         created_by=sample_data.created_by if hasattr(sample_data, 'created_by') else None,
     )
@@ -1377,6 +1395,15 @@ def create_sample(
     session.commit()
     session.refresh(sample)
     return _sample_response(session, sample)
+
+
+def _audit_manual_sample_code(session: Session, sample: Sample, user: AppUser) -> None:
+    """Hotfix 1.4.3: a sample registered with a hand-typed code leaves an audit row (who typed what)."""
+    record_audit(
+        session, tenant_id=sample.tenant_id, user_id=user.id, action="SAMPLE.MANUAL_CODE_CAPTURED",
+        entity_type="sample", entity_id=sample.id, description="Sample registered with a manually typed code",
+        new_values={"sample_code": sample.sample_code}, metadata={"order_id": str(sample.order_id)},
+    )
 
 
 def _sample_response(session: Session, sample: Sample) -> SampleResponse:
@@ -1441,6 +1468,9 @@ def create_order_with_samples(
     """
     _require(user.id, "lab:create_order", session)
     _require(user.id, "lab:create_sample", session)
+    # Hotfix 1.4.3: a hand-typed sample code is a privileged identifier capture; refused up front.
+    if any(s.sample_code for s in payload.samples):
+        _require(user.id, numbering.MANUAL_CODE_PERMISSION, session)
     idem_key = idempotency.validate_key(idempotency_key)
     # Céluma 1.3 Phase 5, Block C (finding C-001) — see `create_order`. This
     # is the route the frontend's order-registration screen actually calls.
@@ -1493,9 +1523,15 @@ def create_order_with_samples(
         if payload.report_template_id else None
     )
 
-    # Céluma 1.4 (#8, automatic registration): the order code and EVERY sample code are generated,
+    # Hotfix 1.4.3: typed sample codes take their waiting code locks first (sorted), before any counter.
+    manual_codes = numbering.claim_manual_sample_codes(
+        session, tenant.id, [s.sample_code for s in payload.samples if s.sample_code])
+
+    # Céluma 1.4 (#8): the order code and every sample code WITHOUT a typed one are generated,
     # allocated in one deterministic order (order first, then sample counters by type id), so
-    # concurrent unified requests cannot deadlock on counters.
+    # concurrent unified requests cannot deadlock on counters. A typed row takes no automatic number,
+    # so the generated rows of one lot keep the sequence they were suggested; a generated code never
+    # equals a code typed in the same request.
     order_settings = numbering.get_settings(session, tenant.id, numbering.ORDER)
     sample_settings = numbering.get_settings(session, tenant.id, numbering.SAMPLE)
     requests: list = [numbering.AllocationRequest(
@@ -1505,6 +1541,8 @@ def create_order_with_samples(
     sample_zone = sample_settings.zone_name(branch.timezone)
     received_local = [numbering.receipt_local(s.received_at, sample_zone) for s in payload.samples]
     for idx, s in enumerate(payload.samples):
+        if s.sample_code:
+            continue
         st = sample_types[s.sample_type_id]
         requests.append(numbering.AllocationRequest(
             ("sample", idx), numbering.SAMPLE, st.id, st.code, branch.id, branch.code, branch.timezone,
@@ -1512,7 +1550,7 @@ def create_order_with_samples(
     allocations = numbering.allocate_batch(
         session, tenant_id=tenant.id, instant=numbering.now(), requests=requests,
         settings_by_kind={numbering.ORDER: order_settings, numbering.SAMPLE: sample_settings},
-        actor_id=ctx.user_id,
+        actor_id=ctx.user_id, reserved_sample_codes=manual_codes,
     )
     order_allocation = allocations["order"]
 
@@ -1539,13 +1577,13 @@ def create_order_with_samples(
     # Create samples
     created_samples: list[Sample] = []
     for idx, s in enumerate(payload.samples):
-        sample_allocation = allocations[("sample", idx)]
+        sample_allocation = allocations.get(("sample", idx))  # None = typed by hand (1.4.3)
 
         sample = Sample(
             tenant_id=payload.tenant_id,
             branch_id=payload.branch_id,
             order_id=order.id,
-            sample_code=sample_allocation.code,
+            sample_code=s.sample_code or sample_allocation.code,
             sample_type_id=sample_types[s.sample_type_id].id,
             notes=s.notes,
             collected_at=s.collected_at,
@@ -1553,7 +1591,10 @@ def create_order_with_samples(
         )
         session.add(sample)
         session.flush()  # Get sample.id for event
-        numbering.attach_entity(session, sample_allocation, sample.id)
+        if sample_allocation is not None:
+            numbering.attach_entity(session, sample_allocation, sample.id)
+        else:
+            _audit_manual_sample_code(session, sample, user)
         
         # Create SAMPLE_CREATED event for each sample
         sample_created_event = OrderEvent(
@@ -1569,6 +1610,7 @@ def create_order_with_samples(
                 "sample_type": sample_types[s.sample_type_id].name,
                 "sample_type_id": str(sample_types[s.sample_type_id].id),
                 "initial_state": SampleState.RECEIVED.value,
+                **({"code_source": "manual"} if sample_allocation is None else {}),
             },
             created_by=payload.created_by,
         )

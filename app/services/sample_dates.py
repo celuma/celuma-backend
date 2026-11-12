@@ -55,9 +55,12 @@ def code_follows_receipt_month(session: Session, sample: Sample, settings: numbe
     (and is counted in) its receipt month. Typed, corrected and legacy codes do not."""
     if not settings.active or sample.sample_type_id is None or sample.received_at is None:
         return False
+    # A manually restored code still has a ledger entry, but it was retired when it changed away.
     return bool(session.execute(text(
         "SELECT EXISTS (SELECT 1 FROM numbering_allocation WHERE tenant_id = :t AND entity_kind = :k "
-        "AND entity_id = :e AND code = :c AND scheme = :scheme)"),
+        "AND entity_id = :e AND code = :c AND scheme = :scheme "
+        "AND NOT EXISTS (SELECT 1 FROM sample_code_correction "
+        "WHERE tenant_id = :t AND sample_id = :e AND old_code = :c))"),
         {"t": str(sample.tenant_id), "k": numbering.SAMPLE, "e": str(sample.id), "c": sample.sample_code,
          "scheme": numbering.SCHEME_MONTHLY},
     ).scalar())
