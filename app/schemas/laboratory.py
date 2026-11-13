@@ -685,6 +685,15 @@ class OrderFilterOptionsResponse(BaseModel):
     has_requester: bool
 
 
+class RemovedSampleDetailResponse(BaseModel):
+    """Minimal historical detail for a withdrawn sample belonging to an active order."""
+    sample_code: str
+    order_id: str
+    order_code: str
+    removed_at: datetime
+    removal_reason: Optional[str] = None
+
+
 class SampleDetailResponse(BaseModel):
     """Complete detail for a sample including branch, order, and patient references."""
     id: str

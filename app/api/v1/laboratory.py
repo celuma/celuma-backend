@@ -4,6 +4,7 @@ from uuid import UUID
 from sqlmodel import select, Session, and_, func
 from sqlalchemy import cast, String
 from app.core.db import get_session
+from app.core.soft_removal import INCLUDE_REMOVED
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.core.rbac import has_permission, get_user_roles, ROLE_REVIEWER
 from app.models.laboratory import Order, Sample, SampleImage, Label, OrderLabel, SampleLabel
@@ -89,6 +90,7 @@ from app.schemas.laboratory import (
     SamplesListResponse,
     SampleFilterOptionsResponse,
     SampleDetailResponse,
+    RemovedSampleDetailResponse,
     OrderSlim,
     LabelCreate,
     LabelResponse,
@@ -926,19 +928,34 @@ def get_sample_filter_options(
     _require(user.id, "lab:read", session)
     return sample_filter_options(session, ctx.tenant_id)
 
-@router.get("/samples/{sample_id}", response_model=SampleDetailResponse)
+@router.get("/samples/{sample_id}", response_model=SampleDetailResponse | RemovedSampleDetailResponse)
 def get_sample_detail(
     sample_id: str,
+    include_withdrawal: bool = False,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Get complete detail for a sample (requires lab:read)."""
+    """Get sample detail, optionally including a historical withdrawal summary (requires lab:read)."""
     _require(user.id, "lab:read", session)
     s = session.get(Sample, sample_id)
-    if not s:
-        raise HTTPException(404, "Sample not found")
-    if str(s.tenant_id) != ctx.tenant_id:
+    if not s and include_withdrawal:
+        withdrawal = session.exec(
+            select(Sample.sample_code, Sample.removed_at, Sample.removal_reason, Order.id, Order.order_code)
+            .join(Order, Order.id == Sample.order_id)
+            .where(
+                Sample.id == sample_id, Sample.tenant_id == ctx.tenant_id, Sample.removed_at.is_not(None),
+                Order.tenant_id == ctx.tenant_id, Order.removed_at.is_(None),
+            )
+            .execution_options(**{INCLUDE_REMOVED: True})
+        ).first()
+        if withdrawal is not None:
+            code, removed_at, reason, order_id, order_code = withdrawal
+            return RemovedSampleDetailResponse(
+                sample_code=code, removed_at=removed_at, removal_reason=reason,
+                order_id=str(order_id), order_code=order_code,
+            )
+    if not s or str(s.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Sample not found")
 
     branch = session.get(Branch, s.branch_id)
