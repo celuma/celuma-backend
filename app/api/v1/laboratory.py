@@ -215,86 +215,26 @@ def _validate_patient(
 
 
 def update_order_status(order_id: str, session: Session) -> None:
-    """
-    Automatically update order status based on current state of samples and reports.
-    
-    Rules:
-    - RECEIVED: order created + at least 1 sample
-    - PROCESSING: at least 1 sample is PROCESSING, READY, CANCELLED, or DAMAGED
-    - DIAGNOSIS: meets PROCESSING + at least 1 report exists
-    - REVIEW: report is in REVIEW or RETRACTED status
-    - CLOSED: report is PUBLISHED
-    - RELEASED: payment cleared (billed_lock=False) + meets CLOSED
-    - CANCELLED: if report is CANCELLED
-    """
-    from app.models.enums import OrderStatus, SampleState, ReportStatus
-    
-    # Get order with samples
+    """Derive the order phase from its report, or its samples before a report exists."""
     order = session.get(Order, order_id)
-    if not order:
+    if not order or order.status == OrderStatus.CANCELLED:
         return
-    
-    # Get all samples for this order
-    samples = session.exec(
-        select(Sample).where(Sample.order_id == order_id)
-    ).all()
-    
-    # Check if there are any reports for this order
-    reports = session.exec(
-        select(Report)
-        .where(Report.order_id == order_id)
-        .order_by(Report.created_at.desc())
-    ).all()
-    
-    latest_report = reports[0] if reports else None
-    
-    # Rule: At least 1 sample required
-    if not samples:
-        # Keep as RECEIVED if no samples yet
-        if order.status != OrderStatus.RECEIVED:
-            order.status = OrderStatus.RECEIVED
-            session.add(order)
-            session.flush()
-        return
-    
-    # Check sample states
-    has_processing_or_beyond = any(
-        s.state in [SampleState.PROCESSING, SampleState.READY, SampleState.DAMAGED, SampleState.CANCELLED]
-        for s in samples
-    )
-    
-    # Determine new status
-    new_status = OrderStatus.RECEIVED
-    
-    if has_processing_or_beyond:
-        new_status = OrderStatus.PROCESSING
-        
-        if latest_report:
-            # Has report - move to DIAGNOSIS or beyond
-            new_status = OrderStatus.DIAGNOSIS
-            
-            if latest_report.status in [ReportStatus.IN_REVIEW, ReportStatus.RETRACTED]:
-                # Validate reviewers are assigned before moving to REVIEW
-                # Check in ReportReview table for the report
-                reviewer_count = session.exec(
-                    select(ReportReview).where(
-                        and_(
-                            ReportReview.report_id == latest_report.id,
-                            ReportReview.status == ReviewStatus.PENDING,
-                        )
-                    )
-                ).all()
-                if not reviewer_count or len(reviewer_count) == 0:
-                    raise HTTPException(400, "Cannot move to REVIEW status without reviewers assigned")
-                new_status = OrderStatus.REVIEW
-            elif latest_report.status == ReportStatus.PUBLISHED:
-                new_status = OrderStatus.CLOSED
-                
-                # Check if can be released (payment cleared)
-                if not order.billed_lock:
-                    new_status = OrderStatus.RELEASED
-    
-    # Update if changed
+
+    latest_report = session.exec(
+        select(Report).where(Report.order_id == order.id)
+        .order_by(Report.created_at.desc(), Report.id.desc()).limit(1)
+    ).first()
+    if latest_report is not None:
+        new_status = order_lifecycle.order_status_for_report(order, latest_report)
+    else:
+        sample_in_process = session.exec(
+            select(Sample.id).where(
+                Sample.order_id == order.id,
+                Sample.state.in_((SampleState.PROCESSING, SampleState.READY, SampleState.DAMAGED, SampleState.CANCELLED)),
+            ).limit(1)
+        ).first()
+        new_status = OrderStatus.PROCESSING if sample_in_process else OrderStatus.RECEIVED
+
     if order.status != new_status:
         order.status = new_status
         session.add(order)
@@ -1324,6 +1264,11 @@ def create_sample(
     # Céluma 1.4 (#11): same order lock as removal, edit and review submission, so a sample can never be
     # added to an order that is being removed (taken after the idempotency lock, before any counter).
     order_lifecycle.lock_and_refresh_order(session, order)
+    # Céluma 1.4.4: refused while the order or its report is in active review. Evaluated on the rows read AFTER
+    # the lock (review submission takes the same lock), before any number is allocated or any row is written, so
+    # a refusal leaves the order, the sample count and every counter untouched. A valid idempotent replay returned
+    # above, before this point, and is unaffected.
+    order_lifecycle.guard_sample_creation(session, order)
 
     # Céluma 1.4 (#17): a new sample requires an active type of THIS tenant.
     sample_type = require_active_sample_types(session, ctx.tenant_id, [sample_data.sample_type_id])[
@@ -2183,10 +2128,15 @@ def build_order_full_detail(
     if label_ids:
         labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
 
+    report = session.get(Report, order.report_id) if order.report_id else None
     order_resp = OrderDetailResponse(
         id=str(order.id),
         order_code=order.order_code,
-        status=order.status,
+        status=(
+            order_lifecycle.order_status_for_report(order, report)
+            if report is not None and report.order_id == order.id and report.tenant_id == order.tenant_id
+            and order.status != OrderStatus.CANCELLED else order.status
+        ),
         patient_id=str(order.patient_id) if order.patient_id else None,
         requesting_physician_id=str(order.requesting_physician_id) if order.requesting_physician_id else None,
         tenant_id=str(order.tenant_id),
@@ -2254,7 +2204,6 @@ def build_order_full_detail(
 
     # Get report meta (if any) using latest/current version
     report_meta = None
-    report = session.get(Report, order.report_id) if order.report_id else None
     if report:
         current_version = session.exec(
             select(ReportVersion)

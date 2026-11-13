@@ -20,7 +20,7 @@ from app.services.report_lifecycle_events import (
     build_publication_event,
     publication_correlation,
 )
-from app.services import report_amendments, report_reviewers
+from app.services import report_amendments, report_review_withdrawal, report_reviewers
 from app.models.report_amendment import (
     AMENDMENT_STATE_CANCELLED,
     AMENDMENT_STATE_PUBLISHED,
@@ -154,6 +154,8 @@ from app.schemas.report import (
     ReportsListResponse,
     ReportFilterOptionsResponse,
     ReportStatusUpdate,
+    ReportReviewWithdrawRequest,
+    ReviewWithdrawalState,
     ReportSignRequest,
     ReportReopenRequest,
     ReportAmendmentOpenRequest,
@@ -2367,11 +2369,19 @@ def get_report_full(
     ).first()
     report_detail = _build_report_detail_response(report, current_version, session)
 
+    # Céluma 1.4.4: availability of "Retirar de revisión" for THIS caller, computed by the same rule the endpoint
+    # enforces under the lock (the UI never decides it).
+    withdrawal = report_review_withdrawal.evaluate(
+        session, report, user.id, permitted=has_permission(user.id, "reports:submit", session))
     return ReportFullDetailResponse(
         order=base.order,
         patient=base.patient,
         samples=base.samples,
         report=report_detail,
+        review_withdrawal=ReviewWithdrawalState(
+            allowed=withdrawal.allowed, submission_id=withdrawal.submission_id,
+            reason_code=None if withdrawal.allowed else withdrawal.code,
+            reason=None if withdrawal.allowed else withdrawal.message),
     )
 
 @router.get("/{report_id}/versions")
@@ -3444,6 +3454,7 @@ def request_changes(
         created_by=user.id,
     )
     session.add(changes_event)
+    update_order_status_for_report(str(report.order_id), session)
     
     session.commit()
     session.refresh(report)
@@ -3462,6 +3473,94 @@ def request_changes(
         status=report.status,
         message="Changes requested, report returned to draft"
     )
+
+
+@router.post("/{report_id}/withdraw-review", response_model=ReportActionResponse)
+def withdraw_review(
+    report_id: str,
+    data: ReportReviewWithdrawRequest,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Withdraw a report from review (IN_REVIEW → DRAFT) — Céluma 1.4.4, requires reports:submit.
+
+    Only the recorded actor of the CURRENT submission may do it (no reviewer role needed, no other submit-capable
+    user, no administrator override), only while the review is still undecided, and only for the submission the
+    caller saw. See `app/services/report_review_withdrawal.py`.
+    """
+    _require(user.id, "reports:submit", session)
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    if str(report.tenant_id) != ctx.tenant_id:
+        raise HTTPException(403, "Report does not belong to your tenant")
+
+    # Same order lock as submit, approve and request changes; the report is re-read after it, so a decision or a
+    # resubmission that won the race is seen here instead of overwritten.
+    order_lifecycle.lock_report_order(session, report)
+
+    verdict = report_review_withdrawal.evaluate(
+        session, report, user.id, permitted=True, submission_id=data.submission_id)
+    if not verdict.allowed:
+        status_code = 403 if verdict.code == report_review_withdrawal.NOT_SUBMITTER else 409
+        raise HTTPException(status_code, {"code": verdict.code, "message": verdict.message})
+
+    amendment, amendment_source = _amendment_scope(session, report)
+    old_status = report.status
+    report.status = ReportStatus.DRAFT
+    session.add(report)
+
+    _create_audit_log(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        branch_id=str(report.branch_id),
+        actor_user_id=ctx.user_id,
+        action=report_review_withdrawal.AUDIT_WITHDRAW_REVIEW,
+        entity_type="report",
+        entity_id=report_id,
+        old_values={"status": old_status},
+        new_values={
+            "status": report.status,
+            "submission_id": verdict.submission_id,
+            **amendment_context(amendment, amendment_source),
+        },
+    )
+
+    from app.models.events import OrderEvent
+    from app.models.enums import EventType
+
+    session.add(OrderEvent(
+        tenant_id=report.tenant_id,
+        branch_id=report.branch_id,
+        order_id=report.order_id,
+        event_type=EventType.STATUS_CHANGED,
+        description="Reporte retirado de revisión",
+        event_metadata={
+            "action": report_review_withdrawal.ACTION_REVIEW_WITHDRAWN,
+            "report_id": str(report.id),
+            "report_title": report.title,
+            "from_status": getattr(old_status, "value", old_status),
+            "to_status": getattr(report.status, "value", report.status),
+            "submission_id": verdict.submission_id,
+            "withdrawn_by": str(user.id),
+            "withdrawn_by_name": user.full_name or user.username,
+            **amendment_context(amendment, amendment_source),
+        },
+        created_by=user.id,
+    ))
+
+    # Recalculate the order status through the existing workflow (REVIEW -> DIAGNOSIS).
+    if report.order_id:
+        update_order_status_for_report(str(report.order_id), session)
+
+    session.commit()
+    session.refresh(report)
+    logger.info(
+        f"Report {report_id} withdrawn from review by user {ctx.user_id}",
+        extra={"event": "report.withdraw_review", "report_id": report_id, "user_id": ctx.user_id},
+    )
+    return ReportActionResponse(id=str(report.id), status=report.status, message="Report withdrawn from review")
 
 
 def _reset_order_reviews_to_pending(session: Session, order_id) -> int:

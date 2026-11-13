@@ -3,7 +3,7 @@ from pydantic_core import PydanticCustomError
 from typing import Optional, List, Dict, Any, ClassVar, Tuple
 from datetime import datetime
 from app.schemas.iso_input import require_iso_date_input
-from app.schemas.report import ReportMetaResponse, ReportDetailResponse
+from app.schemas.report import ReportMetaResponse, ReportDetailResponse, ReviewWithdrawalState
 from app.schemas.patient import PatientFullResponse
 from app.schemas.sample_type import SampleTypeRef
 from app.services import numbering, order_management
@@ -510,6 +510,8 @@ class ReportFullDetailResponse(BaseModel):
     patient: Optional[PatientFullResponse] = None
     samples: List[SampleResponse]
     report: ReportDetailResponse
+    #: Céluma 1.4.4: whether THE CALLER may withdraw this report from review (server-computed).
+    review_withdrawal: Optional[ReviewWithdrawalState] = None
 
 
 class PatientCaseSummary(BaseModel):

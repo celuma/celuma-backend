@@ -122,6 +122,9 @@ class OrderManagementState(BaseModel):
     #: Céluma 1.4.1: changing the report template — the edit window plus "no report exists yet" (a report
     #: freezes its template at creation, so a later choice could never reach it). Absent on older APIs.
     report_template: Optional[ActionState] = None
+    #: Céluma 1.4.4: adding a sample to this existing order (`lab:create_sample`; refused 409 `order_in_review` while the
+    #: order or its report is under review). Absent on older APIs; the write endpoint re-checks under the lock.
+    sample_creation: Optional[ActionState] = None
     #: Plain-language consequences of removal, for the confirmation dialog.
     removal_consequences: List[str] = []
 

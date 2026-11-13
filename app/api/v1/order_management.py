@@ -92,6 +92,7 @@ def get_order_management_state(
     template_blockers = list(eligibility.blockers) + _template_blockers(session, order)
     samples = session.exec(select(Sample.id).where(Sample.order_id == order.id)).all()
     can_edit = has_permission(user.id, "lab:update_order", session)
+    creation_blockers = order_lifecycle.sample_creation_blockers(session, order)
     return OrderManagementState(
         order_id=str(order.id), order_code=order.order_code, status=getattr(order.status, "value", str(order.status)),
         edit=ActionState(permitted=can_edit, allowed=eligibility.allowed, blockers=_blockers(eligibility.blockers)),
@@ -99,6 +100,9 @@ def get_order_management_state(
                             allowed=not removal_blockers, blockers=_blockers(removal_blockers)),
         report_template=ActionState(permitted=can_edit, allowed=not template_blockers,
                                     blockers=_blockers(template_blockers)),
+        sample_creation=ActionState(
+            permitted=has_permission(user.id, "lab:create_sample", session), allowed=not creation_blockers,
+            blockers=_blockers(creation_blockers)),
         sample_count=len(samples), has_report=bool(eligibility.report_ids),
         removal_consequences=_order_removal_consequences(len(samples), len(eligibility.report_ids)),
     )
@@ -147,7 +151,8 @@ def get_sample_management_state(
     order = session.get(Order, sample.order_id)
     if order is None:
         raise HTTPException(404, "Sample not found")
-    eligibility = order_lifecycle.evaluate(session, order)
+    # Céluma 1.4.4: sample-level actions use the sample scope (retraction exception); order-level ones do not.
+    eligibility = order_lifecycle.evaluate(session, order, order_lifecycle.SCOPE_SAMPLE)
     removal_blockers = list(eligibility.blockers) + capture_removal.sample_blockers(session, sample)
     return SampleManagementState(
         sample_id=str(sample.id), sample_code=sample.sample_code, order_id=str(order.id), order_code=order.order_code,

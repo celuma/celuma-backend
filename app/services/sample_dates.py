@@ -79,7 +79,9 @@ def update_sample_dates(
     if sample is None or str(sample.tenant_id) != str(tenant_id):
         raise HTTPException(404, "Sample not found")
 
-    order = order_lifecycle.lock_and_guard(session, sample.order_id, tenant_id)
+    # Céluma 1.4.4: sample scope, so a formally retracted report no longer locks the correction.
+    order, eligibility = order_lifecycle.lock_and_guard_with_eligibility(
+        session, sample.order_id, tenant_id, order_lifecycle.SCOPE_SAMPLE)
     sample = session.exec(
         select(Sample).where(Sample.id == sample_id, Sample.tenant_id == tenant_id)
         .execution_options(populate_existing=True)
@@ -133,7 +135,8 @@ def update_sample_dates(
         session, tenant_id=sample.tenant_id, user_id=user.id, action="SAMPLE.DATES_UPDATED",
         entity_type="sample", entity_id=sample.id, description="Sample dates updated",
         old_values={k: old[k] for k in changed}, new_values={k: new[k] for k in changed},
-        metadata={"reason": reason, "order_id": str(sample.order_id)},
+        metadata={"reason": reason, "order_id": str(sample.order_id),
+                  **order_lifecycle.exception_metadata(eligibility)},
     )
     session.commit()
     session.refresh(sample)
