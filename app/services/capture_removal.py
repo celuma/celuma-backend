@@ -168,7 +168,8 @@ def remove_sample(session: Session, *, sample_id, tenant_id, user, reason: str) 
         session.rollback()
         return result
 
-    eligibility = order_lifecycle.evaluate(session, order)
+    # Céluma 1.4.4: sample scope, so a formally retracted report no longer locks the removal.
+    eligibility = order_lifecycle.evaluate(session, order, order_lifecycle.SCOPE_SAMPLE)
     blockers = list(eligibility.blockers) + sample_blockers(session, sample)
     if blockers:
         raise LifecycleError(blockers, "This sample cannot be removed: " + "; ".join(b.message for b in blockers))
@@ -187,7 +188,8 @@ def remove_sample(session: Session, *, sample_id, tenant_id, user, reason: str) 
     record_audit(
         session, tenant_id=sample.tenant_id, user_id=user.id, action="SAMPLE.REMOVED", entity_type="sample",
         entity_id=sample.id, description="Sample removed as an erroneous capture",
-        metadata={"reason": reason, "sample_code": sample.sample_code, "order_id": str(sample.order_id)},
+        metadata={"reason": reason, "sample_code": sample.sample_code, "order_id": str(sample.order_id),
+                  **order_lifecycle.exception_metadata(eligibility)},
     )
     # The order's aggregate status follows its remaining samples (same rule as every sample change).
     from app.api.v1.laboratory import update_order_status

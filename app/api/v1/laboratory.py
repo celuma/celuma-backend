@@ -4,6 +4,7 @@ from uuid import UUID
 from sqlmodel import select, Session, and_, func
 from sqlalchemy import cast, String
 from app.core.db import get_session
+from app.core.soft_removal import INCLUDE_REMOVED
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
 from app.core.rbac import has_permission, get_user_roles, ROLE_REVIEWER
 from app.models.laboratory import Order, Sample, SampleImage, Label, OrderLabel, SampleLabel
@@ -89,6 +90,7 @@ from app.schemas.laboratory import (
     SamplesListResponse,
     SampleFilterOptionsResponse,
     SampleDetailResponse,
+    RemovedSampleDetailResponse,
     OrderSlim,
     LabelCreate,
     LabelResponse,
@@ -215,86 +217,26 @@ def _validate_patient(
 
 
 def update_order_status(order_id: str, session: Session) -> None:
-    """
-    Automatically update order status based on current state of samples and reports.
-    
-    Rules:
-    - RECEIVED: order created + at least 1 sample
-    - PROCESSING: at least 1 sample is PROCESSING, READY, CANCELLED, or DAMAGED
-    - DIAGNOSIS: meets PROCESSING + at least 1 report exists
-    - REVIEW: report is in REVIEW or RETRACTED status
-    - CLOSED: report is PUBLISHED
-    - RELEASED: payment cleared (billed_lock=False) + meets CLOSED
-    - CANCELLED: if report is CANCELLED
-    """
-    from app.models.enums import OrderStatus, SampleState, ReportStatus
-    
-    # Get order with samples
+    """Derive the order phase from its report, or its samples before a report exists."""
     order = session.get(Order, order_id)
-    if not order:
+    if not order or order.status == OrderStatus.CANCELLED:
         return
-    
-    # Get all samples for this order
-    samples = session.exec(
-        select(Sample).where(Sample.order_id == order_id)
-    ).all()
-    
-    # Check if there are any reports for this order
-    reports = session.exec(
-        select(Report)
-        .where(Report.order_id == order_id)
-        .order_by(Report.created_at.desc())
-    ).all()
-    
-    latest_report = reports[0] if reports else None
-    
-    # Rule: At least 1 sample required
-    if not samples:
-        # Keep as RECEIVED if no samples yet
-        if order.status != OrderStatus.RECEIVED:
-            order.status = OrderStatus.RECEIVED
-            session.add(order)
-            session.flush()
-        return
-    
-    # Check sample states
-    has_processing_or_beyond = any(
-        s.state in [SampleState.PROCESSING, SampleState.READY, SampleState.DAMAGED, SampleState.CANCELLED]
-        for s in samples
-    )
-    
-    # Determine new status
-    new_status = OrderStatus.RECEIVED
-    
-    if has_processing_or_beyond:
-        new_status = OrderStatus.PROCESSING
-        
-        if latest_report:
-            # Has report - move to DIAGNOSIS or beyond
-            new_status = OrderStatus.DIAGNOSIS
-            
-            if latest_report.status in [ReportStatus.IN_REVIEW, ReportStatus.RETRACTED]:
-                # Validate reviewers are assigned before moving to REVIEW
-                # Check in ReportReview table for the report
-                reviewer_count = session.exec(
-                    select(ReportReview).where(
-                        and_(
-                            ReportReview.report_id == latest_report.id,
-                            ReportReview.status == ReviewStatus.PENDING,
-                        )
-                    )
-                ).all()
-                if not reviewer_count or len(reviewer_count) == 0:
-                    raise HTTPException(400, "Cannot move to REVIEW status without reviewers assigned")
-                new_status = OrderStatus.REVIEW
-            elif latest_report.status == ReportStatus.PUBLISHED:
-                new_status = OrderStatus.CLOSED
-                
-                # Check if can be released (payment cleared)
-                if not order.billed_lock:
-                    new_status = OrderStatus.RELEASED
-    
-    # Update if changed
+
+    latest_report = session.exec(
+        select(Report).where(Report.order_id == order.id)
+        .order_by(Report.created_at.desc(), Report.id.desc()).limit(1)
+    ).first()
+    if latest_report is not None:
+        new_status = order_lifecycle.order_status_for_report(order, latest_report)
+    else:
+        sample_in_process = session.exec(
+            select(Sample.id).where(
+                Sample.order_id == order.id,
+                Sample.state.in_((SampleState.PROCESSING, SampleState.READY, SampleState.DAMAGED, SampleState.CANCELLED)),
+            ).limit(1)
+        ).first()
+        new_status = OrderStatus.PROCESSING if sample_in_process else OrderStatus.RECEIVED
+
     if order.status != new_status:
         order.status = new_status
         session.add(order)
@@ -986,19 +928,34 @@ def get_sample_filter_options(
     _require(user.id, "lab:read", session)
     return sample_filter_options(session, ctx.tenant_id)
 
-@router.get("/samples/{sample_id}", response_model=SampleDetailResponse)
+@router.get("/samples/{sample_id}", response_model=SampleDetailResponse | RemovedSampleDetailResponse)
 def get_sample_detail(
     sample_id: str,
+    include_withdrawal: bool = False,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Get complete detail for a sample (requires lab:read)."""
+    """Get sample detail, optionally including a historical withdrawal summary (requires lab:read)."""
     _require(user.id, "lab:read", session)
     s = session.get(Sample, sample_id)
-    if not s:
-        raise HTTPException(404, "Sample not found")
-    if str(s.tenant_id) != ctx.tenant_id:
+    if not s and include_withdrawal:
+        withdrawal = session.exec(
+            select(Sample.sample_code, Sample.removed_at, Sample.removal_reason, Order.id, Order.order_code)
+            .join(Order, Order.id == Sample.order_id)
+            .where(
+                Sample.id == sample_id, Sample.tenant_id == ctx.tenant_id, Sample.removed_at.is_not(None),
+                Order.tenant_id == ctx.tenant_id, Order.removed_at.is_(None),
+            )
+            .execution_options(**{INCLUDE_REMOVED: True})
+        ).first()
+        if withdrawal is not None:
+            code, removed_at, reason, order_id, order_code = withdrawal
+            return RemovedSampleDetailResponse(
+                sample_code=code, removed_at=removed_at, removal_reason=reason,
+                order_id=str(order_id), order_code=order_code,
+            )
+    if not s or str(s.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Sample not found")
 
     branch = session.get(Branch, s.branch_id)
@@ -1324,6 +1281,11 @@ def create_sample(
     # Céluma 1.4 (#11): same order lock as removal, edit and review submission, so a sample can never be
     # added to an order that is being removed (taken after the idempotency lock, before any counter).
     order_lifecycle.lock_and_refresh_order(session, order)
+    # Céluma 1.4.4: refused while the order or its report is in active review. Evaluated on the rows read AFTER
+    # the lock (review submission takes the same lock), before any number is allocated or any row is written, so
+    # a refusal leaves the order, the sample count and every counter untouched. A valid idempotent replay returned
+    # above, before this point, and is unaffected.
+    order_lifecycle.guard_sample_creation(session, order)
 
     # Céluma 1.4 (#17): a new sample requires an active type of THIS tenant.
     sample_type = require_active_sample_types(session, ctx.tenant_id, [sample_data.sample_type_id])[
@@ -2061,6 +2023,12 @@ def delete_sample_image(
     if str(sample.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Sample not found")
     
+    # Serialize with report saves, submission and signing checks.
+    order_lifecycle.lock_order(session, sample.order_id)
+    session.refresh(sample)
+    if sample.removed_at is not None:
+        raise HTTPException(404, "Sample not found")
+
     # Verify image exists and belongs to this sample
     sample_image = session.get(SampleImage, image_id)
     if not sample_image:
@@ -2068,6 +2036,17 @@ def delete_sample_image(
     if str(sample_image.sample_id) != sample_id:
         raise HTTPException(404, "Image not found")
     
+    # The publish claim outlives the order lock while the PDF is rendered.
+    from app.api.v1.reports import _refuse_while_publishing
+
+    for version in session.exec(
+        select(ReportVersion).join(Report, Report.id == ReportVersion.report_id).where(
+            Report.order_id == sample.order_id, Report.tenant_id == sample.tenant_id,
+            ReportVersion.is_current.is_(True), ReportVersion.publish_started_at.is_not(None),
+        )
+    ):
+        _refuse_while_publishing(version)
+
     # Get the storage object to get the filename for the event
     storage = session.get(StorageObject, sample_image.storage_id)
     filename = storage.object_key.split("/")[-1] if storage else "imagen"
@@ -2118,6 +2097,7 @@ def delete_sample_image(
         event_metadata={
             "filename": filename,
             "image_id": image_id,
+            "object_key": storage.object_key if storage else None,
             "sample_id": str(sample.id),
             "sample_code": sample.sample_code,
         },
@@ -2183,10 +2163,15 @@ def build_order_full_detail(
     if label_ids:
         labels = session.exec(select(Label).where(Label.id.in_(label_ids))).all()
 
+    report = session.get(Report, order.report_id) if order.report_id else None
     order_resp = OrderDetailResponse(
         id=str(order.id),
         order_code=order.order_code,
-        status=order.status,
+        status=(
+            order_lifecycle.order_status_for_report(order, report)
+            if report is not None and report.order_id == order.id and report.tenant_id == order.tenant_id
+            and order.status != OrderStatus.CANCELLED else order.status
+        ),
         patient_id=str(order.patient_id) if order.patient_id else None,
         requesting_physician_id=str(order.requesting_physician_id) if order.requesting_physician_id else None,
         tenant_id=str(order.tenant_id),
@@ -2254,7 +2239,6 @@ def build_order_full_detail(
 
     # Get report meta (if any) using latest/current version
     report_meta = None
-    report = session.get(Report, order.report_id) if order.report_id else None
     if report:
         current_version = session.exec(
             select(ReportVersion)

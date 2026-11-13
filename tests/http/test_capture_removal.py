@@ -59,6 +59,26 @@ class TestSampleRemoval:
         row = session.execute(text("SELECT sample_code, removed_at, removal_reason FROM sample WHERE id = :i"), {"i": gone}).one()
         assert row.sample_code == reg["sample_codes"][0] and row.removed_at is not None and row.removal_reason == "captura duplicada"
 
+    def test_withdrawal_summary_is_available_only_to_the_owning_lab_on_an_active_order(self, client, session, lab):
+        reg = register(client, lab, ("BX", "TJ"))
+        gone, kept = reg["sample_ids"]
+        url = f"{LAB}/samples/{gone}?include_withdrawal=true"
+        assert "removed_at" not in client.get(url, headers=lab.headers).json()
+        removed = remove_sample(client, lab, gone).json()
+        card = client.get(url, headers=lab.headers)
+        assert card.status_code == 200, card.text
+        assert card.json() == {
+            "sample_code": reg["sample_codes"][0],
+            "order_id": reg["order_id"],
+            "order_code": reg["order_code"],
+            "removed_at": removed["removed_at"],
+            "removal_reason": "captura duplicada",
+        }
+        assert client.get(url, headers=Lab(session, "Otro").headers).status_code == 404
+        assert remove_order(client, lab, reg["order_id"]).status_code == 200
+        assert client.get(url, headers=lab.headers).status_code == 404
+        assert client.get(f"{LAB}/samples/{kept}?include_withdrawal=true", headers=lab.headers).status_code == 404
+
     def test_direct_mutations_of_a_removed_sample_are_404(self, client, session, lab):
         reg = register(client, lab, ("BX", "BX"))
         sid = reg["sample_ids"][0]

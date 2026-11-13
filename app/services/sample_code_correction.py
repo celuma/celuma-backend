@@ -77,7 +77,9 @@ def correct_sample_code(session: Session, *, sample_id, tenant_id, user, new_cod
     # code lock while we wait for the order, no cycle can form.
     numbering.lock_code(session, tenant_id, numbering.SAMPLE, new_code, wait=True)
     # Lifecycle/evidence guard under the order lock review, signing and removal share.
-    order = order_lifecycle.lock_and_guard(session, sample.order_id, tenant_id)
+    # Céluma 1.4.4: sample scope, so a formally retracted report no longer locks the correction.
+    order, eligibility = order_lifecycle.lock_and_guard_with_eligibility(
+        session, sample.order_id, tenant_id, order_lifecycle.SCOPE_SAMPLE)
     sample = session.exec(
         select(Sample).where(Sample.id == sample_id, Sample.tenant_id == tenant_id)
         .execution_options(populate_existing=True)
@@ -110,7 +112,8 @@ def correct_sample_code(session: Session, *, sample_id, tenant_id, user, new_cod
         session, tenant_id=sample.tenant_id, user_id=user.id, action="SAMPLE.CODE_CORRECTED",
         entity_type="sample", entity_id=sample.id, description="Sample code corrected",
         old_values={"sample_code": old_code}, new_values={"sample_code": new_code},
-        metadata={"reason": reason, "order_id": str(sample.order_id)},
+        metadata={"reason": reason, "order_id": str(sample.order_id),
+                  **order_lifecycle.exception_metadata(eligibility)},
     )
     session.commit()
     session.refresh(sample)

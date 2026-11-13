@@ -576,7 +576,7 @@ def make_review_decision(
     # decides on the fresh state. A decision that lost the race to an
     # amendment cancellation (which restores the delivered emission's
     # decisions) or to a signature is refused instead of overwriting it.
-    from app.api.v1.reports import _lock_report_version, _refuse_while_publishing
+    from app.api.v1.reports import _lock_report_version, _refuse_while_publishing, update_order_status_for_report
     from app.services import order_lifecycle
 
     order_lifecycle.lock_report_order(session, report)
@@ -592,6 +592,8 @@ def make_review_decision(
                 ),
             },
         )
+    if report.status == ReportStatus.DRAFT:
+        raise HTTPException(409, {"code": "report_review_not_active", "message": "El reporte ya no está en revisión."})
     if report.status == ReportStatus.APPROVED:
         _refuse_while_publishing(_lock_report_version(session, report, current=True))
 
@@ -653,8 +655,10 @@ def make_review_decision(
             )
             session.add(event)
     elif new_status == ReviewStatus.REJECTED:
-        # If rejected, check if we need to revert report status
-        if previous_status == ReviewStatus.APPROVED:
+        if report.status == ReportStatus.IN_REVIEW:
+            report.status = ReportStatus.DRAFT
+            session.add(report)
+        elif previous_status == ReviewStatus.APPROVED:
             # Check if there are other approved reviews
             other_approved = session.exec(
                 select(ReportReview).where(
@@ -706,6 +710,7 @@ def make_review_decision(
         )
         session.add(order_comment)
     
+    update_order_status_for_report(str(report.order_id), session)
     session.commit()
     session.refresh(review)
     

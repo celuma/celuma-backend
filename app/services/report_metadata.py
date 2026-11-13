@@ -53,10 +53,14 @@ import logging
 import re
 from datetime import date, datetime
 from typing import Optional, Union
+from urllib.parse import unquote, urlsplit
 
 from sqlmodel import Session, select
 
-from app.models.laboratory import Order, Sample
+from app.core.soft_removal import INCLUDE_REMOVED
+from app.models.enums import EventType
+from app.models.events import OrderEvent
+from app.models.laboratory import Order, Sample, SampleImage
 from app.models.report import ReportVersion
 from app.services import order_management
 from app.models.storage import StorageObject
@@ -188,6 +192,76 @@ def stale_sample_codes(session: Session, order: Optional[Order], body: Optional[
     stored = stored if isinstance(stored, str) else ""
     current = resolve_sample_codes(session, order)
     return None if stored == current else (stored, current)
+
+
+def without_removed_sample_figures(
+    session: Session, body: Optional[dict], order_id, tenant_id,
+) -> Optional[dict]:
+    """Omit figures whose source sample or gallery image was removed from this order."""
+    sections = body.get("sections") if isinstance(body, dict) else None
+    if not isinstance(sections, dict):
+        return body
+    image_sections = {
+        key: section for key, section in sections.items()
+        if isinstance(section, dict) and section.get("type") == "images"
+        and isinstance(section.get("content"), list) and section["content"]
+    }
+    if not image_sections:
+        return body
+    removed = session.exec(
+        select(SampleImage.id, StorageObject.object_key)
+        .join(Sample, Sample.id == SampleImage.sample_id)
+        .join(StorageObject, StorageObject.id == SampleImage.storage_id)
+        .where(
+            Sample.order_id == order_id, Sample.tenant_id == tenant_id, Sample.removed_at.is_not(None),
+            SampleImage.tenant_id == tenant_id,
+        )
+        .execution_options(**{INCLUDE_REMOVED: True})
+    ).all()
+    deletions = session.exec(
+        select(OrderEvent.branch_id, OrderEvent.event_metadata).where(
+            OrderEvent.order_id == order_id, OrderEvent.tenant_id == tenant_id,
+            OrderEvent.event_type == EventType.IMAGE_DELETED,
+        )
+    ).all()
+    ids = {str(image_id) for image_id, _ in removed}
+    keys = {key for _, key in removed if key.startswith("samples/")}
+    for event_branch_id, metadata in deletions:
+        if isinstance(metadata, dict):
+            if isinstance(image_id := metadata.get("image_id"), str) and image_id:
+                ids.add(image_id)
+            if isinstance(key := metadata.get("object_key"), str) and key.startswith("samples/"):
+                keys.add(key)
+            elif (
+                isinstance(sample_id := metadata.get("sample_id"), str) and sample_id
+                and isinstance(filename := metadata.get("filename"), str) and filename
+            ):
+                keys.add(f"samples/{tenant_id}/{event_branch_id}/{sample_id}/processed/{filename}")
+    if not ids and not keys:
+        return body
+
+    def figure_source_removed(item):
+        if not isinstance(item, dict):
+            return False
+        if str(item.get("id")) in ids:
+            return True
+        # Older figures may lack the source ID. Match the stored object key,
+        # including path-style S3 URLs and URL-encoded filenames.
+        url = item.get("url")
+        if not keys or not isinstance(url, str):
+            return False
+        try:
+            path = unquote(urlsplit(url).path).lstrip("/")
+        except ValueError:
+            return False
+        return path in keys or path.partition("/")[2] in keys
+
+    updated = {}
+    for key, section in image_sections.items():
+        content = [item for item in section["content"] if not figure_source_removed(item)]
+        if len(content) != len(section["content"]):
+            updated[key] = {**section, "content": content}
+    return {**body, "sections": {**sections, **updated}} if updated else body
 
 
 def declared_base_fields(template: Optional[dict]) -> dict:

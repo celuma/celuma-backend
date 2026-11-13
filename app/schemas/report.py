@@ -318,6 +318,21 @@ class ReportStatusUpdate(BaseModel):
     """Schema for updating report status"""
     changelog: Optional[str] = None
 
+class ReportReviewWithdrawRequest(BaseModel):
+    """Céluma 1.4.4: withdraw a report from review. `submission_id` is the id the server gave in
+    `review_withdrawal.submission_id`; an older one is refused (409 `review_submission_stale`)."""
+    submission_id: str
+
+
+class ReviewWithdrawalState(BaseModel):
+    """Server-computed availability of "Retirar de revisión" for the CALLER (the UI shows the action only when
+    `allowed`; the endpoint re-checks everything under the order lock)."""
+    allowed: bool
+    submission_id: Optional[str] = None
+    reason_code: Optional[str] = None
+    reason: Optional[str] = None
+
+
 #: Céluma 1.4 (#13): the actor's own current password, required by signing and
 #: reopening (see app/services/password_confirmation.py). Excluded from
 #: `model_dump`/JSON and hidden from `repr`, so neither an accidental log of the

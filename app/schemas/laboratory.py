@@ -3,7 +3,7 @@ from pydantic_core import PydanticCustomError
 from typing import Optional, List, Dict, Any, ClassVar, Tuple
 from datetime import datetime
 from app.schemas.iso_input import require_iso_date_input
-from app.schemas.report import ReportMetaResponse, ReportDetailResponse
+from app.schemas.report import ReportMetaResponse, ReportDetailResponse, ReviewWithdrawalState
 from app.schemas.patient import PatientFullResponse
 from app.schemas.sample_type import SampleTypeRef
 from app.services import numbering, order_management
@@ -510,6 +510,8 @@ class ReportFullDetailResponse(BaseModel):
     patient: Optional[PatientFullResponse] = None
     samples: List[SampleResponse]
     report: ReportDetailResponse
+    #: Céluma 1.4.4: whether THE CALLER may withdraw this report from review (server-computed).
+    review_withdrawal: Optional[ReviewWithdrawalState] = None
 
 
 class PatientCaseSummary(BaseModel):
@@ -681,6 +683,15 @@ class OrderFilterOptionsResponse(BaseModel):
     #: Whether any order names a requester (catalog physician or free text);
     #: the list shows its "Solicitante" column only then.
     has_requester: bool
+
+
+class RemovedSampleDetailResponse(BaseModel):
+    """Minimal historical detail for a withdrawn sample belonging to an active order."""
+    sample_code: str
+    order_id: str
+    order_code: str
+    removed_at: datetime
+    removal_reason: Optional[str] = None
 
 
 class SampleDetailResponse(BaseModel):
