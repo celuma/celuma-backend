@@ -11,6 +11,7 @@ Contract: `celuma-engineering/specs/laboratory/order-sample-management.md` and `
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 import uuid
@@ -21,8 +22,12 @@ from sqlalchemy import text
 from app.models.audit import AuditLog
 from app.models.enums import EventType, OrderStatus, ReportStatus, ReviewStatus, SampleState
 from app.models.events import OrderEvent
+from app.models.laboratory import SampleImage
 from app.models.report import Report
 from app.models.report_amendment import ReportAmendment
+from app.models.storage import StorageObject
+
+from .conftest import FakeS3Service
 
 from .factories import (
     assign_reviewer,
@@ -31,6 +36,7 @@ from .factories import (
     create_order,
     create_report,
     create_sample,
+    create_storage_object,
     create_tenant,
     create_user,
 )
@@ -370,8 +376,9 @@ def w_state(client, world, actor=None):
     return res.json()["review_withdrawal"]
 
 
-def w_save(client, world, actor=None):
-    body = {"base": {}, "sections": {}, "base_order": [], "section_order": []}
+def w_save(client, world, actor=None, *, body=None):
+    if body is None:
+        body = {"base": {}, "sections": {}, "base_order": [], "section_order": []}
     return client.post(
         f"{API}/reports/{world['report'].id}/new_version",
         json={"tenant_id": str(world["tenant"].id), "branch_id": str(world["branch"].id),
@@ -431,6 +438,81 @@ def test_received_samples_can_be_corrected_between_reviews(client, session, worl
     detail = client.get(f"{LAB}/orders/{order.id}/full", headers=headers)
     assert detail.status_code == 200, detail.text
     assert detail.json()["order"]["status"] == "REVIEW"
+
+
+@pytest.mark.parametrize("remove_source", ["sample", "image", "previously_deleted_image"])
+def test_removed_source_hides_only_its_figures_and_persists_the_filtered_draft(client, session, world, remove_source):
+    tenant, branch, order = world["tenant"], world["branch"], world["order"]
+    removed = create_sample(session, tenant, branch, order, sample_code="TO-REMOVE")
+    kept = create_sample(session, tenant, branch, order, sample_code="TO-KEEP")
+    figures = []
+    for sample in (removed, kept):
+        key = f"samples/{tenant.id}/{branch.id}/{sample.id}/processed/synthetic figure.jpg"
+        storage = create_storage_object(session, key=key, tenant=tenant)
+        image = SampleImage(tenant_id=tenant.id, branch_id=branch.id, sample_id=sample.id, storage_id=storage.id)
+        session.add(image)
+        session.commit()
+        figures.append({
+            "id": str(image.id), "url": "https://media.example.test/" + key.replace(" ", "%20"),
+            "caption": sample.sample_code,
+        })
+    legacy = {**figures[0], "id": "", "caption": "Legacy figure"}
+    unrelated = {"id": "legacy-external", "url": "https://other.example.test/figure.jpg", "caption": "Keep"}
+    original = [figures[0], unrelated, legacy, figures[1]]
+    body = {"sections": {"images": {"type": "images", "is_visible": True, "content": original}}}
+    version_storage = session.get(StorageObject, world["version"].json_storage_id)
+    version_key = version_storage.object_key
+    stored = {**json.loads(FakeS3Service.store[version_key]), **body}
+    original_bytes = json.dumps(stored).encode()
+    FakeS3Service.store[version_key] = original_bytes
+
+    removal_headers = auth_headers(world["admin"])
+    if remove_source == "sample":
+        result = client.post(
+            f"{LAB}/samples/{removed.id}/removal", json={"reason": "Captura duplicada"}, headers=removal_headers,
+        )
+    else:
+        image_url = f"{LAB}/samples/{removed.id}/images/{figures[0]['id']}"
+        session.execute(
+            text("UPDATE report_version SET publish_started_at = now() WHERE id = :id"),
+            {"id": str(world["version"].id)},
+        )
+        session.commit()
+        busy = client.delete(image_url, headers=removal_headers)
+        assert busy.status_code == 409 and busy.json()["detail"]["code"] == "report_publish_in_progress"
+        session.execute(
+            text("UPDATE report_version SET publish_started_at = NULL WHERE id = :id"),
+            {"id": str(world["version"].id)},
+        )
+        session.commit()
+        result = client.delete(image_url, headers=removal_headers)
+        if remove_source == "previously_deleted_image":
+            session.execute(text(
+                "UPDATE order_event SET event_metadata = CAST(event_metadata AS jsonb) - 'object_key' "
+                "WHERE order_id = :id AND event_type = 'IMAGE_DELETED'"
+            ), {"id": str(order.id)})
+            session.commit()
+    assert result.status_code == 200, result.text
+    url = f"{API}/reports/{world['report'].id}"
+    headers = auth_headers(world["author"])
+    draft = client.get(f"{url}/full", headers=headers)
+    assert draft.status_code == 200, draft.text
+    expected = [unrelated, figures[1]]
+    assert draft.json()["report"]["report"]["sections"]["images"]["content"] == expected
+
+    stale = w_submit(client, world)
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "report_sample_images_stale"
+
+    # An editor that was open before removal may still send the old body.
+    saved = w_save(client, world, body=body)
+    assert saved.status_code == 200, saved.text
+    current = client.get(url, headers=headers)
+    assert current.json()["report"]["sections"]["images"]["content"] == expected
+    history = client.get(f"{url}/1", headers=headers)
+    assert history.json()["report"]["sections"]["images"]["content"] == original
+    assert FakeS3Service.store[version_key] == original_bytes
+    assert w_submit(client, world).status_code == 200
 
 
 class TestWithdrawFromReview:

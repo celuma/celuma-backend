@@ -142,6 +142,7 @@ from app.services.report_metadata import (
     apply_authoritative_report_metadata,
     embed_delivery_date_at_signing,
     stale_sample_codes,
+    without_removed_sample_figures,
 )
 from app.schemas.report import (
     ReportCreate, 
@@ -302,6 +303,17 @@ def update_order_status_for_report(order_id: str, session: Session) -> None:
 # ---------------------------------------------------------------------------
 # Céluma 1.4 (#13): amendment helpers shared by the lifecycle routes
 # ---------------------------------------------------------------------------
+
+def _require_current_sample_images(session: Session, report: Report, body: dict | None) -> None:
+    if without_removed_sample_figures(session, body, report.order_id, report.tenant_id) is not body:
+        raise HTTPException(409, {
+            "code": "report_sample_images_stale",
+            "message": (
+                "El reporte contiene imágenes retiradas de la orden. "
+                "Guarda el borrador actualizado y vuelve a enviarlo a revisión."
+            ),
+        })
+
 
 def _version_body(session: Session, version: ReportVersion | None) -> dict | None:
     """The stored JSON body of a version, or None when it cannot be read."""
@@ -919,6 +931,7 @@ def create_report(
         # Céluma 1.4 (#13): an original is never an amended document; only the
         # amendment routes write the identification block.
         body.pop(report_amendments.AMENDMENT_KEY, None)
+        body = without_removed_sample_figures(session, body, report.order_id, report.tenant_id)
         # Céluma 1.3.1 Block C: the V2 marker is the server-built SNAPSHOT,
         # not the presence of a `ReportTemplateVersion`. A report built from
         # the live template is fully V2 and carries no version row.
@@ -1394,6 +1407,9 @@ def create_report_new_version(
         ),
     )
 
+    carried_report_body = without_removed_sample_figures(
+        session, carried_report_body, report.order_id, report.tenant_id,
+    )
     json_storage_id = None
     if carried_report_body is not None:
         s3 = S3Service()
@@ -2281,6 +2297,9 @@ def _build_report_detail_response(
             except Exception:
                 report_json = None
 
+    if version and version.is_current and report.status == ReportStatus.DRAFT and not is_signed_version(version):
+        report_json = without_removed_sample_figures(session, report_json, report.order_id, report.tenant_id)
+
     return ReportDetailResponse(
         id=str(report.id),
         version_no=(version.version_no if version else None),
@@ -3072,7 +3091,9 @@ def submit_report(
     # Céluma 1.4 (#12): the reviewed content must carry the order's CURRENT sample codes. A code
     # corrected after the last save (the correction is only possible before review) is refused here,
     # under the order lock, with an actionable message; nothing is rewritten silently.
-    stale = stale_sample_codes(session, session.get(Order, report.order_id), _version_body(session, submit_version))
+    submit_body = _version_body(session, submit_version)
+    _require_current_sample_images(session, report, submit_body)
+    stale = stale_sample_codes(session, session.get(Order, report.order_id), submit_body)
     if stale is not None:
         raise HTTPException(
             409,
@@ -4492,6 +4513,7 @@ def sign_report(
         )
 
     _require_amendment_signable(session, report, current_version)
+    _require_current_sample_images(session, report, _version_body(session, current_version))
 
     require_password_confirmation(
         session,
@@ -4635,6 +4657,7 @@ def sign_and_publish_report(
     require_v2_authoring(report, current_version)
 
     _require_amendment_signable(session, report, current_version)
+    _require_current_sample_images(session, report, _version_body(session, current_version))
 
     # Céluma 1.4 (#13): every guard above has passed and nothing has been
     # written yet — the claim below is the first write.

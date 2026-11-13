@@ -2006,6 +2006,12 @@ def delete_sample_image(
     if str(sample.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Sample not found")
     
+    # Serialize with report saves, submission and signing checks.
+    order_lifecycle.lock_order(session, sample.order_id)
+    session.refresh(sample)
+    if sample.removed_at is not None:
+        raise HTTPException(404, "Sample not found")
+
     # Verify image exists and belongs to this sample
     sample_image = session.get(SampleImage, image_id)
     if not sample_image:
@@ -2013,6 +2019,17 @@ def delete_sample_image(
     if str(sample_image.sample_id) != sample_id:
         raise HTTPException(404, "Image not found")
     
+    # The publish claim outlives the order lock while the PDF is rendered.
+    from app.api.v1.reports import _refuse_while_publishing
+
+    for version in session.exec(
+        select(ReportVersion).join(Report, Report.id == ReportVersion.report_id).where(
+            Report.order_id == sample.order_id, Report.tenant_id == sample.tenant_id,
+            ReportVersion.is_current.is_(True), ReportVersion.publish_started_at.is_not(None),
+        )
+    ):
+        _refuse_while_publishing(version)
+
     # Get the storage object to get the filename for the event
     storage = session.get(StorageObject, sample_image.storage_id)
     filename = storage.object_key.split("/")[-1] if storage else "imagen"
@@ -2063,6 +2080,7 @@ def delete_sample_image(
         event_metadata={
             "filename": filename,
             "image_id": image_id,
+            "object_key": storage.object_key if storage else None,
             "sample_id": str(sample.id),
             "sample_code": sample.sample_code,
         },
