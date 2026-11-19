@@ -9,7 +9,13 @@
 #
 # To update a dependency: change the version here deliberately, rebuild, and
 # run the full gate suite. Do not relax a pin back to a wildcard.
-fastapi==0.116.2
+# fastapi 0.116.2 -> 0.165.0: 0.116.x capped Starlette below 0.49, which kept
+# the HTTP layer on 0.48.0 with open advisories (Range/Host header handling,
+# request.url reconstruction, form limits). Starlette is pinned explicitly
+# because it was the vulnerable package and, like every runtime dependency,
+# must not float between builds of the same commit.
+fastapi==0.165.0
+starlette==1.10.0
 uvicorn[standard]==0.35.0
 sqlmodel==0.0.39
 sqlalchemy==2.0.52
