@@ -1,5 +1,4 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.security import HTTPBearer
 from jose import jwt, JWTError
 from sqlmodel import select, Session
 import logging
@@ -7,6 +6,7 @@ from app.core.db import get_session
 from app.models.user import AppUser, BlacklistedToken, UserBranch
 from app.models.tenant import Tenant, Branch
 from app.models.invitation import PasswordResetToken
+from app.core.bearer import ForbiddenHTTPBearer
 from app.core.security import hash_password, verify_password, create_jwt, decode_jwt
 from app.core.config import settings
 from app.core.rbac import (
@@ -38,7 +38,8 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth")
-scheme = HTTPBearer()
+# 403 for missing/malformed credentials is part of the API contract; see app/core/bearer.py.
+scheme = ForbiddenHTTPBearer()
 
 
 def split_full_name(full_name: str) -> tuple[str, str]:
