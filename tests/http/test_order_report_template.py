@@ -268,12 +268,21 @@ class TestRegistration:
         import hashlib
 
         payload = OrderUnifiedCreate(**lab.unified(("BX",)))
+        # The canonical request exactly as a 1.4.0 client sent it: without the fields added after 1.4.0,
+        # which are the order's `report_template_id` and each sample's `sample_code` (hotfix 1.4.3).
+        # Both are null here, so a 1.4.0 receipt must replay.
         legacy = payload.model_dump(mode="json")
-        legacy.pop("report_template_id")
+        assert legacy.pop("report_template_id") is None
+        for sample in legacy["samples"]:
+            assert sample.pop("sample_code") is None
         canonical = json.dumps(legacy, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         assert idempotency.fingerprint(payload) == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        # An explicit value for either field is a different request.
         explicit = OrderUnifiedCreate(**lab.unified(("BX",)), report_template_id=str(uuid.uuid4()))
         assert idempotency.fingerprint(explicit) != idempotency.fingerprint(payload)
+        typed = lab.unified(("BX",))
+        typed["samples"][0]["sample_code"] = "BX-TYPED-1"
+        assert idempotency.fingerprint(OrderUnifiedCreate(**typed)) != idempotency.fingerprint(payload)
 
 
 # ---------------------------------------------------------------------------------------- precedence
