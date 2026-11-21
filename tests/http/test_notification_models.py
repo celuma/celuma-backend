@@ -472,8 +472,9 @@ class TestNotificationPreference:
         of which stay internal or belong to Block E.
         """
         from app.main import app
+        from tests.route_inventory import iter_routes
 
-        paths = {route.path for route in app.routes}
+        paths = {path for path, _ in iter_routes(app)}
         preference_paths = {p for p in paths if "notification-preference" in p}
         assert preference_paths == {
             "/api/v1/notification-preferences",
@@ -482,9 +483,9 @@ class TestNotificationPreference:
 
         methods = {
             method
-            for route in app.routes
-            if getattr(route, "path", None) == "/api/v1/notification-preferences"
-            for method in route.methods
+            for path, route_methods in iter_routes(app)
+            if path == "/api/v1/notification-preferences"
+            for method in route_methods
             if method in {"GET", "PUT", "POST", "PATCH", "DELETE"}
         }
         assert methods == {"GET", "PUT"}

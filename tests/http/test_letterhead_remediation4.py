@@ -574,7 +574,10 @@ class TestLocalPrintHasNoBackendSurface:
         document-generation paths and the official artifact would no longer
         be the only one — see local-print-contract.md."""
         from app.main import app
+        from tests.route_inventory import route_paths
 
-        paths = {route.path for route in app.routes if hasattr(route, "path")}
+        paths = route_paths(app)
+        # Guard against an empty inventory: the check below must see the API.
+        assert "/api/v1/notification-preferences" in paths
         offenders = [p for p in paths if "print" in p.lower()]
         assert offenders == [], f"endpoints de impresión inesperados: {offenders}"

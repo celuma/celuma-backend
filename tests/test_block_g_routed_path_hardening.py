@@ -8,8 +8,15 @@ request header (``starlette/datastructures.py``, ``URL.__init__``). A ``Host``
 value containing ``?``, ``#`` or a path segment therefore changes what
 ``request.url.path`` returns, so it can disagree with the path Starlette
 actually routed on. That is the substance of CVE-2026-48710 and
-CVE-2026-54282; neither is fixed in any Starlette release FastAPI 0.116.2
-permits (``starlette<0.49.0``), so the mitigation is on Céluma's side.
+CVE-2026-54282; neither was fixed in any Starlette release FastAPI 0.116.2
+permitted (``starlette<0.49.0``), so the mitigation was made on Céluma's side.
+
+Starlette 1.3.0 fixed the reconstruction upstream, and the pinned release
+includes that fix. Céluma keeps its own mitigation as defence in depth, and
+these tests now assert both layers: the routed path *and* Starlette's
+``request.url.path`` must ignore a hostile ``Host``. Downgrading Starlette to
+a vulnerable release, or reverting a call site to ``request.url.path``, makes
+them fail.
 
 The concrete defect this locks was **not** hypothetical. ``limit_request_size``
 decided the maximum request body from the path with a *substring* test::
@@ -79,10 +86,11 @@ def build_scope(path: str = REAL_PATH, host: str = "app.celuma.mx") -> dict:
 def test_routed_path_ignores_a_hostile_host_header(hostile_host):
     scope = build_scope(host=hostile_host)
 
-    # The reconstruction is genuinely corruptible ...
-    assert URL(scope=scope).path != REAL_PATH
-    # ... but the routed path is not.
+    # Céluma's own mitigation: the routed path ignores the Host header ...
     assert _routed_path(_FakeRequest(scope)) == REAL_PATH
+    # ... and so does Starlette's reconstruction since the upstream fix
+    # (Starlette >= 1.3.0). This fails if Starlette is downgraded.
+    assert URL(scope=scope).path == REAL_PATH
 
 
 def test_routed_path_matches_request_url_for_a_well_formed_request():
@@ -105,14 +113,16 @@ def _is_raw_like(path: str) -> bool:
 def test_a_hostile_host_no_longer_escalates_the_request_size_limit():
     scope = build_scope(host="evil.com/x.dng")
 
-    # Pre-fix behaviour, kept here as the thing being prevented: the
-    # reconstructed path carries an attacker-chosen RAW extension, which the
-    # substring heuristic reads as "this is a RAW upload, allow 500 MB".
-    assert _is_raw_like(URL(scope=scope).path) is True
-
-    # Post-fix: the routed path carries no such extension, so the request
-    # keeps the ordinary 50 MB ceiling.
+    # The thing being prevented: on a vulnerable Starlette the reconstructed
+    # path carried an attacker-chosen RAW extension, which the substring
+    # heuristic read as "this is a RAW upload, allow 500 MB".
+    #
+    # The routed path carries no such extension, so the request keeps the
+    # ordinary 50 MB ceiling ...
     assert _is_raw_like(_routed_path(_FakeRequest(scope))) is False
+    # ... and since the upstream fix (Starlette >= 1.3.0) neither does
+    # `request.url.path`. This fails if Starlette is downgraded.
+    assert _is_raw_like(URL(scope=scope).path) is False
 
 
 @pytest.mark.parametrize("extension", RAW_EXTENSIONS)

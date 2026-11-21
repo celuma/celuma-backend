@@ -220,8 +220,10 @@ async def add_request_id_and_security_headers(request: Request, call_next):
 # header (starlette/datastructures.py, URL.__init__). A `Host` value carrying
 # `?`, `#` or a path segment therefore shifts what `.path` returns, so the
 # value can disagree with the path Starlette actually routed on. That is the
-# substance of CVE-2026-48710 and CVE-2026-54282, neither of which is fixed
-# in any Starlette release FastAPI 0.116.2 permits (`starlette<0.49.0`).
+# substance of CVE-2026-48710 and CVE-2026-54282, neither of which was fixed
+# in any Starlette release FastAPI 0.116.2 permitted (`starlette<0.49.0`).
+# Starlette 1.3.0 fixed it upstream and the pinned release includes the fix;
+# this helper stays as defence in depth.
 #
 # The middleware below uses the path to decide whether to SKIP rate limiting
 # and request-size limiting. Those decisions must be made on the same value

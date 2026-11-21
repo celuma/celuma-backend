@@ -11,12 +11,13 @@ few seconds has no normal user session. Authorization is a short-lived,
 narrow-purpose render token (see app/core/security.py) instead.
 """
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from sqlmodel import Session, select
 import logging
 
 from app.core.db import get_session
+from app.core.bearer import ForbiddenHTTPBearer
 from app.core.security import verify_render_token
 from app.models.report import Report, ReportVersion
 from app.models.report_review import ReportReview
@@ -42,7 +43,8 @@ class InternalRenderDataResponse(ReportDetailResponse):
     signer_lookup: list[SignerLookupItem] = []
 
 router = APIRouter(prefix="/reports/internal")
-_scheme = HTTPBearer()
+# Same 403 contract as the shared scheme in auth.py; see app/core/bearer.py.
+_scheme = ForbiddenHTTPBearer()
 
 
 class RenderTokenContext:

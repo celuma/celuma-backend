@@ -9,7 +9,13 @@
 #
 # To update a dependency: change the version here deliberately, rebuild, and
 # run the full gate suite. Do not relax a pin back to a wildcard.
-fastapi==0.116.2
+# fastapi 0.116.2 -> 0.165.0: 0.116.x capped Starlette below 0.49, which kept
+# the HTTP layer on 0.48.0 with open advisories (Range/Host header handling,
+# request.url reconstruction, form limits). Starlette is pinned explicitly
+# because it was the vulnerable package and, like every runtime dependency,
+# must not float between builds of the same commit.
+fastapi==0.165.0
+starlette==1.10.0
 uvicorn[standard]==0.35.0
 sqlmodel==0.0.39
 sqlalchemy==2.0.52
@@ -29,16 +35,20 @@ email-validator==2.2.0
 # also comes from the upload. That made the PSD, FITS, JPEG2000 and GD decoder
 # advisories genuinely reachable. 12.3.0 is the first release fixing all of
 # them. See docs/celuma-1.3/phase-5-block-g/block-g-dependency-disposition.md.
+#
+# Pillow 12.3.0 -> 13.0.0: first release fixing the decoder advisories opened
+# against 12.3.0. Same attacker-supplied input surface as above.
 boto3==1.34.162
-Pillow==12.3.0
+Pillow==13.0.0
 # Céluma 1.4 (#21): HEIC decoding. Pillow has no HEIF support of its own;
 # pillow-heif ships manylinux wheels (x86_64/aarch64, cp312) that bundle
 # libheif, so the slim Debian image needs no extra apt packages. It parses
 # ATTACKER-SUPPLIED containers: it is only invoked after the ISO-BMFF brand
 # sniff and the header-level size checks in app/services/image_processing.py.
 pillow-heif==1.8.1
+# rawpy decodes RAW uploads; it pulls numpy itself. imageio was removed: no
+# module imported it.
 rawpy==0.25.1
-imageio==2.34.2
 
 # Céluma 1.3 Fase 2, Bloque E: official PDF generation. `playwright` drives
 # headless Chromium against the frontend's internal render route; `pypdf`
@@ -55,8 +65,11 @@ imageio==2.34.2
 # rendered from tenant-authored report content, so the DoS advisories are
 # indirectly influenced by an authenticated user. Defence in depth on a
 # four-call-site surface.
+#
+# pypdf 6.16.1 -> 6.21.4: first 6.x release that fixes every advisory open
+# against 6.16.1 (all DoS on malformed input). No major-version change.
 playwright==1.49.1
-pypdf==6.16.1
+pypdf==6.21.4
 
 # Test-only dependencies (pytest, pytest-cov, httpx) live in
 # requirements-dev.txt so they never reach the production image.
