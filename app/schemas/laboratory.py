@@ -610,6 +610,20 @@ class OrderListItem(BaseModel):
     assignees: Optional[List[UserRef]] = None
 
 
+class ListLocation(BaseModel):
+    """Answer to a list request's `locate` parameter (Céluma 1.5, #66).
+
+    `matches` says whether the record is in the result of the same search and
+    filters; `position` (1-based) and `page` say where the same ordering puts it.
+    A record that does not match (another tenant, removed, or filtered out after
+    a change such as its status) only has `matches=False`.
+    """
+    id: str
+    matches: bool
+    position: Optional[int] = None
+    page: Optional[int] = None
+
+
 class OrdersListResponse(BaseModel):
     """Response for GET /laboratory/orders/ with enriched items.
 
@@ -622,6 +636,8 @@ class OrdersListResponse(BaseModel):
     total: Optional[int] = None
     page: Optional[int] = None
     page_size: Optional[int] = None
+    #: Only when the request carried `locate` (Céluma 1.5, #66).
+    located: Optional[ListLocation] = None
 
 
 class SampleListItem(BaseModel):
@@ -646,6 +662,8 @@ class SamplesListResponse(BaseModel):
     total: Optional[int] = None
     page: Optional[int] = None
     page_size: Optional[int] = None
+    #: Only when the request carried `locate` (Céluma 1.5, #66).
+    located: Optional[ListLocation] = None
 
 
 class FilterOption(BaseModel):

@@ -21,6 +21,8 @@ from fastapi import HTTPException
 from sqlalchemy import func
 from sqlmodel import select
 
+from app.schemas.laboratory import ListLocation
+
 from app.services.list_search import SearchQueryError, parse_search_query
 
 DEFAULT_PAGE_SIZE = 20
@@ -114,3 +116,47 @@ def run_list(session, stmt, request: Optional[PageRequest], build: Callable[...,
     total = count_rows(session, stmt)
     rows = session.exec(stmt.offset(request.offset).limit(request.page_size)).all()
     return build(session, rows), total
+
+
+def locate_id(value: Optional[str], request: Optional[PageRequest]) -> Optional[str]:
+    """The `locate` record id, validated before any query runs.
+
+    A malformed id is a 422 rather than "not found"; `locate` needs paged mode,
+    because its answer is a page number.
+    """
+    if value is None:
+        return None
+    if request is None:
+        raise HTTPException(422, "locate requires paged mode (page or page_size)")
+    try:
+        return str(UUID(value))
+    except ValueError:
+        raise HTTPException(422, f"Invalid locate value: {value}")
+
+
+def locate_row(session, stmt, id_column, target_id: Optional[str], request: Optional[PageRequest]) -> Optional[ListLocation]:
+    """Where `target_id` falls in the ordered result of `stmt` (Céluma 1.5, #66).
+
+    A list re-opened after visiting a record asks whether that record still matches
+    the same search and filters and, if it does, on which page the same ordering
+    now puts it. The position is computed with the list's own ORDER BY (which
+    always ends with the row id, so it is total), over the same statement, so it
+    inherits tenant scope, filters, search and the removed-record exclusion. A
+    record of another tenant, a removed record or one that no longer matches all
+    answer `matches=False` without saying which. `None` when nothing was asked.
+    """
+    if target_id is None or request is None:
+        return None
+    ordering = list(stmt._order_by_clauses)  # the list's total order; never empty for these lists
+    ranked = (
+        stmt.order_by(None)
+        .with_only_columns(id_column.label("row_id"), func.row_number().over(order_by=ordering).label("position"))
+        .subquery()
+    )
+    position = session.exec(select(ranked.c.position).where(ranked.c.row_id == UUID(target_id))).first()
+    if position is None:
+        return ListLocation(id=target_id, matches=False)
+    position = int(position)
+    return ListLocation(
+        id=target_id, matches=True, position=position, page=(position - 1) // request.page_size + 1,
+    )
