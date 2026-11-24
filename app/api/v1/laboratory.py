@@ -40,6 +40,8 @@ from app.services.laboratory_lists import (
 from app.services.list_pagination import (
     MAX_PAGE_SIZE,
     enum_filter,
+    locate_id,
+    locate_row,
     page_request,
     split_csv,
     run_list,
@@ -48,7 +50,8 @@ from app.services.list_pagination import (
     uuid_filter,
 )
 from app.services import idempotency, numbering, order_lifecycle, order_management, report_amendments, report_reviewers
-from app.services import order_report_template
+from app.services import order_report_template, registration_errors
+from app.services.registration_errors import RegistrationFieldError
 from app.services.sample_types import record_audit
 from app.services.usage import UsageService
 from app.services.usage_thresholds import record_storage_delta_with_thresholds
@@ -256,6 +259,7 @@ def list_orders(
     has_invoice: Optional[bool] = None,
     label_id: Optional[List[str]] = Query(None),
     assignee_id: Optional[List[str]] = Query(None),
+    locate: Optional[str] = None,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
@@ -266,6 +270,10 @@ def list_orders(
     collection. With `page`/`page_size` the response is one page plus the
     total; without them it is the whole filtered collection (pre-1.4 clients).
     See `app/services/list_pagination.py`.
+
+    Céluma 1.5 (#66): `locate=<order id>` (paged mode only) adds `located`:
+    whether that order still matches this search and these filters, and on
+    which page this ordering puts it.
     """
     _require(user.id, "lab:read", session)
     stmt = order_list_statement(
@@ -282,12 +290,14 @@ def list_orders(
         descending=order == "desc",
     )
     request = page_request(page, page_size)
+    target = locate_id(locate, request)
     items, total = run_list(session, stmt, request, build_order_items)
     return OrdersListResponse(
         orders=items,
         total=total,
         page=request.page if request else None,
         page_size=request.page_size if request else None,
+        located=locate_row(session, stmt, Order.id, target, request),
     )
 
 
@@ -883,11 +893,12 @@ def list_samples(
     patient_id: Optional[List[str]] = Query(None),
     label_id: Optional[List[str]] = Query(None),
     assignee_id: Optional[List[str]] = Query(None),
+    locate: Optional[str] = None,
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """List samples (requires lab:read). Paging contract as `list_orders`.
+    """List samples (requires lab:read). Paging and `locate` contract as `list_orders`.
 
     `sample_type_id` filters by catalog type (repeatable); the value `none`
     selects samples without a type ("Sin tipo"). The retired `type` enum filter
@@ -909,12 +920,14 @@ def list_samples(
         descending=order == "desc",
     )
     request = page_request(page, page_size)
+    target = locate_id(locate, request)
     items, total = run_list(session, stmt, request, build_sample_items)
     return SamplesListResponse(
         samples=items,
         total=total,
         page=request.page if request else None,
         page_size=request.page_size if request else None,
+        located=locate_row(session, stmt, Sample.id, target, request),
     )
 
 
@@ -1427,12 +1440,19 @@ def create_order_with_samples(
     - Generates the order code and every sample code automatically (none is accepted from the client)
     - Creates order and all samples atomically
     - Idempotent: `Idempotency-Key` is required (428 without it); see `create_order`
+    - Céluma 1.5 (#67): a refusal by the checks below keeps its status and message and names the
+      submitted fields (and sample rows) to correct: `detail = {code, message, fields}`
+      (`app/services/registration_errors.py`)
     """
     _require(user.id, "lab:create_order", session)
     _require(user.id, "lab:create_sample", session)
     # Hotfix 1.4.3: a hand-typed sample code is a privileged identifier capture; refused up front.
     if any(s.sample_code for s in payload.samples):
-        _require(user.id, numbering.MANUAL_CODE_PERMISSION, session)
+        typed_rows = registration_errors.sample_rows(payload.samples, lambda s: bool(s.sample_code))
+        with registration_errors.pointing_to(
+            "manual_code_permission_required", registration_errors.row_fields(typed_rows, "sample_code"),
+        ):
+            _require(user.id, numbering.MANUAL_CODE_PERMISSION, session)
     idem_key = idempotency.validate_key(idempotency_key)
     # Céluma 1.3 Phase 5, Block C (finding C-001) — see `create_order`. This
     # is the route the frontend's order-registration screen actually calls.
@@ -1445,9 +1465,9 @@ def create_order_with_samples(
         raise HTTPException(404, "Tenant not found")
     branch = session.get(Branch, payload.branch_id)
     if not branch:
-        raise HTTPException(404, "Branch not found")
+        raise RegistrationFieldError(404, "branch_not_found", "Branch not found", ["branch_id"])
     if str(branch.tenant_id) != ctx.tenant_id:
-        raise HTTPException(403, "Branch does not belong to your tenant")
+        raise RegistrationFieldError(403, "branch_not_in_tenant", "Branch does not belong to your tenant", ["branch_id"])
     claim = idempotency.begin(
         session, tenant_id=tenant.id, actor_id=user.id, operation=idempotency.OP_UNIFIED,
         key=idem_key, request_fingerprint=idempotency.fingerprint(payload),
@@ -1458,32 +1478,50 @@ def create_order_with_samples(
             session, session.get(Order, claim.receipt.resources[0]["id"]),
             [session.get(Sample, r["id"]) for r in claim.receipt.resources[1:]],
         ))
-    physician_ids = order_management.resolve_requested_ids(payload.requesting_physician_ids, payload.requesting_physician_id)
+    with registration_errors.pointing_to("requesting_physician_invalid", ["requesting_physician_ids"]):
+        physician_ids = order_management.resolve_requested_ids(payload.requesting_physician_ids, payload.requesting_physician_id)
     if not payload.patient_id and not physician_ids:
-        raise HTTPException(400, "Patient or requesting physician is required")
-    patient = _validate_patient(session, payload.patient_id, payload.tenant_id)
-    physicians = order_management.load_physicians(session, payload.tenant_id, physician_ids)
+        raise RegistrationFieldError(
+            400, "patient_or_physician_required", "Patient or requesting physician is required",
+            ["patient_id", "requesting_physician_ids"],
+        )
+    with registration_errors.pointing_to("patient_invalid", ["patient_id"]):
+        patient = _validate_patient(session, payload.patient_id, payload.tenant_id)
+    with registration_errors.pointing_to("requesting_physician_invalid", ["requesting_physician_ids"]):
+        physicians = order_management.load_physicians(session, payload.tenant_id, physician_ids)
 
     # Verify study_type (now required)
     from app.models.study_type import StudyType
     study_type = session.get(StudyType, payload.study_type_id)
     if not study_type:
-        raise HTTPException(404, "Study type not found")
+        raise RegistrationFieldError(404, "study_type_not_found", "Study type not found", ["study_type_id"])
     if str(study_type.tenant_id) != str(payload.tenant_id):
-        raise HTTPException(403, "Study type does not belong to this tenant")
+        raise RegistrationFieldError(
+            403, "study_type_not_in_tenant", "Study type does not belong to this tenant", ["study_type_id"])
 
     # Céluma 1.4 (#17): every sample needs an active type of this tenant. Checked
     # before anything is written, so a bad type leaves no order behind.
-    sample_types = require_active_sample_types(
-        session, ctx.tenant_id, [s.sample_type_id for s in payload.samples]
-    )
+    # Céluma 1.5 (#67): checked type by type (in row order, same queries) so a refusal names every
+    # row that carries the refused type; a missing and a foreign type stay indistinguishable (404).
+    sample_types: dict = {}
+    type_codes = {404: "sample_type_not_found", 400: "sample_type_inactive"}
+    for type_id in dict.fromkeys(str(s.sample_type_id) for s in payload.samples):
+        rows = registration_errors.sample_rows(payload.samples, lambda s, t=type_id: str(s.sample_type_id) == t)
+        try:
+            sample_types.update(require_active_sample_types(session, ctx.tenant_id, [type_id]))
+        except HTTPException as exc:
+            raise RegistrationFieldError(
+                exc.status_code, type_codes.get(exc.status_code, "sample_type_invalid"), str(exc.detail),
+                registration_errors.row_fields(rows, "sample_type_id"),
+            ) from exc
     # Céluma 1.4.1: the study type's template is an optional default, never a prerequisite. An EXPLICIT choice
     # is stored only when the user made one (the form does not send its suggestion), so a later catalog fix
     # still reaches orders that merely followed a default. Validated before anything is written.
-    explicit_template = (
-        order_report_template.require_selectable(session, ctx.tenant_id, payload.report_template_id)
-        if payload.report_template_id else None
-    )
+    with registration_errors.pointing_to("report_template_invalid", ["report_template_id"]):
+        explicit_template = (
+            order_report_template.require_selectable(session, ctx.tenant_id, payload.report_template_id)
+            if payload.report_template_id else None
+        )
 
     # Hotfix 1.4.3: typed sample codes take their waiting code locks first (sorted), before any counter.
     manual_codes = numbering.claim_manual_sample_codes(
