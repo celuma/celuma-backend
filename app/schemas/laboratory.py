@@ -604,6 +604,9 @@ class OrderListItem(BaseModel):
     invoice_id: Optional[str] = None
     study_type_id: Optional[str] = None
     sample_count: int
+    # Céluma 1.5 (#80): codes of the order's visible samples, in sample-code order
+    # (`sample_count` of them); empty for a legacy order without samples.
+    sample_codes: List[str] = []
     has_report: bool
     has_invoice: bool
     labels: Optional[List[LabelResponse]] = None
