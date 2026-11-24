@@ -1039,6 +1039,8 @@ Headers: `Authorization: Bearer <token>`
 
 Returns `orders` array with enriched `branch` and `patient` objects and summary fields.
 
+`sample_codes` (Céluma 1.5, #80) lists the codes of the order's visible samples in sample-code order (`[]` for an order without samples), and `q` also matches any one of them. Search, filters, sorting and paging (`page`, `page_size`, `q`, `sort`, `order`, `locate`) follow `celuma-engineering/specs/lists/search-and-pagination.md`.
+
 **Response:**
 ```json
 {
@@ -1054,6 +1056,7 @@ Returns `orders` array with enriched `branch` and `patient` objects and summary 
       "notes": "...",
       "created_at": "2025-08-18T10:00:00Z",
       "sample_count": 2,
+      "sample_codes": ["BX011026", "BX021026"],
       "has_report": true
     }
   ]

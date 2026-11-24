@@ -119,6 +119,17 @@ def _assigned_matching(item_type: str, tenant_id, predicate):
     )
 
 
+def _orders_with_sample_matching(tenant_id, predicate):
+    """Orders holding a sample whose code matches (Céluma 1.5, #80).
+
+    An ORM `SELECT` on `Sample`, so the removed-record criterion of
+    `app/core/soft_removal.py` applies here exactly as it does to the samples
+    list: a removed sample's code never finds its order. `IN (...)` keeps one
+    row per order however many of its samples match.
+    """
+    return sa_select(Sample.order_id).where(Sample.tenant_id == tenant_id, predicate(Sample.sample_code))
+
+
 def _assigned_to_any(item_type: str, owner_id, user_ids: Sequence[UUID]):
     return exists(
         sa_select(1).where(
@@ -431,6 +442,7 @@ def order_list_statement(
                     OrderRequestingPhysician.requesting_physician_id.in_(physicians_matching(tenant_id, pred)))),
             lambda pred: Order.id.in_(_labelled_matching(OrderLabel, OrderLabel.order_id, tenant_id, pred)),
             lambda pred: Order.id.in_(_assigned_matching("lab_order", tenant_id, pred)),
+            lambda pred: Order.id.in_(_orders_with_sample_matching(tenant_id, pred)),
         ),
     ))
     if condition is not None:
@@ -465,9 +477,19 @@ def build_order_items(session: Session, orders: Sequence[Order]) -> list[OrderLi
     branches = _by_id(session, Branch, (o.branch_id for o in orders))
     patients = _by_id(session, Patient, (o.patient_id for o in orders))
     physician_sets = order_management.physicians_by_order(session, orders)
-    sample_counts = dict(session.exec(
-        select(Sample.order_id, func.count()).where(Sample.order_id.in_(ids)).group_by(Sample.order_id)
-    ).all()) if ids else {}
+    # One statement gives both the count and the codes (#80): the codes of the
+    # order's visible samples (removed ones are hidden by `soft_removal`), in
+    # the samples list's default order. Duplicated codes stay: each is a sample.
+    # The tenant condition is the search's (`_orders_with_sample_matching`), so
+    # a displayed code is always one that finds the order, and vice versa.
+    sample_codes: dict = defaultdict(list)
+    for order_id, code in (session.exec(
+        select(Sample.order_id, Sample.sample_code)
+        .join(Order, Order.id == Sample.order_id)
+        .where(Sample.order_id.in_(ids), Sample.tenant_id == Order.tenant_id)
+        .order_by(sort_key(Sample.sample_code), Sample.id)
+    ).all() if ids else ()):
+        sample_codes[order_id].append(code)
     labels = _label_refs(session.exec(
         select(OrderLabel.order_id, Label)
         .join(Label, Label.id == OrderLabel.label_id)
@@ -494,7 +516,8 @@ def build_order_items(session: Session, orders: Sequence[Order]) -> list[OrderLi
             report_id=str(o.report_id) if o.report_id else None,
             invoice_id=str(o.invoice_id) if o.invoice_id else None,
             study_type_id=str(o.study_type_id) if o.study_type_id else None,
-            sample_count=sample_counts.get(o.id, 0),
+            sample_count=len(sample_codes[o.id]),
+            sample_codes=sample_codes[o.id],
             has_report=o.report_id is not None,
             has_invoice=o.invoice_id is not None,
             labels=labels.get(o.id) or None,
