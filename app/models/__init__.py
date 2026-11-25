@@ -18,7 +18,7 @@ from .report_letterhead_version import ReportLetterheadVersion, ReportLetterhead
 from .report_section import ReportSection
 from .study_type import StudyType
 from .sample_type import SampleType
-from .numbering import NumberingConfig, NumberingCounter, NumberingAllocation, IdempotencyReceipt
+from .numbering import NumberingConfig, NumberingCounter, NumberingAllocation, IdempotencyReceipt, NumberingTypeConfig
 from .order_management import OrderRequestingPhysician, SampleCodeCorrection
 from .laboratory_cleanup import (
     LaboratoryCleanupOperation,

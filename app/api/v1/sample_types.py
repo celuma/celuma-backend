@@ -10,6 +10,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -288,6 +289,11 @@ def delete_sample_type(
         if in_use is not None:
             raise HTTPException(409, "Sample type is referenced by samples; deactivate it instead")
         before = snapshot(row)
+        # Céluma 1.5 (#64): a type's own numbering goes with it (the row has no FK; counters and ledger stay).
+        session.execute(
+            text("DELETE FROM numbering_type_config WHERE tenant_id = :t AND entity_kind = :k AND type_id = :i"),
+            {"t": str(row.tenant_id), "k": "sample", "i": str(row.id)},
+        )
         session.delete(row)
         record_audit(session, tenant_id=ctx.tenant_id, user_id=user.id, action="SAMPLE_TYPE.DELETED",
                      entity_type="sample_type", entity_id=row.id, old_values=before)

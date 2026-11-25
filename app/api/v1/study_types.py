@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from sqlmodel import select, Session
 from app.core.db import get_session
 from app.api.v1.auth import get_auth_ctx, AuthContext, current_user
@@ -314,6 +315,11 @@ def delete_study_type(
     
     if hard_delete:
         # Permanently delete the study type
+        # Céluma 1.5 (#64): a type's own numbering goes with it (the row has no FK; counters and ledger stay).
+        session.execute(
+            text("DELETE FROM numbering_type_config WHERE tenant_id = :t AND entity_kind = :k AND type_id = :i"),
+            {"t": str(study_type.tenant_id), "k": "order", "i": str(study_type.id)},
+        )
         session.delete(study_type)
         session.commit()
         

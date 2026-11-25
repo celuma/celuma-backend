@@ -95,6 +95,8 @@ class TestBatchLockOrder:
             return object()
 
         monkeypatch.setattr(numbering, "_allocate_one", fake)
+        # Pure: no database. Céluma 1.5 (#64) reads per-type configurations; none here unless a test sets them.
+        monkeypatch.setattr(numbering, "load_type_configs", lambda *a, **k: getattr(self, "type_configs", {}))
         numbering.allocate_batch(None, tenant_id="t", requests=requests, instant=NOW,
                                  settings_by_kind={numbering.SAMPLE: ACTIVE, numbering.ORDER: ACTIVE_ORDER})
         return calls
@@ -113,6 +115,24 @@ class TestBatchLockOrder:
         assert [k for k, _ in backward] == ["d", "b", "c", "a"]
         assert [p for _, p in forward] == [p for _, p in backward] == [Period(2026, 9)] * 2 + [Period(2026, 10)] * 2
 
+    def test_a_type_configuration_never_changes_the_lock_order_or_period(self, monkeypatch):
+        """#64: a type override changes rendering only; the claim order and periods stay those of the lab."""
+        from types import SimpleNamespace
+
+        scope = uuid.uuid4()
+
+        def req(key, received):
+            return AllocationRequest(key, numbering.SAMPLE, scope, "BX", uuid.uuid4(), "MAIN", MX, received_at=received)
+
+        batch = [req("a", datetime(2026, 10, 2)), req("b", datetime(2026, 9, 2))]
+        plain = self.run(monkeypatch, batch)
+        self.type_configs = {str(scope): SimpleNamespace(format="{BASE}-{SEQ}{MM}{YY}", sequence_min_width=4, start_value=9)}
+        try:
+            overridden = self.run(monkeypatch, batch)
+        finally:
+            del self.type_configs
+        assert overridden == plain
+
     def test_orders_still_precede_samples(self, monkeypatch):
         order = AllocationRequest("o", numbering.ORDER, uuid.uuid4(), "CU", uuid.uuid4(), "MAIN", MX)
         calls = self.run(monkeypatch, [sample_request(datetime(2026, 9, 1), key="s"), order])
@@ -121,6 +141,7 @@ class TestBatchLockOrder:
     def test_a_bad_receipt_date_fails_before_any_counter_is_touched(self, monkeypatch):
         touched = []
         monkeypatch.setattr(numbering, "_allocate_one", lambda *a, **k: touched.append(1))
+        monkeypatch.setattr(numbering, "load_type_configs", lambda *a, **k: {})  # pure: no database (#64)
         with pytest.raises(NumberingError):
             numbering.allocate_batch(None, tenant_id="t", requests=[sample_request(datetime(2026, 9, 1)), sample_request(None, key="x")],
                                      instant=NOW, settings_by_kind={numbering.SAMPLE: ACTIVE})

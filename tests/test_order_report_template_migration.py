@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from tests.test_alembic_migrations import (
+    HEAD_REVISION,
     HOTFIX_1_4_1_REVISION,
     RELEASE_1_4_REVISION,
     _admin_engine,
@@ -150,4 +151,5 @@ class TestUpgradeFromTheRelease:
         assert _current_revision(mdb) == HOTFIX_1_4_1_REVISION
 
     def test_single_head(self):
-        assert _script_directory().get_heads() == [HOTFIX_1_4_1_REVISION]
+        # Céluma 1.5 (#64) appended `v1_5_0`; the chain still has exactly one head.
+        assert _script_directory().get_heads() == [HEAD_REVISION]

@@ -23,6 +23,7 @@ from app.core.maintenance_guard import GUARDED_MODELS
 from app.services import laboratory_cleanup_scope as scope
 from sqlmodel import SQLModel
 from tests.test_alembic_migrations import (
+    HEAD_REVISION,
     HOTFIX_REVISION,
     RELEASE_1_4_REVISION,
     _admin_engine,
@@ -227,7 +228,8 @@ MATRIX = {
     "requesting_physician": "PRESERVE", "study_type": "PRESERVE", "sample_type": "PRESERVE", "price_catalog": "PRESERVE",
     "label": "PRESERVE", "report_template": "PRESERVE", "report_template_version": "PRESERVE",
     "report_letterhead": "PRESERVE", "report_letterhead_version": "PRESERVE", "report_section": "PRESERVE",
-    "numbering_config": "PRESERVE", "numbering_counter": "PRESERVE", "notification_preference": "PRESERVE",
+    "numbering_config": "PRESERVE", "numbering_counter": "PRESERVE", "numbering_type_config": "PRESERVE",
+    "notification_preference": "PRESERVE",
     "tenant_limits": "PRESERVE", "tenant_usage_reconciliation": "PRESERVE", "alembic_version": "PRESERVE",
     # RECONCILE
     "tenant_usage": "RECONCILE", "tenant_usage_threshold_state": "RECONCILE",
@@ -257,7 +259,8 @@ STORAGE_REFERENCERS = {
 
 class TestEverySchemaObjectIsClassified:
     def test_every_table_is_in_the_dependency_matrix(self, mdb):
-        up()
+        # At HEAD, so a table added by a later revision (`v1_5_0`, #64) must be classified too.
+        up(HEAD_REVISION)
         tables = set(inspect(mdb).get_table_names())
         assert tables == set(MATRIX), {"unclassified": tables - set(MATRIX), "stale": set(MATRIX) - tables}
 

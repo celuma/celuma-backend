@@ -1,7 +1,8 @@
 """Monthly numbering state (Céluma 1.4, issue #8).
 
 Contract: `celuma-engineering/specs/laboratory/monthly-numbering.md`;
-decision record: ADR 0013. Three tables, all created EMPTY by `v1_4_0` §3:
+decision record: ADR 0013. Three tables, all created EMPTY by `v1_4_0` §3 (plus
+`numbering_type_config`, created empty by `v1_5_0`, #64):
 
 - `numbering_config`: per tenant and entity kind; **no row means not activated**.
 - `numbering_counter`: the monotonic monthly counter of one scope.
@@ -37,6 +38,29 @@ class NumberingConfig(BaseModel, table=True):
     #: IANA zone defining the month of tenant-wide counters (branch-scoped ones use the branch's zone).
     timezone: str = Field(default="America/Mexico_City", max_length=100)
     activated_at: Optional[datetime] = Field(default=None)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_by: Optional[UUID] = Field(default=None, foreign_key="app_user.id")
+
+
+class NumberingTypeConfig(BaseModel, table=True):
+    """Céluma 1.5 (#64): a study type's (orders) or sample type's (samples) OPTIONAL own numbering.
+
+    Created empty by `v1_5_0`; no row = the type uses the laboratory's `numbering_config`. Only the
+    rendering settings live here: activation, counter scope and timezone are always the laboratory's,
+    and the counter key (type id) is unchanged, so setting or clearing a row continues the type's
+    sequence. `type_id` has no FK (one column serves two catalogs, like `numbering_counter.scope_id`).
+    """
+    __tablename__ = "numbering_type_config"
+
+    tenant_id: UUID = Field(foreign_key="tenant.id", primary_key=True)
+    entity_kind: str = Field(max_length=16, primary_key=True)
+    #: `study_type.id` (orders) or `sample_type.id` (samples) of the same tenant (checked by the API).
+    type_id: UUID = Field(primary_key=True)
+    format: str = Field(max_length=60)
+    sequence_min_width: int
+    start_value: int
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_by: Optional[UUID] = Field(default=None, foreign_key="app_user.id")
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     updated_by: Optional[UUID] = Field(default=None, foreign_key="app_user.id")
 

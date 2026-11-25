@@ -17,7 +17,7 @@ from sqlmodel import Session, select
 from app.api.v1.auth import AuthContext, current_user, get_auth_ctx
 from app.core.db import get_session
 from app.core.rbac import has_permission
-from app.models.numbering import NumberingConfig
+from app.models.numbering import NumberingConfig, NumberingTypeConfig
 from app.models.sample_type import SampleType
 from app.models.study_type import StudyType
 from app.schemas.iso_input import require_iso_date_input
@@ -34,6 +34,11 @@ from app.schemas.numbering import (
     SampleCodeSuggestion,
     SampleCodeSuggestionRequest,
     SampleCodeSuggestionResponse,
+    EffectiveTypeNumbering,
+    TypeNumberingEntry,
+    TypeNumberingInput,
+    TypeNumberingList,
+    TypeNumberingOverride,
 )
 from app.services import numbering
 from app.services.sample_types import record_audit
@@ -133,6 +138,7 @@ def update_numbering_config(
         })
     if problems:
         raise HTTPException(422, {"code": "numbering_invalid_config", "message": "; ".join(problems)})
+    _guard_type_configs_for_scope(session, ctx.tenant_id, kind, body.scope)
 
     row = session.exec(
         select(NumberingConfig).where(NumberingConfig.tenant_id == ctx.tenant_id, NumberingConfig.entity_kind == kind)
@@ -178,11 +184,16 @@ def preview_numbering(
     _require(user, "lab:read", session)
     kind = _kind(body.entity_kind)
     stored = numbering.get_settings(session, ctx.tenant_id, kind)
+    scope = _tenant_type(session, ctx.tenant_id, kind, body.scope_id) if body.scope_id else None
+    if scope is not None and body.layer == "effective":
+        # Céluma 1.5 (#64): the SAME resolution as every allocation (`numbering.apply_type_config`).
+        stored = numbering.effective_settings(session, ctx.tenant_id, kind, scope.id, base=stored)
     pick = lambda value, default: default if value is None else value  # noqa: E731
     candidate = numbering.NumberingSettings(
         kind, pick(body.format, stored.format), pick(body.sequence_min_width, stored.sequence_min_width),
         stored.manual_policy, pick(body.start_value, stored.start_value), pick(body.scope, stored.scope),
         timezone=pick(body.timezone, stored.timezone), active=pick(body.active, stored.active), is_default=False,
+        source=stored.source,
     )
     branch = None
     if body.branch_id:
@@ -201,17 +212,7 @@ def preview_numbering(
         period = numbering.period_in_zone(zone)
         date_basis = "allocation_instant"
 
-    base_code = "BASE"
-    scope = None
-    if body.scope_id:
-        model = StudyType if kind == numbering.ORDER else SampleType
-        try:
-            scope = session.get(model, UUID(body.scope_id))
-        except ValueError:
-            scope = None
-        if scope is None or str(scope.tenant_id) != ctx.tenant_id:
-            raise HTTPException(404, "Type not found")
-        base_code = scope.code
+    base_code = scope.code if scope is not None else "BASE"
 
     problems = _problems(candidate.format, candidate.sequence_min_width, candidate.start_value, candidate.scope, candidate.timezone)
     examples, estimate = [], None
@@ -237,7 +238,7 @@ def preview_numbering(
         sequence_min_width=candidate.sequence_min_width, scheme=candidate.scheme,
         timezone=candidate.zone_name(branch.timezone if branch else None),
         period_year=period.year, period_month=period.month, date_basis=date_basis, base_code=base_code,
-        examples=examples, estimate=estimate, notice=PREVIEW_NOTICE,
+        examples=examples, estimate=estimate, notice=PREVIEW_NOTICE, config_source=candidate.source,
     )
 
 
@@ -323,3 +324,175 @@ def suggest_sample_codes(
         scheme=settings.scheme, suggestions=[results[i.key] for i in body.items if i.key in results],
         notice=SUGGESTION_NOTICE,
     )
+
+
+# --------------------------------------------------------------------------- per-type numbering (Céluma 1.5, #64)
+
+_TYPE_MODEL = {numbering.ORDER: StudyType, numbering.SAMPLE: SampleType}
+
+
+def _tenant_type(session: Session, tenant_id, kind: str, type_id):
+    """A study type (orders) or sample type (samples) of THIS tenant; anything else is 404 (no existence leak)."""
+    try:
+        row = session.get(_TYPE_MODEL[kind], UUID(str(type_id)))
+    except ValueError:
+        row = None
+    if row is None or str(row.tenant_id) != str(tenant_id):
+        raise HTTPException(404, "Type not found")
+    return row
+
+
+def _guard_type_configs_for_scope(session: Session, tenant_id, kind: str, scope: str) -> None:
+    """A laboratory scope change must not leave a type format invalid ({BRANCH} iff branch scope)."""
+    if scope not in numbering.SCOPES:
+        return
+    rows = numbering.load_type_configs(session, tenant_id, kind)
+    conflicts = [r for r in rows.values() if numbering.validate_format(r.format, scope)]
+    if not conflicts:
+        return
+    model = _TYPE_MODEL[kind]
+    codes = sorted(
+        (session.get(model, r.type_id).code if session.get(model, r.type_id) else str(r.type_id)) for r in conflicts
+    )
+    raise HTTPException(422, {
+        "code": "numbering_type_config_conflict",
+        "message": "These types have their own numbering whose format does not fit the new counter scope; "
+                   "update or clear them first: " + ", ".join(codes),
+        "types": codes,
+    })
+
+
+def _effective(settings: numbering.NumberingSettings) -> EffectiveTypeNumbering:
+    return EffectiveTypeNumbering(
+        format=settings.format, sequence_min_width=settings.sequence_min_width, start_value=settings.start_value,
+        active=settings.active, scope=settings.scope, timezone=settings.timezone, scheme=settings.scheme,
+    )
+
+
+def _entry(kind: str, type_row, lab: numbering.NumberingSettings, cfg) -> TypeNumberingEntry:
+    settings = numbering.apply_type_config(lab, cfg)
+    return TypeNumberingEntry(
+        entity_kind=kind, type_id=str(type_row.id), code=type_row.code, name=type_row.name,
+        is_active=bool(type_row.is_active), source=settings.source,
+        override=TypeNumberingOverride(
+            format=cfg.format, sequence_min_width=cfg.sequence_min_width, start_value=cfg.start_value,
+            updated_at=cfg.updated_at.isoformat() if cfg.updated_at else None,
+            updated_by=str(cfg.updated_by) if cfg.updated_by else None,
+        ) if cfg is not None else None,
+        effective=_effective(settings),
+    )
+
+
+def _type_snapshot(cfg) -> dict | None:
+    if cfg is None:
+        return None
+    return {"format": cfg.format, "sequence_min_width": cfg.sequence_min_width, "start_value": cfg.start_value}
+
+
+@router.get("/type-configs/{entity_kind}", response_model=TypeNumberingList)
+def list_type_numbering(
+    entity_kind: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Every study type (orders) or sample type (samples) of the tenant with where its numbering comes from
+    (`type` or `laboratory`) and what it numbers with now. Reads only."""
+    _require(user, "lab:read", session)
+    kind = _kind(entity_kind)
+    lab = numbering.get_settings(session, ctx.tenant_id, kind)
+    model = _TYPE_MODEL[kind]
+    rows = session.exec(select(model).where(model.tenant_id == UUID(ctx.tenant_id))).all()
+    rows = sorted(rows, key=lambda r: (r.name.casefold(), r.code, str(r.id)))
+    configs = numbering.load_type_configs(session, ctx.tenant_id, kind)
+    return TypeNumberingList(
+        entity_kind=kind, laboratory=_effective(lab),
+        types=[_entry(kind, r, lab, configs.get(str(r.id))) for r in rows],
+    )
+
+
+@router.put("/type-configs/{entity_kind}/{type_id}", response_model=TypeNumberingEntry)
+def set_type_numbering(
+    entity_kind: str,
+    type_id: str,
+    body: TypeNumberingInput,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Give one type its own format, minimum width and start value (#64).
+
+    Effective for allocations that start after this commits. The type's counters are unchanged (same key),
+    so its sequence continues; a higher start value moves them forward, a lower one changes nothing reached.
+    """
+    _require(user, "admin:manage_catalog", session)
+    kind = _kind(entity_kind)
+    type_row = _tenant_type(session, ctx.tenant_id, kind, type_id)
+    lab = numbering.get_settings(session, ctx.tenant_id, kind)
+    problems = (numbering.validate_format(body.format, lab.scope) + numbering.validate_min_width(body.sequence_min_width)
+                + numbering.validate_start_value(body.start_value))
+    if not problems:
+        # The rendered length depends on the type's own code: refuse a configuration that could never issue a code.
+        branch_codes = [b.code for b in session.exec(select(Branch).where(Branch.tenant_id == UUID(ctx.tenant_id))).all()
+                        if b.code and numbering._LITERAL_RE.fullmatch(b.code)]
+        longest_branch = max(branch_codes, key=len) if branch_codes else "B"
+        period = numbering.period_in_zone(lab.timezone)
+        try:
+            numbering.render_code(
+                body.format, body.sequence_min_width, type_row.code, body.start_value, period.year, period.month,
+                numbering.MAX_LENGTH_BY_KIND[kind], longest_branch if lab.scope == numbering.SCOPE_BRANCH else "",
+            )
+        except HTTPException as exc:
+            problems.append(exc.detail["message"] if isinstance(exc.detail, dict) else str(exc.detail))
+    if problems:
+        raise HTTPException(422, {"code": "numbering_invalid_config", "message": "; ".join(problems)})
+
+    cfg = session.get(NumberingTypeConfig, (UUID(ctx.tenant_id), kind, type_row.id))
+    before = _type_snapshot(cfg)
+    now = datetime.utcnow()
+    if cfg is None:
+        cfg = NumberingTypeConfig(tenant_id=UUID(ctx.tenant_id), entity_kind=kind, type_id=type_row.id,
+                                  format=body.format, sequence_min_width=body.sequence_min_width,
+                                  start_value=body.start_value, created_at=now, created_by=user.id)
+    cfg.format, cfg.sequence_min_width, cfg.start_value = body.format, body.sequence_min_width, body.start_value
+    cfg.updated_at, cfg.updated_by = now, user.id
+    session.add(cfg)
+    record_audit(
+        session, tenant_id=ctx.tenant_id, user_id=user.id, action="NUMBERING.TYPE_CONFIG_SET",
+        entity_type="numbering_type_config", entity_id=type_row.id,
+        description=f"Type numbering set ({kind} {type_row.code})",
+        old_values=before, new_values=_type_snapshot(cfg),
+        metadata={"entity_kind": kind, "type_code": type_row.code, "created": before is None},
+    )
+    session.commit()
+    session.refresh(cfg)
+    return _entry(kind, type_row, lab, cfg)
+
+
+@router.delete("/type-configs/{entity_kind}/{type_id}", response_model=TypeNumberingEntry)
+def clear_type_numbering(
+    entity_kind: str,
+    type_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Clear a type's own numbering (#64): it uses the laboratory's again, continuing its counters. Clearing a
+    type that has none is a no-op (nothing written, no audit row)."""
+    _require(user, "admin:manage_catalog", session)
+    kind = _kind(entity_kind)
+    type_row = _tenant_type(session, ctx.tenant_id, kind, type_id)
+    lab = numbering.get_settings(session, ctx.tenant_id, kind)
+    cfg = session.get(NumberingTypeConfig, (UUID(ctx.tenant_id), kind, type_row.id))
+    if cfg is not None:
+        before = _type_snapshot(cfg)
+        session.delete(cfg)
+        record_audit(
+            session, tenant_id=ctx.tenant_id, user_id=user.id, action="NUMBERING.TYPE_CONFIG_CLEARED",
+            entity_type="numbering_type_config", entity_id=type_row.id,
+            description=f"Type numbering cleared ({kind} {type_row.code})",
+            old_values=before, new_values=None,
+            metadata={"entity_kind": kind, "type_code": type_row.code},
+        )
+        session.commit()
+    return _entry(kind, type_row, lab, None)

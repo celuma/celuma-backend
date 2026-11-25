@@ -112,6 +112,7 @@ PRESERVED_TABLES: Tuple[Tuple[str, str], ...] = (
     ("report_sections", "report_section"),
     ("numbering_configs", "numbering_config"),
     ("numbering_counters", "numbering_counter"),
+    ("numbering_type_configs", "numbering_type_config"),
 )
 #: Counted with their own SQL (version tables).
 PRESERVED_VIA_PARENT: Tuple[Tuple[str, str], ...] = (
