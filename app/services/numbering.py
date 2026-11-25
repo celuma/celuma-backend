@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Sequence
 from uuid import UUID
@@ -34,7 +34,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlmodel import Session, select
 
-from app.models.numbering import NumberingAllocation, NumberingConfig
+from app.models.numbering import NumberingAllocation, NumberingConfig, NumberingTypeConfig
 from app.models.tenant import Branch
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,10 @@ SCOPES = (SCOPE_TENANT, SCOPE_BRANCH)
 
 SCHEME_MONTHLY = "monthly"
 SCHEME_LEGACY = "legacy"
+
+#: Céluma 1.5 (#64): where a type's format, minimum width and start value come from.
+SOURCE_TYPE = "type"
+SOURCE_LABORATORY = "laboratory"
 
 #: Counter `branch_id` of tenant-wide and compatibility counters.
 NIL_BRANCH = UUID("00000000-0000-0000-0000-000000000000")
@@ -308,6 +312,8 @@ class NumberingSettings:
     #: pre-numbering behaviour: orders `<code>-<n>` from a race-safe counter, samples typed by hand.
     active: bool = False
     is_default: bool = True
+    #: Céluma 1.5 (#64): `laboratory` (the kind's configuration) or `type` (a type's own one overlays it).
+    source: str = SOURCE_LABORATORY
 
     @property
     def scheme(self) -> str:
@@ -333,6 +339,41 @@ def get_settings(session: Session, tenant_id, kind: str) -> NumberingSettings:
         manual_policy=row.manual_policy, start_value=row.start_value, scope=row.scope,
         timezone=row.timezone, active=row.active, is_default=False,
     )
+
+
+def load_type_configs(session: Session, tenant_id, kind: str, type_ids: Optional[Iterable] = None) -> Dict[str, NumberingTypeConfig]:
+    """The optional per-type configurations of one kind (#64), keyed by `str(type_id)`.
+
+    `type_ids` narrows the read to the types of one batch; `None` reads all of the tenant's."""
+    query = select(NumberingTypeConfig).where(
+        NumberingTypeConfig.tenant_id == tenant_id, NumberingTypeConfig.entity_kind == kind,
+    )
+    if type_ids is not None:
+        ids = [UUID(str(t)) for t in {str(t) for t in type_ids if t is not None}]
+        if not ids:
+            return {}
+        query = query.where(NumberingTypeConfig.type_id.in_(ids))
+    return {str(row.type_id): row for row in session.exec(query).all()}
+
+
+def apply_type_config(settings: NumberingSettings, row: Optional[NumberingTypeConfig]) -> NumberingSettings:
+    """The ONE resolution rule of #64: a type's own configuration replaces only `format`,
+    `sequence_min_width` and `start_value` of the laboratory's; everything else is inherited.
+    Without a row the laboratory's settings are returned unchanged."""
+    if row is None:
+        return settings
+    return replace(settings, format=row.format, sequence_min_width=row.sequence_min_width,
+                   start_value=row.start_value, source=SOURCE_TYPE)
+
+
+def effective_settings(
+    session: Session, tenant_id, kind: str, type_id, base: Optional[NumberingSettings] = None,
+) -> NumberingSettings:
+    """What a code of this study type (orders) or sample type (samples) is generated with right now."""
+    base = base or get_settings(session, tenant_id, kind)
+    if type_id is None:
+        return base
+    return apply_type_config(base, load_type_configs(session, tenant_id, kind, [type_id]).get(str(type_id)))
 
 
 def can_enter_manual(session: Session, user) -> bool:
@@ -618,20 +659,28 @@ def allocate_batch(
     BEFORE any of these.)
     """
     rank = {ORDER: 0, SAMPLE: 1}
-    periods = [request_period(settings_by_kind[r.kind], r, instant) for r in requests]
+    # Céluma 1.5 (#64): each request resolves its OWN type's configuration over the laboratory's, here, for
+    # every allocating route alike (standalone, unified, receipt-date regeneration). Scope and timezone are
+    # never per type, so the periods and counter keys below are exactly those of the laboratory settings.
+    by_kind: Dict[str, Dict[str, NumberingTypeConfig]] = {
+        kind: load_type_configs(session, tenant_id, kind, [r.scope_id for r in requests if r.kind == kind])
+        for kind in {r.kind for r in requests}
+    }
+    resolved = [apply_type_config(settings_by_kind[r.kind], by_kind[r.kind].get(str(r.scope_id))) for r in requests]
+    periods = [request_period(resolved[i], r, instant) for i, r in enumerate(requests)]
     indexed = list(enumerate(requests))
     indexed.sort(key=lambda item: (
         rank[item[1].kind], str(item[1].scope_id),
-        str(counter_branch(settings_by_kind[item[1].kind], item[1])),
+        str(counter_branch(resolved[item[0]], item[1])),
         periods[item[0]].year, periods[item[0]].month, item[0],
     ))
     reserved = frozenset(reserved_sample_codes)
     results: Dict[object, Allocation] = {}
-    for _, req in indexed:
+    for idx, req in indexed:
         extra = {"reserved": reserved} if reserved and req.kind == SAMPLE else {}
         results[req.key] = _allocate_one(
             session, tenant_id=tenant_id, request=req, instant=instant,
-            settings=settings_by_kind[req.kind], actor_id=actor_id, **extra,
+            settings=resolved[idx], actor_id=actor_id, **extra,
         )
     return results
 
@@ -759,9 +808,13 @@ def suggest_sample_codes(
     limit = MAX_LENGTH_BY_KIND[SAMPLE]
     if settings.active and settings.scope == SCOPE_BRANCH and branch_id is None:
         return [Suggestion(r.key, reason="branch_required") for r in requests]
+    # Céluma 1.5 (#64): every row uses its own sample type's configuration, exactly like `allocate_batch`.
+    type_configs = load_type_configs(session, tenant_id, SAMPLE, [r.scope_id for r in requests])
+    lab_settings = settings
     cursors: Dict[tuple, int] = {}
     out: List[Suggestion] = []
     for req in requests:
+        settings = apply_type_config(lab_settings, type_configs.get(str(req.scope_id)))
         alloc = AllocationRequest(
             req.key, SAMPLE, req.scope_id, req.base_code, branch_id, branch_code, branch_timezone,
             received_at=req.received_at,

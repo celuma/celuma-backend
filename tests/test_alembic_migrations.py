@@ -168,10 +168,19 @@ HOTFIX_1_4_1_REVISION = "v1_4_1"
 #: The only file that may define HOTFIX_1_4_1_REVISION.
 HOTFIX_1_4_1_MIGRATION_FILENAME = "v1_4_1_order_report_template.py"
 
+#: The Céluma 1.5 release revision (unreleased; issue #64 adds `numbering_type_config`), and the current
+#: head. 1.4.1 shipped, so `v1_4_1` is not edited: the next release's schema gets its own revision on top,
+#: per the one-revision-per-release contract. Later 1.5 schema work extends this revision while 1.5 is
+#: unreleased.
+RELEASE_1_5_REVISION = "v1_5_0"
+
+#: The only file that may define RELEASE_1_5_REVISION.
+RELEASE_1_5_MIGRATION_FILENAME = "v1_5_0_type_numbering.py"
+
 #: What `alembic upgrade head` lands on. Assertions that mean "the chain is
 #: fully applied" use this; assertions specifically about the 1.3 release
 #: migration's own behaviour keep using RELEASE_REVISION.
-HEAD_REVISION = HOTFIX_1_4_1_REVISION
+HEAD_REVISION = RELEASE_1_5_REVISION
 
 #: Revision ids that existed only on the unreleased `celuma-1.3` branch and
 #: were folded into RELEASE_REVISION. Nothing executable may reference them.
@@ -198,7 +207,6 @@ HEAD_REVISION = HOTFIX_1_4_1_REVISION
 #: commits. See docs/celuma-1.3/pre-phase-5-migration-squash/
 #: migration-squash-inventory.md.
 SUPERSEDED_REVISIONS = (
-    "v1_5_0",
     "v1_6_0",
     "v1_7_0",
     "v1_8_0",
@@ -218,6 +226,15 @@ SUPERSEDED_REVISIONS = (
 RETIRED_MEANINGS_OF_V1_4_0 = (
     "v1_4_0_report_template_version.py",  # Phase 2 Block B, 2026-07-29 → 08-03
     "v1_4_0_notifications_core.py",  # Phase 3 Block B, 2026-08-06 → 08-10
+)
+
+#: The two retired revisions that once used the id `v1_5_0`, by filename (Céluma 1.5, #64, same move as
+#: `v1_4_0`). Both lived only on the `celuma-1.3` branch and were folded into `v1_3_0`; checked from git on
+#: 2026-11-24: neither file is on any first-parent state of `main` nor in any release tag. They may never
+#: come back, and `v1_5_0` may never again mean anything but RELEASE_1_5_REVISION.
+RETIRED_MEANINGS_OF_V1_5_0 = (
+    "v1_5_0_report_version_v2_fields.py",  # Phase 2 Block B, 2026-07-29
+    "v1_5_0_notification_preferences_delivery_lifecycle.py",  # Phase 3 Blocks B/D, 2026-08-06
 )
 
 #: The Phase 2 report/letterhead objects.
@@ -369,6 +386,7 @@ class TestChainShape:
         script = _script_directory()
         revisions = list(script.walk_revisions())
         assert [r.revision for r in revisions] == [
+            RELEASE_1_5_REVISION,
             HOTFIX_1_4_1_REVISION,
             RELEASE_1_4_REVISION,
             HOTFIX_REVISION,
@@ -420,14 +438,25 @@ class TestChainShape:
         ]
         assert children == [HOTFIX_1_4_1_REVISION]
 
-    def test_the_1_4_1_hotfix_revision_has_no_children(self):
-        """The freeze contract at the new head: anything appended after
-        `v1_4_1` is a release decision."""
+    def test_the_only_child_of_the_1_4_1_hotfix_is_the_1_5_release(self):
+        """1.4.1 shipped and `v1_4_1` is not edited; Céluma 1.5's schema (#64) is the deliberate next
+        revision on top. Anything else appended to `v1_4_1` still fails."""
         script = _script_directory()
         children = [
             revision.revision
             for revision in script.walk_revisions()
             if revision.down_revision == HOTFIX_1_4_1_REVISION
+        ]
+        assert children == [RELEASE_1_5_REVISION]
+
+    def test_the_1_5_release_revision_has_no_children(self):
+        """The freeze contract at the new head: anything appended after
+        `v1_5_0` is a release decision."""
+        script = _script_directory()
+        children = [
+            revision.revision
+            for revision in script.walk_revisions()
+            if revision.down_revision == RELEASE_1_5_REVISION
         ]
         assert children == []
 
@@ -534,13 +563,49 @@ class TestThe141HotfixRevision:
         assert revision.down_revision == RELEASE_1_4_REVISION
 
     def test_only_the_hotfix_migration_references_v1_4_1_in_code(self):
+        """The 1.5 release revision may name it exactly once: as its `down_revision`."""
+        parent_line = f"down_revision: Union[str, Sequence[str], None] = {HOTFIX_1_4_1_REVISION!r}"
         offenders = []
         for path in list((BACKEND_ROOT / "app").rglob("*.py")) + list(
             (BACKEND_ROOT / "tests").rglob("*.py")
         ) + list(VERSIONS_DIR.rglob("*.py")):
             if path == pathlib.Path(__file__) or path.name == HOTFIX_1_4_1_MIGRATION_FILENAME:
                 continue
-            if HOTFIX_1_4_1_REVISION in _executable_source(path):
+            source = _executable_source(path)
+            if path.name == RELEASE_1_5_MIGRATION_FILENAME:
+                assert source.count(parent_line) == 1
+                source = source.replace(parent_line, "")
+            if HOTFIX_1_4_1_REVISION in source:
+                offenders.append(str(path.relative_to(BACKEND_ROOT)))
+        assert offenders == []
+
+
+class TestThe150ReleaseRevision:
+    """`v1_5_0` is the Céluma 1.5 release revision, defined once, on `v1_4_1` (#64).
+
+    The id had two retired development meanings (RETIRED_MEANINGS_OF_V1_5_0). Removing it from
+    SUPERSEDED_REVISIONS lifted only the blanket ban; these tests take over its protection, narrowly.
+    """
+
+    @pytest.mark.parametrize("retired", RETIRED_MEANINGS_OF_V1_5_0)
+    def test_a_retired_meaning_of_v1_5_0_never_returns(self, retired):
+        assert not (VERSIONS_DIR / retired).exists()
+
+    def test_exactly_one_file_defines_the_1_5_release_revision(self):
+        files = sorted(p.name for p in VERSIONS_DIR.glob(f"{RELEASE_1_5_REVISION}_*.py"))
+        assert files == [RELEASE_1_5_MIGRATION_FILENAME]
+        revision = _script_directory().get_revision(RELEASE_1_5_REVISION)
+        assert pathlib.Path(revision.path).name == RELEASE_1_5_MIGRATION_FILENAME
+        assert revision.down_revision == HOTFIX_1_4_1_REVISION
+
+    def test_only_the_1_5_migration_references_v1_5_0_in_code(self):
+        offenders = []
+        for path in list((BACKEND_ROOT / "app").rglob("*.py")) + list(
+            (BACKEND_ROOT / "tests").rglob("*.py")
+        ) + list(VERSIONS_DIR.rglob("*.py")):
+            if path == pathlib.Path(__file__) or path.name == RELEASE_1_5_MIGRATION_FILENAME:
+                continue
+            if RELEASE_1_5_REVISION in _executable_source(path):
                 offenders.append(str(path.relative_to(BACKEND_ROOT)))
         assert offenders == []
 

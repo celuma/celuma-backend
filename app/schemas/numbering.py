@@ -1,6 +1,6 @@
 """Schemas of the monthly numbering configuration and preview API (issue #8)."""
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, StrictInt, field_validator
 
@@ -66,6 +66,10 @@ class NumberingPreviewRequest(BaseModel):
     #: the allocation will; without it the period is the current month in the numbering zone and
     #: `date_basis` says so. Orders ignore it. Never consumes a number.
     reference_date: Optional[datetime] = None
+    #: Céluma 1.5 (#64), with `scope_id`: `effective` (default) starts from what that type really uses (its own
+    #: configuration, else the laboratory's); `laboratory` ignores the type's own configuration (what the type
+    #: would use once cleared). Candidate fields apply on top of either.
+    layer: Literal["effective", "laboratory"] = "effective"
 
     @field_validator("reference_date", mode="before")
     @classmethod
@@ -105,6 +109,53 @@ class NumberingPreviewResponse(BaseModel):
     examples: List[NumberingExample]
     estimate: Optional[NumberingEstimate] = None
     notice: str
+    #: Céluma 1.5 (#64): where the format, width and start value came from before any candidate field:
+    #: `type` (the previewed type's own configuration) or `laboratory`.
+    config_source: str = "laboratory"
+
+
+class TypeNumberingInput(BaseModel):
+    """Céluma 1.5 (#64): the only settings a study/sample type may change."""
+    format: str
+    sequence_min_width: StrictInt
+    start_value: StrictInt = 1
+
+
+class TypeNumberingOverride(BaseModel):
+    format: str
+    sequence_min_width: int
+    start_value: int
+    updated_at: Optional[str] = None
+    updated_by: Optional[str] = None
+
+
+class EffectiveTypeNumbering(BaseModel):
+    format: str
+    sequence_min_width: int
+    start_value: int
+    #: Inherited from the laboratory, never per type.
+    active: bool
+    scope: str
+    timezone: str
+    scheme: str
+
+
+class TypeNumberingEntry(BaseModel):
+    entity_kind: str
+    type_id: str
+    code: str
+    name: str
+    is_active: bool
+    #: `type` (own configuration) or `laboratory` (inherits the default).
+    source: str
+    override: Optional[TypeNumberingOverride] = None
+    effective: EffectiveTypeNumbering
+
+
+class TypeNumberingList(BaseModel):
+    entity_kind: str
+    laboratory: EffectiveTypeNumbering
+    types: List[TypeNumberingEntry]
 
 
 class SampleCodeSuggestionItem(BaseModel):
