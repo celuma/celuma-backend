@@ -20,7 +20,7 @@ from app.services.report_lifecycle_events import (
     build_publication_event,
     publication_correlation,
 )
-from app.services import report_amendments, report_review_withdrawal, report_reviewers
+from app.services import report_amendments, report_review_withdrawal, report_reviewers, sample_review_readiness
 from app.models.report_amendment import (
     AMENDMENT_STATE_CANCELLED,
     AMENDMENT_STATE_PUBLISHED,
@@ -3171,28 +3171,11 @@ def submit_report(
     old_status = report.status
     report.status = ReportStatus.IN_REVIEW
     session.add(report)
-    
-    # Create audit log
-    _create_audit_log(
-        session=session,
-        tenant_id=ctx.tenant_id,
-        branch_id=str(report.branch_id),
-        actor_user_id=ctx.user_id,
-        action="REPORT.SUBMIT",
-        entity_type="report",
-        entity_id=report_id,
-        old_values={"status": old_status},
-        new_values={
-            "status": report.status,
-            "changelog": data.changelog,
-            **amendment_context(amendment, amendment_source),
-        },
-    )
-    
+
     # Create timeline event for report submission
     from app.models.events import OrderEvent
     from app.models.enums import EventType
-    
+
     submit_event = OrderEvent(
         tenant_id=report.tenant_id,
         branch_id=report.branch_id,
@@ -3226,6 +3209,37 @@ def submit_report(
         order=session.get(Order, report.order_id) if report.order_id else None,
         actor=user,
         occurrence_marker=str(submit_event.id),
+    )
+
+    # Céluma #86 (PROPOSED, pending Rafael's review): when the order actually entered REVIEW, its active
+    # RECEIVED/PROCESSING samples become READY in this same transaction, after every guard above. READY,
+    # DAMAGED, CANCELLED and removed samples are preserved. See app/services/sample_review_readiness.py.
+    submit_order = session.get(Order, report.order_id) if report.order_id else None
+    samples_marked_ready = sample_review_readiness.mark_samples_ready_on_review(
+        session,
+        report=report,
+        order=submit_order,
+        actor=user,
+        submission_event=submit_event,
+        amendment_meta=amendment_context(amendment, amendment_source),
+    )
+
+    # Create audit log
+    _create_audit_log(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        branch_id=str(report.branch_id),
+        actor_user_id=ctx.user_id,
+        action="REPORT.SUBMIT",
+        entity_type="report",
+        entity_id=report_id,
+        old_values={"status": old_status},
+        new_values={
+            "status": report.status,
+            "changelog": data.changelog,
+            **amendment_context(amendment, amendment_source),
+            **({"samples_marked_ready": samples_marked_ready} if samples_marked_ready else {}),
+        },
     )
 
     session.commit()
