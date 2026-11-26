@@ -40,7 +40,7 @@ from app.schemas.numbering import (
     TypeNumberingList,
     TypeNumberingOverride,
 )
-from app.services import numbering
+from app.services import catalog_removal, numbering
 from app.services.sample_types import record_audit
 
 logger = logging.getLogger(__name__)
@@ -329,6 +329,7 @@ def suggest_sample_codes(
 # --------------------------------------------------------------------------- per-type numbering (Céluma 1.5, #64)
 
 _TYPE_MODEL = {numbering.ORDER: StudyType, numbering.SAMPLE: SampleType}
+_TYPE_TABLE = {numbering.ORDER: "study_type", numbering.SAMPLE: "sample_type"}
 
 
 def _tenant_type(session: Session, tenant_id, kind: str, type_id):
@@ -347,10 +348,14 @@ def _guard_type_configs_for_scope(session: Session, tenant_id, kind: str, scope:
     if scope not in numbering.SCOPES:
         return
     rows = numbering.load_type_configs(session, tenant_id, kind)
-    conflicts = [r for r in rows.values() if numbering.validate_format(r.format, scope)]
+    model = _TYPE_MODEL[kind]
+    # Céluma 1.5 (#94): a removed type's configuration is retained but frozen (no edit, no clear) and serves
+    # only the receipt-date regeneration of its existing records, so it cannot block a laboratory change.
+    removed = {str(i) for i in session.exec(
+        select(model.id).where(model.tenant_id == UUID(str(tenant_id)), model.removed_at.is_not(None))).all()}
+    conflicts = [r for r in rows.values() if str(r.type_id) not in removed and numbering.validate_format(r.format, scope)]
     if not conflicts:
         return
-    model = _TYPE_MODEL[kind]
     codes = sorted(
         (session.get(model, r.type_id).code if session.get(model, r.type_id) else str(r.type_id)) for r in conflicts
     )
@@ -402,7 +407,8 @@ def list_type_numbering(
     kind = _kind(entity_kind)
     lab = numbering.get_settings(session, ctx.tenant_id, kind)
     model = _TYPE_MODEL[kind]
-    rows = session.exec(select(model).where(model.tenant_id == UUID(ctx.tenant_id))).all()
+    # Céluma 1.5 (#94): a removed type is not part of the catalog; its retained configuration is not listed.
+    rows = session.exec(select(model).where(model.tenant_id == UUID(ctx.tenant_id), model.removed_at.is_(None))).all()
     rows = sorted(rows, key=lambda r: (r.name.casefold(), r.code, str(r.id)))
     configs = numbering.load_type_configs(session, ctx.tenant_id, kind)
     return TypeNumberingList(
@@ -428,6 +434,7 @@ def set_type_numbering(
     _require(user, "admin:manage_catalog", session)
     kind = _kind(entity_kind)
     type_row = _tenant_type(session, ctx.tenant_id, kind, type_id)
+    catalog_removal.ensure_not_removed(type_row, _TYPE_TABLE[kind], purpose="for numbering changes")
     lab = numbering.get_settings(session, ctx.tenant_id, kind)
     problems = (numbering.validate_format(body.format, lab.scope) + numbering.validate_min_width(body.sequence_min_width)
                 + numbering.validate_start_value(body.start_value))
@@ -482,6 +489,7 @@ def clear_type_numbering(
     _require(user, "admin:manage_catalog", session)
     kind = _kind(entity_kind)
     type_row = _tenant_type(session, ctx.tenant_id, kind, type_id)
+    catalog_removal.ensure_not_removed(type_row, _TYPE_TABLE[kind], purpose="for numbering changes")
     lab = numbering.get_settings(session, ctx.tenant_id, kind)
     cfg = session.get(NumberingTypeConfig, (UUID(ctx.tenant_id), kind, type_row.id))
     if cfg is not None:

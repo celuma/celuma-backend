@@ -42,6 +42,8 @@ class StudyTypeRef(BaseModel):
     id: str
     code: str
     name: str
+    # Céluma 1.5 (#94): the price belongs to a study type removed from the catalog (kept for history).
+    is_removed: bool = False
 
 
 class PriceCatalogResponse(BaseModel):

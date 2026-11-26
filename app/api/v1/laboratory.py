@@ -19,6 +19,7 @@ from app.models.enums import EventType, OrderStatus, SampleState, AssignmentItem
 from app.services.sample_types import (
     UNTYPED_FILTER_VALUE,
     ref_for_sample,
+    SampleTypeRemovedForNewSample,
     require_active_sample_types,
     sample_type_refs,
 )
@@ -377,11 +378,16 @@ def create_order(
 
     # Verify study_type (now required)
     from app.models.study_type import StudyType
-    study_type = session.get(StudyType, order_data.study_type_id)
+    # FOR SHARE (#94): a concurrent catalog removal waits for this registration.
+    study_type = session.get(StudyType, order_data.study_type_id, with_for_update={"read": True})
     if not study_type:
         raise HTTPException(404, "Study type not found")
     if str(study_type.tenant_id) != str(order_data.tenant_id):
         raise HTTPException(403, "Study type does not belong to this tenant")
+    # Céluma 1.5 (#94): a type removed from the catalog cannot be used for a new order (inactive study types
+    # are still accepted here, as before 1.5; see catalog-type-removal.md).
+    if study_type.removed_at is not None:
+        raise HTTPException(400, f"Study type '{study_type.code}' was removed from the catalog and cannot be used for new orders")
     # Céluma 1.4.1: an explicit report template is optional; when sent it must be this tenant's and active.
     explicit_template = (
         order_report_template.require_selectable(session, ctx.tenant_id, order_data.report_template_id)
@@ -1492,12 +1498,19 @@ def create_order_with_samples(
 
     # Verify study_type (now required)
     from app.models.study_type import StudyType
-    study_type = session.get(StudyType, payload.study_type_id)
+    # FOR SHARE (#94): a concurrent catalog removal waits for this registration.
+    study_type = session.get(StudyType, payload.study_type_id, with_for_update={"read": True})
     if not study_type:
         raise RegistrationFieldError(404, "study_type_not_found", "Study type not found", ["study_type_id"])
     if str(study_type.tenant_id) != str(payload.tenant_id):
         raise RegistrationFieldError(
             403, "study_type_not_in_tenant", "Study type does not belong to this tenant", ["study_type_id"])
+    # Céluma 1.5 (#94): a type removed from the catalog cannot be used for a new order.
+    if study_type.removed_at is not None:
+        raise RegistrationFieldError(
+            400, "study_type_removed",
+            f"Study type '{study_type.code}' was removed from the catalog and cannot be used for new orders",
+            ["study_type_id"])
 
     # Céluma 1.4 (#17): every sample needs an active type of this tenant. Checked
     # before anything is written, so a bad type leaves no order behind.
@@ -1510,8 +1523,10 @@ def create_order_with_samples(
         try:
             sample_types.update(require_active_sample_types(session, ctx.tenant_id, [type_id]))
         except HTTPException as exc:
+            code = ("sample_type_removed" if isinstance(exc, SampleTypeRemovedForNewSample)
+                    else type_codes.get(exc.status_code, "sample_type_invalid"))
             raise RegistrationFieldError(
-                exc.status_code, type_codes.get(exc.status_code, "sample_type_invalid"), str(exc.detail),
+                exc.status_code, code, str(exc.detail),
                 registration_errors.row_fields(rows, "sample_type_id"),
             ) from exc
     # Céluma 1.4.1: the study type's template is an optional default, never a prerequisite. An EXPLICIT choice

@@ -273,7 +273,8 @@ class TestRequiredTypeOnCreation:
 
         ok = post(base)
         assert ok.status_code == 200, ok.text
-        assert ok.json()["sample_type"] == {"id": str(active.id), "code": "ACT", "name": "Act", "is_active": True}
+        assert ok.json()["sample_type"] == {"id": str(active.id), "code": "ACT", "name": "Act", "is_active": True,
+                                            "is_removed": False}  # #94: additive field
         assert "type" not in ok.json()
         assert session.exec(select(Sample)).one().sample_type_id == active.id
 
@@ -355,7 +356,8 @@ class TestRepresentation:
         client.delete(f"{BASE}{st.id}", headers=lab.headers)
         client.put(f"{BASE}{st.id}", json={"name": "Tejido fresco"}, headers=lab.headers)
         detail = client.get(f"{SAMPLES}{sample.id}", headers=lab.headers).json()["sample_type"]
-        assert detail == {"id": str(st.id), "code": "TEJ", "name": "Tejido fresco", "is_active": False}
+        assert detail == {"id": str(st.id), "code": "TEJ", "name": "Tejido fresco", "is_active": False,
+                          "is_removed": False}  # #94: additive field
         assert client.get(SAMPLES, headers=lab.headers).json()["samples"][0]["sample_type"]["is_active"] is False
         # but it cannot be chosen for a new sample
         refused = client.post(SAMPLES, json=lab.sample_payload(order, st.id, code="NEW"), headers=lab.headers)

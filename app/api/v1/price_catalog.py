@@ -6,6 +6,7 @@ from app.core.rbac import has_permission
 from app.models.price_catalog import PriceCatalog
 from app.models.study_type import StudyType
 from app.models.user import AppUser
+from app.services import catalog_removal
 from app.schemas.price_catalog import (
     PriceCatalogCreate,
     PriceCatalogUpdate,
@@ -46,7 +47,8 @@ def list_price_catalog(
             study_type_ref = StudyTypeRef(
                 id=str(study_type.id),
                 code=study_type.code,
-                name=study_type.name
+                name=study_type.name,
+                is_removed=study_type.removed_at is not None,
             )
         
         results.append(
@@ -91,7 +93,8 @@ def get_price_catalog(
         study_type_ref = StudyTypeRef(
             id=str(study_type.id),
             code=study_type.code,
-            name=study_type.name
+            name=study_type.name,
+            is_removed=study_type.removed_at is not None,
         )
     
     return PriceCatalogResponse(
@@ -125,6 +128,8 @@ def create_price_catalog(
     
     if str(study_type.tenant_id) != ctx.tenant_id:
         raise HTTPException(403, "Study type does not belong to your tenant")
+    # Céluma 1.5 (#94): no new price for a type removed from the catalog (its existing prices are kept).
+    catalog_removal.ensure_not_removed(study_type, "study_type", purpose="for new prices")
     
     # Check if a price already exists for this study type (optionally warn or allow multiple)
     # For now, we allow multiple price entries per study type (for historical pricing, etc.)
@@ -147,7 +152,8 @@ def create_price_catalog(
     study_type_ref = StudyTypeRef(
         id=str(study_type.id),
         code=study_type.code,
-        name=study_type.name
+        name=study_type.name,
+        is_removed=study_type.removed_at is not None,
     )
     
     logger.info(
@@ -199,6 +205,9 @@ def update_price_catalog(
             raise HTTPException(404, "Study type not found")
         if str(study_type.tenant_id) != ctx.tenant_id:
             raise HTTPException(403, "Study type does not belong to your tenant")
+        # Céluma 1.5 (#94): a price cannot be moved onto a removed type (keeping its current one is fine).
+        if str(study_type.id) != str(price.study_type_id):
+            catalog_removal.ensure_not_removed(study_type, "study_type", purpose="for prices")
         price.study_type_id = price_data.study_type_id
     
     # Update fields if provided
@@ -224,7 +233,8 @@ def update_price_catalog(
         study_type_ref = StudyTypeRef(
             id=str(study_type.id),
             code=study_type.code,
-            name=study_type.name
+            name=study_type.name,
+            is_removed=study_type.removed_at is not None,
         )
     
     logger.info(
