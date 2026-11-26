@@ -200,6 +200,10 @@ class TestTemplateVersioning:
             "storage_limit_reached_v1",
             "user_limit_approaching_v1",
             "user_limit_reached_v1",
+            # Céluma 1.5 (#98): the generic conversation notice; the mention
+            # notice is selected directly by its integration, like the
+            # sample/reviewer assignment keys.
+            "order_comment_added_v1",
         }
         assert set(CURRENT_TEMPLATE_KEY.values()) == expected
         assert "sample_status_changed_v1" in NOTIFICATION_TEMPLATE_REGISTRY

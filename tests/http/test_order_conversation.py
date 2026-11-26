@@ -201,6 +201,15 @@ class TestAttachments:
         session.expire_all()
         usage = session.get(TenantUsage, world.tenant.id)
         assert usage.billable_storage_bytes == sum(len(v) for v in FakeS3Service.store.values())
+        # Reconciliation recomputes the counter from the billable categories;
+        # conversation images must be one of them or every run erases them.
+        from app.services.storage_billing import StorageBillingService
+
+        breakdown = StorageBillingService.compute_breakdown(session, world.tenant.id)
+        assert breakdown.conversation_images_bytes == usage.billable_storage_bytes
+        assert breakdown.total_bytes == usage.billable_storage_bytes
+        refs = StorageBillingService.get_billable_storage_objects(session, world.tenant.id)
+        assert sorted(r.object_key for r in refs) == sorted(keys)
 
     def test_image_only_message(self, client, world):
         response = post_multipart(client, world, world.sender, "", [jpeg_bytes()])

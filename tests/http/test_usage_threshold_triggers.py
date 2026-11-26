@@ -159,7 +159,7 @@ class TestStorageTriggerCoverage:
     def test_every_wrapper_call_site_is_accounted_for(self):
         """The inventory itself, as a number.
 
-        Seventeen production storage flows. Keep the documented inventory
+        Eighteen production storage flows. Keep the documented inventory
         aligned when a call site is added or removed.
 
         Céluma 1.3.1 Block A added the fourteenth:
@@ -185,6 +185,11 @@ class TestStorageTriggerCoverage:
         `app/services/report_section_titles_backfill.py`. It records the size
         delta of the active report JSON and retains the original as a
         non-billable recovery copy.
+
+        Céluma 1.5 (#96) adds the eighteenth:
+        `app/services/order_conversation.py::create_comment`, which records the
+        full size of a conversation message's new image objects (full image and
+        thumbnail) in the same transaction as the message.
         """
         call_sites = []
         for relative, path in self._production_modules():
@@ -198,13 +203,14 @@ class TestStorageTriggerCoverage:
                     and node.func.id == "record_storage_delta_with_thresholds"
                 ):
                     call_sites.append(f"{relative}:{node.lineno}")
-        assert len(call_sites) == 17, sorted(call_sites)
+        assert len(call_sites) == 18, sorted(call_sites)
         assert {site.split(":")[0] for site in call_sites} == {
             "app/api/v1/laboratory.py",
             "app/api/v1/report_letterheads.py",
             "app/api/v1/reports.py",
             "app/api/v1/tenants.py",
             "app/api/v1/users.py",
+            "app/services/order_conversation.py",
             "app/services/report_metadata.py",
             "app/services/report_pdf_generation.py",
             "app/services/report_presentation.py",
