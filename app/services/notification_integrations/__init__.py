@@ -55,6 +55,9 @@ from app.services.notification_integrations.assignments import (
     notify_order_reviewers_added,
     notify_sample_assignments_added,
 )
+from app.services.notification_integrations.conversations import (
+    notify_order_comment_added,
+)
 from app.services.notification_integrations.reports import (
     notify_report_pdf_ready,
     notify_report_published,
@@ -76,4 +79,5 @@ __all__ = [
     "notify_order_reviewers_added",
     "notify_sample_assignments_added",
     "notify_sample_status_changed",
+    "notify_order_comment_added",
 ]

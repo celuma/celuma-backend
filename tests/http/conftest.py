@@ -191,6 +191,8 @@ def _patch_s3(monkeypatch):
     # block (confirmed by grep — neither module was ever patched here), so
     # this block's own new tests are the first callers that need it.
     monkeypatch.setattr("app.api.v1.laboratory.S3Service", FakeS3Service)
+    # Céluma 1.5 (#96): conversation image attachments write and read through their own import.
+    monkeypatch.setattr("app.services.order_conversation.S3Service", FakeS3Service)
     monkeypatch.setattr("app.api.v1.users.S3Service", FakeS3Service)
     # Céluma 1.3 Phase 4, Block D: the reconciliation engine builds its own
     # S3 client lazily when a run verifies storage integrity. Patched here

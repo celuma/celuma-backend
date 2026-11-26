@@ -597,9 +597,14 @@ def mark_delivery_failed(
     *,
     error_code: Optional[str] = None,
     now: Optional[datetime] = None,
+    terminal: bool = False,
 ) -> NotificationDelivery:
     """`SENDING -> FAILED`, scheduling a retry unless the row is exhausted.
     Commits.
+
+    `terminal=True` (Céluma 1.5, #98) schedules no retry whatever the attempt count:
+    used for an outcome a retry cannot change, such as a recipient whose access was
+    revoked between materialization and send.
 
     `error_code` is sanitized before it is stored *or* logged, so a raw
     provider exception cannot reach either. After
@@ -614,7 +619,7 @@ def mark_delivery_failed(
     safe_code = sanitize_delivery_error_code(error_code)
     delivery.status = NotificationDeliveryStatus.FAILED
     delivery.error_code = safe_code
-    delivery.next_attempt_at = compute_next_attempt_at(delivery.attempts, now)
+    delivery.next_attempt_at = None if terminal else compute_next_attempt_at(delivery.attempts, now)
     delivery.updated_at = now
     session.add(delivery)
     session.commit()

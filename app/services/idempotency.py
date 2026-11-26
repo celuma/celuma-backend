@@ -38,6 +38,8 @@ from app.models.numbering import IdempotencyReceipt
 OP_ORDER = "order.create"
 OP_SAMPLE = "sample.create"
 OP_UNIFIED = "order.create_unified"
+#: Céluma 1.5 (#88): one order conversation message (text and/or images).
+OP_ORDER_COMMENT = "order_comment.create"
 HEADER = "Idempotency-Key"
 REPLAY_HEADER = "Idempotent-Replayed"
 
@@ -128,7 +130,13 @@ def begin(session: Session, *, tenant_id, actor_id, operation: str, key: str, re
     return Claim(tenant_id, actor_id, operation, key, request_fingerprint, receipt)
 
 
-_RESOURCE_TABLES = {"order": '"order"', "sample": "sample"}
+#: kind -> (table, predicate meaning "still exists"). Céluma 1.5 (#88): a conversation
+#: message is alive while `deleted_at` is null (comments have no tombstone column).
+_RESOURCE_TABLES = {
+    "order": ('"order"', "removed_at IS NULL"),
+    "sample": ("sample", "removed_at IS NULL"),
+    "order_comment": ("order_comment", "deleted_at IS NULL"),
+}
 
 
 def verify_resources(session: Session, claim: Claim) -> None:
@@ -141,9 +149,9 @@ def verify_resources(session: Session, claim: Claim) -> None:
     receipt = claim.receipt
     assert receipt is not None
     for resource in receipt.resources:
-        table = _RESOURCE_TABLES[resource["kind"]]
+        table, alive = _RESOURCE_TABLES[resource["kind"]]
         exists = session.execute(
-            text(f"SELECT EXISTS (SELECT 1 FROM {table} WHERE id = :i AND tenant_id = :t AND removed_at IS NULL)"),
+            text(f"SELECT EXISTS (SELECT 1 FROM {table} WHERE id = :i AND tenant_id = :t AND {alive})"),
             {"i": resource["id"], "t": str(claim.tenant_id)},
         ).scalar()
         if not exists:

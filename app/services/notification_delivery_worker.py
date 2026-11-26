@@ -70,6 +70,7 @@ from app.services.email_provider import (
     EmailProviderHealth,
 )
 from app.services.email_templates import EmailTemplateError, render_notification_email
+from app.services.notification_access import delivery_access_error
 from app.services.notification_delivery import (
     claim_pending_deliveries,
     mark_delivery_failed,
@@ -128,6 +129,10 @@ class DeliverySendContext:
     #: default changed between creation and delivery. `None` only when the
     #: notification itself could not be loaded, which is already a failure.
     locale: Optional[str] = None
+    #: Céluma 1.5 (#98): set when the recipient may no longer receive this email
+    #: (`notification_access.delivery_access_error`, read fresh at claim time). The
+    #: row is failed terminally with this code and nothing is rendered or sent.
+    access_error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -193,6 +198,12 @@ def _load_send_contexts(
                 template_key=metadata.get("template_key"),
                 template_params=metadata.get("template_params"),
                 locale=(notification.locale if notification else None),
+                access_error=delivery_access_error(
+                    session,
+                    notification=notification,
+                    tenant_id=delivery.tenant_id,
+                    recipient_user_id=delivery.recipient_user_id,
+                ),
             )
         )
     return contexts
@@ -355,6 +366,13 @@ def _send_one(
             session, context, ERROR_SENDER_NOT_CONFIGURED, log_base, now=now
         )
 
+    # Céluma 1.5 (#98): access is re-checked at send time; a revoked recipient is a
+    # terminal outcome, never retried, and nothing is rendered for them.
+    if context.access_error:
+        return _resolve_failed(
+            session, context, context.access_error, log_base, now=now, terminal=True
+        )
+
     try:
         message = _build_message(context)
     except EmailTemplateError as exc:
@@ -454,11 +472,14 @@ def _resolve_failed(
     log_base: dict,
     *,
     now: Optional[datetime] = None,
+    terminal: bool = False,
 ) -> bool:
     """Record a failed attempt. Always returns False, so a caller can
     `return _resolve_failed(...)` and read as "this one did not send"."""
     try:
-        mark_delivery_failed(session, context.delivery_id, error_code=error_code, now=now)
+        mark_delivery_failed(
+            session, context.delivery_id, error_code=error_code, now=now, terminal=terminal
+        )
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "A failed delivery could not be recorded",

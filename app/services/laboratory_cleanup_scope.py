@@ -31,6 +31,8 @@ REP = f"SELECT id FROM report WHERE order_id IN ({ORD})"
 VER = f"SELECT id FROM report_version WHERE report_id IN ({REP})"
 AMD = f"SELECT id FROM report_amendment WHERE report_id IN ({REP})"
 COM = f"SELECT id FROM order_comment WHERE order_id IN ({ORD})"
+#: Céluma 1.5 (#96): images of conversation messages (their storage rows are resolved below).
+ATT = f"SELECT id FROM order_comment_attachment WHERE comment_id IN ({COM})"
 INV = f"SELECT id FROM invoice WHERE order_id IN ({ORD})"
 RVW = f"SELECT id FROM report_review WHERE order_id IN ({ORD}) OR report_id IN ({REP})"
 PAY = f"SELECT id FROM payment WHERE invoice_id IN ({INV})"
@@ -41,7 +43,7 @@ NOT = (
 )
 #: Every id a scoped row can be known by in a polymorphic reference (audit `entity_id`).
 ALL_SCOPED_IDS = " UNION ".join(
-    f"({fragment})" for fragment in (ORD, SMP, IMG, REN, REP, VER, AMD, COM, INV, PAY, ITM, RVW, NOT)
+    f"({fragment})" for fragment in (ORD, SMP, IMG, REN, REP, VER, AMD, COM, ATT, INV, PAY, ITM, RVW, NOT)
 )
 
 
@@ -64,6 +66,7 @@ CORE_TABLES: Tuple[ScopeTable, ...] = (
     ScopeTable("order_labels", "order_labels", f"x.order_id IN ({ORD})"),
     ScopeTable("order_comments", "order_comment", f"x.id IN ({COM})"),
     ScopeTable("order_comment_mentions", "order_comment_mention", f"x.comment_id IN ({COM})"),
+    ScopeTable("order_comment_attachments", "order_comment_attachment", f"x.id IN ({ATT})"),
     ScopeTable("order_events", "order_event", f"x.order_id IN ({ORD})"),
     ScopeTable("order_requesting_physicians", "order_requesting_physician", f"x.order_id IN ({ORD})"),
     ScopeTable("reports", "report", f"x.id IN ({REP})"),
@@ -292,6 +295,7 @@ _SCOPED_REFERENCERS: Dict[str, str] = {
     "sample_image": IMG,
     "sample_image_rendition": REN,
     "report_version": VER,
+    "order_comment_attachment": ATT,
 }
 
 
@@ -303,6 +307,10 @@ def resolve_objects(session: Session, tenant_id: str) -> ObjectInventory:
         SELECT s.id::text, s.storage_id::text, 'sample_image' FROM sample_image s WHERE s.id IN ({IMG})
         UNION ALL
         SELECT r.id::text, r.storage_id::text, 'sample_image_rendition' FROM sample_image_rendition r WHERE r.id IN ({REN})
+        UNION ALL
+        SELECT a.id::text, a.storage_id::text, 'conversation_image' FROM order_comment_attachment a WHERE a.id IN ({ATT})
+        UNION ALL
+        SELECT a.id::text, a.thumbnail_storage_id::text, 'conversation_image' FROM order_comment_attachment a WHERE a.id IN ({ATT})
         UNION ALL
         SELECT v.id::text, v.pdf_storage_id::text, 'pdf' FROM report_version v WHERE v.id IN ({VER}) AND v.pdf_storage_id IS NOT NULL
         UNION ALL
@@ -537,6 +545,7 @@ def delete_graph(session: Session, scope: Scope, *, operation_id, now) -> Dict[s
     run("notifications", f"DELETE FROM notification WHERE id IN ({NOT})")
     run("assignments", f"DELETE FROM assignment x WHERE {_where('assignments')}")
     run("order_comment_mentions", f"DELETE FROM order_comment_mention WHERE comment_id IN ({COM})")
+    run("order_comment_attachments", f"DELETE FROM order_comment_attachment WHERE id IN ({ATT})")
     run("order_comments", f"DELETE FROM order_comment WHERE id IN ({COM})")
     run("sample_labels", f"DELETE FROM sample_labels WHERE sample_id IN ({SMP})")
     run("order_labels", f"DELETE FROM order_labels WHERE order_id IN ({ORD})")

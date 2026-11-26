@@ -315,6 +315,17 @@ class CommentCreate(BaseModel):
             raise ValueError('Text cannot exceed 5000 characters')
         return v
 
+class CommentAttachmentResponse(BaseModel):
+    """An image of a conversation message (Céluma 1.5, #96). Bytes are read through
+    `GET /laboratory/orders/{order_id}/comments/{comment_id}/attachments/{id}?variant=`;
+    there is no public or presigned URL."""
+    id: str
+    position: int
+    width: int
+    height: int
+    content_type: str = "image/jpeg"
+
+
 class CommentResponse(BaseModel):
     """Comment response with resolved mentions"""
     id: str
@@ -331,6 +342,7 @@ class CommentResponse(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
     edited_at: Optional[datetime] = None
     deleted_at: Optional[datetime] = None
+    attachments: List[CommentAttachmentResponse] = []
 
 class PageInfo(BaseModel):
     """Pagination information"""

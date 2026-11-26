@@ -104,6 +104,9 @@ class NotificationType(str, Enum):
     STORAGE_LIMIT_REACHED = "STORAGE_LIMIT_REACHED"
     USER_LIMIT_APPROACHING = "USER_LIMIT_APPROACHING"
     USER_LIMIT_REACHED = "USER_LIMIT_REACHED"
+    #: Céluma 1.5 (#98): a message was added to an order conversation. Content-free:
+    #: the text and images stay on the order, behind its access checks.
+    ORDER_COMMENT_ADDED = "ORDER_COMMENT_ADDED"
 
 
 class NotificationSeverity(str, Enum):

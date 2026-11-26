@@ -211,6 +211,7 @@ MATRIX = {
     # DELETE (scoped graph)
     "order": "DELETE/RETAIN", "sample": "DELETE", "sample_image": "DELETE", "sample_image_rendition": "DELETE",
     "sample_labels": "DELETE", "order_labels": "DELETE", "order_comment": "DELETE", "order_comment_mention": "DELETE",
+    "order_comment_attachment": "DELETE",
     "order_event": "DELETE", "order_requesting_physician": "DELETE", "report": "DELETE", "report_version": "DELETE",
     "report_amendment": "DELETE", "report_review": "DELETE", "assignment": "DELETE", "notification": "DELETE",
     "notification_recipient": "DELETE", "notification_delivery": "DELETE", "invoice": "DELETE/RETAIN",
@@ -249,11 +250,13 @@ JSON_COLUMNS = {
     ("report_template_version", "configuration"): "PRESERVED; scanned for object references",
 }
 
-#: Foreign keys to storage_object: the three scoped referencers are resolved by the cleanup; the rest PROTECT the object.
+#: Foreign keys to storage_object: the scoped referencers (sample images, renditions, report versions and, since
+#: 1.5 #96, conversation attachments) are resolved by the cleanup; the rest PROTECT the object.
 STORAGE_REFERENCERS = {
     ("sample_image", "storage_id"), ("sample_image_rendition", "storage_id"),
     ("report_version", "pdf_storage_id"), ("report_version", "json_storage_id"), ("report_version", "html_storage_id"),
     ("app_user", "signature_storage_id"), ("tenant", "logo_storage_id"),
+    ("order_comment_attachment", "storage_id"), ("order_comment_attachment", "thumbnail_storage_id"),
 }
 
 
@@ -275,7 +278,8 @@ class TestEverySchemaObjectIsClassified:
         assert {(t, c) for t, c, _ in scope.CONFIG_JSON_COLUMNS} == {k for k, v in JSON_COLUMNS.items() if v.startswith("PRESERVED")}
 
     def test_every_storage_reference_is_known(self, mdb):
-        up()
+        # At HEAD: `v1_5_0` §3 (#96) adds the two conversation-attachment references.
+        up(HEAD_REVISION)
         assert set(scope._storage_references_from_metadata()) == STORAGE_REFERENCERS
         with mdb.connect() as conn:
             live = {(t, c) for t, c in conn.execute(text(

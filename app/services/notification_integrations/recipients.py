@@ -411,3 +411,66 @@ def resolve_usage_threshold_recipients(
     return tenant_users_with_permission(
         session, tenant_id=tenant_id, permission_code=USAGE_THRESHOLD_PERMISSION
     )
+
+
+#: The permission that opens an order conversation (`GET /laboratory/orders/{id}/comments`).
+#: Recipients of a conversation notice must hold it, so "who is told" and "who may read"
+#: are the same set; the delivery worker re-checks it before sending (#98).
+ORDER_CONVERSATION_READ_PERMISSION = "lab:read"
+
+
+def order_comment_author_ids(
+    session: Session, *, tenant_id: UUID, order_id: UUID
+) -> List[UUID]:
+    """Everyone who has written a (non-deleted) message in the order's conversation."""
+    from app.models.laboratory import OrderComment
+
+    rows = session.exec(
+        select(OrderComment.created_by)
+        .where(
+            OrderComment.tenant_id == tenant_id,
+            OrderComment.order_id == order_id,
+            OrderComment.deleted_at == None,  # noqa: E711 — SQL NULL test
+        )
+        .order_by(OrderComment.created_at, OrderComment.id)
+    ).all()
+    return _dedupe(rows)
+
+
+def resolve_order_comment_recipients(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    order_id: UUID,
+    mentioned_user_ids: Sequence[UUID] = (),
+) -> tuple[List[UUID], List[UUID]]:
+    """ORDER_COMMENT_ADDED — the order's participants: `(mentioned, others)`.
+
+    Céluma 1.5 (#98). Participants are, read fresh at the instant the message commits:
+
+    - users currently assigned to the order (live `Assignment`, `unassigned_at IS NULL`);
+    - the order's reviewers (`ReportReview`);
+    - everyone who has already written in this conversation (the new message's own
+      author included — the service then removes the actor);
+    - users the message mentions.
+
+    Each candidate must be an active user of the tenant (`active_users_in_tenant`) and
+    hold `lab:read`, the permission the conversation itself requires — a mention or
+    an old message never widens who can be told. No blanket admin fan-out, no sample
+    assignees, no requesting physician. Mentioned users get the mention notice instead
+    of the generic one, never both. Actor exclusion is the service's (rule 6).
+    """
+    candidates = order_assignee_ids(session, tenant_id=tenant_id, order_id=order_id)
+    candidates.extend(order_reviewer_ids(session, tenant_id=tenant_id, order_id=order_id))
+    candidates.extend(order_comment_author_ids(session, tenant_id=tenant_id, order_id=order_id))
+    candidates.extend(mentioned_user_ids)
+    allowed = users_with_permission(
+        session,
+        active_users_in_tenant(session, candidates, tenant_id),
+        ORDER_CONVERSATION_READ_PERMISSION,
+    )
+    mentioned = set(mentioned_user_ids)
+    return (
+        [user_id for user_id in allowed if user_id in mentioned],
+        [user_id for user_id in allowed if user_id not in mentioned],
+    )

@@ -57,7 +57,11 @@ TENANT_SCOPED_KEYS = frozenset(
     }
 )
 
-ORDER_SCOPED_KEYS = frozenset(EMAIL_TEMPLATE_KEYS) - TENANT_SCOPED_KEYS
+#: Céluma 1.5 (#98): conversation emails are about an order but deliberately carry
+#: NO parameter — not even the order number. A thread is the one source whose subject
+#: is user-authored text, so its email says only "there is a message, sign in".
+CONVERSATION_KEYS = frozenset({"order_comment_added_v1", "order_comment_mention_v1"})
+ORDER_SCOPED_KEYS = frozenset(EMAIL_TEMPLATE_KEYS) - TENANT_SCOPED_KEYS - CONVERSATION_KEYS
 
 #: Valid parameters per key, so a parametrized render works for both shapes.
 DEFAULT_PARAMS = {
@@ -113,8 +117,9 @@ class TestRegistryCoverage:
         # the sample/reviewer assignment contexts, which have their own in-app
         # copy, can still be emailed — see notification_templates.py's
         # `ASSIGNMENT_ADDED_*_TEMPLATE_KEY` constants), plus Céluma 1.3,
-        # Phase 4, Block G's four usage-threshold types.
-        assert len(EMAIL_TEMPLATES) == 11
+        # Phase 4, Block G's four usage-threshold types, plus Céluma 1.5's two
+        # parameter-free conversation templates (#98).
+        assert len(EMAIL_TEMPLATES) == 13
 
     def test_every_email_key_matches_an_in_app_key(self):
         """The two registries are separate by design, but they must stay
@@ -152,8 +157,18 @@ class TestRegistryCoverage:
         for key, template in EMAIL_TEMPLATES.items():
             if key in TENANT_SCOPED_KEYS:
                 assert template.params in ((), ("usage_percent",)), key
+            elif key in CONVERSATION_KEYS:
+                assert template.params == (), key
             else:
                 assert template.params == ("order_number",), key
+
+    def test_conversation_templates_name_nothing(self):
+        """#98: no text, order number, image or link beyond the origin."""
+        for key in CONVERSATION_KEYS:
+            template = EMAIL_TEMPLATES[key]
+            assert template.notification_type == NotificationType.ORDER_COMMENT_ADDED
+            assert "{" not in template.body
+            assert template.subject.replace("{tenant_name}", "").count("{") == 0
 
     def test_no_tenant_scoped_template_names_an_order(self):
         """The complement of the split: a usage-threshold email must not

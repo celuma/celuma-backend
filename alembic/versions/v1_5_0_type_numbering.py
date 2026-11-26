@@ -1,4 +1,4 @@
-"""v1.5.0 - Optional numbering per study type and sample type (#64); catalog type removal (#94)
+"""v1.5.0 - Optional numbering per study type and sample type (#64); catalog type removal (#94); order conversation attachments and notifications (#96, #98)
 
 Revision ID: v1_5_0
 Revises: v1_4_1
@@ -36,6 +36,17 @@ id, code and every reference. Specification:
 `celuma-engineering/specs/laboratory/catalog-type-removal.md`; proposed decision:
 `celuma-engineering/adr/0025-catalog-type-removal.md`.
 
+**§3 — order conversation (#96, #98).** A new, EMPTY table
+`order_comment_attachment` (one row per image of a conversation message: tenant,
+branch, order, comment, position 0–3, processed and thumbnail `storage_object`
+ids, pixel size, author, timestamp; unique `(comment_id, position)`, index on
+`(tenant_id, order_id)`), and the notification type `ORDER_COMMENT_ADDED`:
+`ck_notification_type` and `ck_notification_preference_type` are recreated with
+the eleven 1.4 values plus this one (a constraint swap; no row is touched).
+Existing comments get no attachment and no notification is back-filled.
+Specification: `celuma-engineering/specs/laboratory/order-conversation.md`;
+decision record: `celuma-engineering/adr/0026-order-conversation-attachments.md`.
+
 **Locks.** A new, empty table: no lock on any existing business table beyond
 the FK checks against `tenant` and `app_user` (SHARE ROW EXCLUSIVE, brief).
 §2 builds the partial index on `sample_type` (a small catalog table, under the
@@ -50,7 +61,15 @@ the ledger are untouched. §2's downgrade REFUSES (raises, nothing changed) when
 i.e. two rows of one catalog share a tenant and code: the pre-1.5 schema
 (`uq_sample_type_tenant_code`) and the pre-1.5 API (one study type per code)
 cannot represent that history, and no row is rewritten to make it fit; restore
-the pre-upgrade snapshot instead. Otherwise it restores the full constraint and
+the pre-upgrade snapshot instead. §3's downgrade REFUSES while any conversation
+attachment or `ORDER_COMMENT_ADDED` notification exists (images in storage and
+inbox history that 1.4 cannot represent; restore the snapshot); otherwise it
+deletes `ORDER_COMMENT_ADDED` preference rows (user settings only), restores
+both constraints to the 1.4 set and drops the table. §3's locks: the brief
+ACCESS EXCLUSIVE of the two constraint swaps on `notification` and
+`notification_preference` (the new CHECK validates by a scan of each), and FK
+checks against `tenant`, `branch`, `order`, `order_comment`, `storage_object`
+and `app_user` for the new, empty table. Otherwise it restores the full constraint and
 drops the columns and checks:
 a removed type then becomes an ordinary INACTIVE type (it already is inactive),
 so it stays out of new-record selectors, but the removal marker, its author and
@@ -73,6 +92,28 @@ depends_on: Union[str, Sequence[str], None] = None
 TABLE = "numbering_type_config"
 #: §2 (#94): the two catalogs that gain a removal marker.
 CATALOGS = ("study_type", "sample_type")
+
+#: §3 (#96): images of order conversation messages.
+ATTACHMENT_TABLE = "order_comment_attachment"
+#: §3 (#98): the notification types `v1_4_0` admits (frozen copy) and the one this revision adds.
+V1_4_NOTIFICATION_TYPES = (
+    "REPORT_SUBMITTED", "REPORT_PDF_READY", "REPORT_PUBLISHED", "REPORT_RETRACTED",
+    "ASSIGNMENT_ADDED", "SAMPLE_STATUS_CHANGED", "STORAGE_USAGE_APPROACHING",
+    "STORAGE_LIMIT_REACHED", "USER_LIMIT_APPROACHING", "USER_LIMIT_REACHED",
+    "REPORT_REPUBLISHED",
+)
+COMMENT_NOTIFICATION_TYPE = "ORDER_COMMENT_ADDED"
+
+
+def _notification_type_checks(types) -> None:
+    """Recreate both notification-domain CHECK constraints over `types` (same swap as `v1_4_0` §6c)."""
+    rendered = ", ".join(f"'{value}'" for value in types)
+    for table, column, name in (
+        ("notification", "type", "ck_notification_type"),
+        ("notification_preference", "notification_type", "ck_notification_preference_type"),
+    ):
+        op.execute(f"ALTER TABLE public.{table} DROP CONSTRAINT {name}")
+        op.execute(f"ALTER TABLE public.{table} ADD CONSTRAINT {name} CHECK ({column} IN ({rendered}))")
 
 
 def upgrade() -> None:
@@ -122,10 +163,46 @@ def upgrade() -> None:
         "CREATE UNIQUE INDEX uq_sample_type_tenant_code_reserved ON public.sample_type (tenant_id, code) "
         "WHERE code_released_at IS NULL"
     )
+    # §3 (#96, #98) — order conversation attachments and the comment notification type.
+    op.execute(
+        f"""
+        CREATE TABLE public.{ATTACHMENT_TABLE} (
+            id uuid NOT NULL,
+            tenant_id uuid NOT NULL REFERENCES public.tenant(id),
+            branch_id uuid NOT NULL REFERENCES public.branch(id),
+            order_id uuid NOT NULL REFERENCES public."order"(id),
+            comment_id uuid NOT NULL REFERENCES public.order_comment(id),
+            position integer NOT NULL,
+            storage_id uuid NOT NULL REFERENCES public.storage_object(id),
+            thumbnail_storage_id uuid NOT NULL REFERENCES public.storage_object(id),
+            width integer NOT NULL,
+            height integer NOT NULL,
+            created_by uuid NOT NULL REFERENCES public.app_user(id),
+            created_at timestamp without time zone NOT NULL,
+            CONSTRAINT pk_{ATTACHMENT_TABLE} PRIMARY KEY (id),
+            CONSTRAINT uq_{ATTACHMENT_TABLE}_position UNIQUE (comment_id, position),
+            CONSTRAINT ck_{ATTACHMENT_TABLE}_position CHECK (position BETWEEN 0 AND 3),
+            CONSTRAINT ck_{ATTACHMENT_TABLE}_size CHECK (width > 0 AND height > 0)
+        )
+        """
+    )
+    op.execute(f"CREATE INDEX ix_{ATTACHMENT_TABLE}_tenant_order ON public.{ATTACHMENT_TABLE} (tenant_id, order_id)")
+    _notification_type_checks(V1_4_NOTIFICATION_TYPES + (COMMENT_NOTIFICATION_TYPE,))
 
 
 def downgrade() -> None:
     conn = op.get_bind()
+    # §3 first (reverse order). Refused while it would destroy history 1.4 cannot hold.
+    attachments = conn.exec_driver_sql(f"SELECT count(*) FROM public.{ATTACHMENT_TABLE}").scalar()
+    comment_notifications = conn.exec_driver_sql(
+        f"SELECT count(*) FROM public.notification WHERE type = '{COMMENT_NOTIFICATION_TYPE}'"
+    ).scalar()
+    if attachments or comment_notifications:
+        raise RuntimeError(
+            f"v1_5_0 downgrade refused: {attachments} conversation attachment(s) and {comment_notifications} "
+            f"{COMMENT_NOTIFICATION_TYPE} notification(s) exist. The pre-1.5 schema cannot represent them; restore "
+            "the pre-upgrade snapshot instead (nothing was changed)."
+        )
     for table in CATALOGS:
         reused = conn.exec_driver_sql(
             f"SELECT count(*) FROM (SELECT 1 FROM public.{table} GROUP BY tenant_id, upper(code) "
@@ -137,6 +214,11 @@ def downgrade() -> None:
                 "another type. The pre-1.5 schema cannot hold both rows without rewriting history; restore the "
                 "pre-upgrade snapshot instead (nothing was changed)."
             )
+    op.execute(
+        f"DELETE FROM public.notification_preference WHERE notification_type = '{COMMENT_NOTIFICATION_TYPE}'"
+    )
+    _notification_type_checks(V1_4_NOTIFICATION_TYPES)
+    op.execute(f"DROP TABLE public.{ATTACHMENT_TABLE}")
     op.execute("DROP INDEX public.uq_sample_type_tenant_code_reserved")
     op.execute(
         "ALTER TABLE public.sample_type ADD CONSTRAINT uq_sample_type_tenant_code UNIQUE (tenant_id, code)"

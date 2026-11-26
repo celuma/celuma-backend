@@ -10,7 +10,7 @@ from .user_role import UserRoleLink
 from .patient import Patient
 from .requesting_physician import RequestingPhysician
 from .storage import StorageObject, SampleImageRendition
-from .laboratory import Order, Sample, SampleImage, OrderComment, Label, OrderLabel, SampleLabel
+from .laboratory import Order, Sample, SampleImage, OrderComment, OrderCommentAttachment, Label, OrderLabel, SampleLabel
 from .report import Report, ReportVersion, ReportTemplate
 from .report_template_version import ReportTemplateVersion, ReportTemplateVersionStatus
 from .report_letterhead import ReportLetterhead
@@ -85,6 +85,7 @@ __all__ = [
     "Sample",
     "SampleImage",
     "OrderComment",
+    "OrderCommentAttachment",
     "Label",
     "OrderLabel",
     "SampleLabel",

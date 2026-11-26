@@ -45,6 +45,7 @@ from app.models.events import OrderEvent
 from app.models.laboratory import (
     Order,
     OrderComment,
+    OrderCommentAttachment,
     OrderCommentMention,
     OrderLabel,
     Sample,
@@ -74,7 +75,7 @@ IN_PROGRESS_MESSAGE = (
 
 #: Operational models that carry their own `tenant_id`.
 TENANT_MODELS = (
-    Order, Sample, SampleImage, OrderComment, OrderEvent, OrderRequestingPhysician,
+    Order, Sample, SampleImage, OrderComment, OrderCommentAttachment, OrderEvent, OrderRequestingPhysician,
     Report, ReportAmendment, ReportReview, Assignment, Invoice, InvoiceItem, Payment,
 )
 #: Operational models without `tenant_id`: (model, parent table, FK attribute on the model).

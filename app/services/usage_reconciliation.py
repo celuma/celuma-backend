@@ -148,6 +148,7 @@ PHASE_WORKER_ITERATION = "worker_iteration"
 #:                                                      report_pdf_generation.py)
 #:   tenants/{tenant_id}/logo/...                      (app/api/v1/tenants.py)
 #:   users/{tenant_id}/{user_id}/signature/...         (app/api/v1/users.py)
+#:   conversations/{tenant_id}/{branch_id}/{order_id}/... (app/services/order_conversation.py, 1.5 #96)
 #:
 #: Deliberately excluded: `avatars/{user_id}/...` (no tenant segment),
 #: `report-letterheads/{letterhead_id}/...` and
@@ -160,6 +161,7 @@ TENANT_ATTRIBUTABLE_KEY_PREFIXES: tuple[str, ...] = (
     "reports/",
     "tenants/",
     "users/",
+    "conversations/",
 )
 
 #: Marks a retained-after-delete signature PNG (risk R6): the application

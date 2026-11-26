@@ -323,6 +323,28 @@ _EMAIL_TEMPLATES_ES_MX: Dict[str, EmailTemplate] = {
         body="Se te asignó la revisión del reporte de la orden {order_number}.",
         params=("order_number",),
     ),
+    # -- Céluma 1.5 (#98): order conversation --------------------------------
+    #
+    # Stricter than the policy on purpose: not even the order number. A message
+    # thread is the one notification source whose subject is user-authored text, so
+    # the email carries no parameter at all — no text, no identifier, no image, no
+    # link beyond the bare origin. The in-app notice (behind login) says which order.
+    "order_comment_added_v1": EmailTemplate(
+        key="order_comment_added_v1",
+        notification_type=NotificationType.ORDER_COMMENT_ADDED,
+        subject="{tenant_name} — Nuevo comentario en una orden",
+        body="Hay un comentario nuevo en una orden en la que participas. "
+        "Entra a Céluma para leerlo.",
+        params=(),
+    ),
+    "order_comment_mention_v1": EmailTemplate(
+        key="order_comment_mention_v1",
+        notification_type=NotificationType.ORDER_COMMENT_ADDED,
+        subject="{tenant_name} — Te mencionaron en un comentario",
+        body="Alguien te mencionó en la conversación de una orden. "
+        "Entra a Céluma para leerlo.",
+        params=(),
+    ),
     # -- Céluma 1.3, Phase 4, Block G: usage thresholds --------------------
     #
     # Four entries, keys matching the in-app registry one-for-one, because
