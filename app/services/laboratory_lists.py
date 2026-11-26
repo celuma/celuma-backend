@@ -329,7 +329,7 @@ def sample_filter_options(session: Session, tenant_id) -> SampleFilterOptionsRes
     in_tenant = Sample.tenant_id == tenant_id
     states = set(session.exec(select(Sample.state).where(in_tenant).distinct()).all())
     types = session.exec(
-        sa_select(SampleType.id, SampleType.name, SampleType.is_active)
+        sa_select(SampleType.id, SampleType.name, SampleType.is_active, SampleType.removed_at)
         .where(SampleType.tenant_id == tenant_id, exists(
             sa_select(1).where(Sample.sample_type_id == SampleType.id, in_tenant)))
         .order_by(sort_key(SampleType.name), SampleType.id)
@@ -367,8 +367,10 @@ def sample_filter_options(session: Session, tenant_id) -> SampleFilterOptionsRes
     return SampleFilterOptionsResponse(
         states=[s.value for s in SampleState if s in states],
         sample_types=[
-            FilterOption(value=str(i), text=name if active else f"{name} (inactivo)")
-            for i, name, active in types
+            # Céluma 1.5 (#94): a removed type its samples still reference stays filterable, marked as removed.
+            FilterOption(value=str(i), text=f"{name} (eliminado)" if removed_at is not None
+                         else name if active else f"{name} (inactivo)")
+            for i, name, active, removed_at in types
         ],
         has_untyped_samples=bool(has_untyped),
         orders=_options(orders, text_of=lambda rest: rest[0]),

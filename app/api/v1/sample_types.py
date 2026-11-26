@@ -7,6 +7,7 @@ import and copy needs `admin:manage_catalog`.
 """
 import logging
 from typing import Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -21,18 +22,21 @@ from app.models.laboratory import Sample
 from app.models.report import ReportTemplate
 from app.models.sample_type import SampleType
 from app.models.user import AppUser
+from app.schemas.study_type import CatalogTypeRemovalImpact, CatalogTypeRemoveRequest
 from app.schemas.sample_type import (
     CopyConfirmRequest,
     CopyRequest,
     ImportConfirmRequest,
     ImportRequest,
     SampleTypeCreate,
+    SampleTypeRemovalResponse,
     SampleTypeResponse,
     SampleTypesListResponse,
     SampleTypeUpdate,
     TransferPreviewResponse,
     TransferResult,
 )
+from app.services import catalog_removal
 from app.services import catalog_transfer as transfer
 from app.services.sample_types import record_audit, sample_type_response, snapshot
 
@@ -69,11 +73,18 @@ def list_sample_types(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
     active_only: bool = True,
+    include_removed: bool = False,
 ):
     """The tenant's sample types (requires lab:read). Registration asks for the
-    active ones (default); administration passes `active_only=false`."""
+    active ones (default); administration passes `active_only=false`.
+
+    Céluma 1.5 (#94): a removed type is not part of the catalog and is left out
+    unless `include_removed=true` (historical explanations and the removed-types
+    view); it is never active, so `active_only=true` never returns it."""
     _require(user, "lab:read", session)
     query = select(SampleType).where(SampleType.tenant_id == ctx.tenant_id)
+    if not include_removed:
+        query = query.where(catalog_removal.not_removed(SampleType))
     if active_only:
         query = query.where(SampleType.is_active.is_(True))
     rows = session.exec(query.order_by(SampleType.code, SampleType.id)).all()
@@ -167,10 +178,18 @@ def confirm_copy(
     )
 
 
+def _code_taken_message(code: str, clash: SampleType) -> str:
+    if clash.removed_at is not None:
+        return (f"Sample type with code '{code}' already exists: the code belongs to a type removed from the "
+                "catalog and stays reserved because samples reference it")
+    return f"Sample type with code '{code}' already exists"
+
+
 def _get_owned(session: Session, ctx: AuthContext, sample_type_id: str) -> SampleType:
+    # A malformed id is 404 like an unknown one; parsed first so no failing query aborts the transaction.
     try:
-        row = session.get(SampleType, sample_type_id)
-    except Exception:
+        row = session.get(SampleType, UUID(str(sample_type_id)))
+    except ValueError:
         row = None
     if not row or str(row.tenant_id) != ctx.tenant_id:
         raise HTTPException(404, "Sample type not found")
@@ -197,10 +216,13 @@ def create_sample_type(
 ):
     """Create a sample type (requires admin:manage_catalog)."""
     _require(user, "admin:manage_catalog", session)
-    if session.exec(select(SampleType).where(
-        SampleType.tenant_id == ctx.tenant_id, SampleType.code == data.code
-    )).first():
-        raise HTTPException(400, f"Sample type with code '{data.code}' already exists")
+    # #94: a code released by an unused removed type is free; one kept by history is not.
+    catalog_removal.lock_catalog_codes(session, "sample_type", ctx.tenant_id)
+    clash = session.exec(select(SampleType).where(
+        SampleType.tenant_id == ctx.tenant_id, SampleType.code == data.code, catalog_removal.reserves_code(SampleType)
+    )).first()
+    if clash:
+        raise HTTPException(400, _code_taken_message(data.code, clash))
     if data.default_report_template_id:
         _owned_template(session, ctx, data.default_report_template_id)
     row = SampleType(
@@ -235,12 +257,17 @@ def update_sample_type(
     pointing at it: renaming changes how they display, nothing else."""
     _require(user, "admin:manage_catalog", session)
     row = _get_owned(session, ctx, sample_type_id)
+    # Céluma 1.5 (#94): a removed type is frozen; an ordinary edit can neither change nor reactivate it.
+    catalog_removal.ensure_not_removed(row, "sample_type", purpose="or edited")
     before = snapshot(row)
     if data.code is not None and data.code != row.code:
-        if session.exec(select(SampleType).where(
-            SampleType.tenant_id == ctx.tenant_id, SampleType.code == data.code, SampleType.id != row.id
-        )).first():
-            raise HTTPException(400, f"Sample type with code '{data.code}' already exists")
+        catalog_removal.lock_catalog_codes(session, "sample_type", ctx.tenant_id)
+        clash = session.exec(select(SampleType).where(
+            SampleType.tenant_id == ctx.tenant_id, SampleType.code == data.code, SampleType.id != row.id,
+            catalog_removal.reserves_code(SampleType),
+        )).first()
+        if clash:
+            raise HTTPException(400, _code_taken_message(data.code, clash))
         row.code = data.code
     # Céluma 1.4.1: the template drives the report defaults of the type's orders, so it must be clearable from
     # the UI. Same semantics as `description`: omitted = unchanged; an explicit null or blank clears it.
@@ -284,6 +311,9 @@ def delete_sample_type(
     sample references it (requires admin:manage_catalog)."""
     _require(user, "admin:manage_catalog", session)
     row = _get_owned(session, ctx, sample_type_id)
+    # Céluma 1.5 (#94): a removed type is retained on purpose (its code stays reserved); neither deactivating
+    # it again nor erasing it is an ordinary catalog action.
+    catalog_removal.ensure_not_removed(row, "sample_type", purpose="or deleted")
     if hard_delete:
         in_use = session.exec(select(Sample.id).where(Sample.sample_type_id == row.id).limit(1)).first()
         if in_use is not None:
@@ -306,3 +336,68 @@ def delete_sample_type(
                  entity_type="sample_type", entity_id=row.id, old_values=before, new_values=snapshot(row))
     session.commit()
     return {"message": "Sample type deactivated", "id": str(row.id)}
+
+
+@router.post("/{sample_type_id}/remove", response_model=SampleTypeRemovalResponse)
+def remove_sample_type(
+    sample_type_id: str,
+    body: CatalogTypeRemoveRequest | None = None,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """Remove a sample type from the catalog (requires admin:manage_catalog; Céluma 1.5, #94).
+
+    A retained tombstone, distinct from deactivation: the row, id and code stay, every sample keeps its
+    reference and shows the type as removed; the type disappears from the catalog and every selector, and is
+    refused for new samples, transfers, edits and numbering changes. Referenced or not, the type is kept
+    (no data is erased). Its code is RELEASED for another type only when no sample, withdrawn ones included,
+    references it (owner decision 2026-11-25); otherwise it stays reserved. Repeating the request answers the
+    same removal and writes nothing.
+    """
+    _require(user, "admin:manage_catalog", session)
+    row = _get_owned(session, ctx, sample_type_id)
+    reason = catalog_removal.clean_reason(body.reason if body else None)
+    # Code lock first (create/rename/import of this catalog), then the row: serialises with concurrent
+    # removals and with registrations that hold the type FOR SHARE, so the count below is final.
+    catalog_removal.lock_catalog_codes(session, "sample_type", ctx.tenant_id)
+    session.refresh(row, with_for_update=True)
+    refs = catalog_removal.references(session, "sample_type", row.id)
+    release = not catalog_removal.has_history("sample_type", refs)
+    if row.removed_at is not None:
+        return SampleTypeRemovalResponse(
+            **sample_type_response(session, row).model_dump(), already_removed=True, references=refs)
+    before = snapshot(row)
+    catalog_removal.mark_removed(row, user_id=user.id, reason=reason, release_code=release)
+    session.add(row)
+    record_audit(session, tenant_id=ctx.tenant_id, user_id=user.id, action="SAMPLE_TYPE.REMOVED",
+                 entity_type="sample_type", entity_id=row.id, old_values=before, new_values=snapshot(row),
+                 description=f"Sample type '{row.code}' removed from the catalog"
+                 + ("; code released" if release else "; code kept reserved by its samples"),
+                 metadata={"references": refs, "was_active": before["is_active"], "code_released": release})
+    session.commit()
+    session.refresh(row)
+    logger.info(f"Sample type '{row.code}' removed",
+                extra={"event": "sample_type.removed", "sample_type_id": str(row.id), "user_id": str(user.id)})
+    return SampleTypeRemovalResponse(**sample_type_response(session, row).model_dump(), references=refs)
+
+
+@router.get("/{sample_type_id}/removal-impact", response_model=CatalogTypeRemovalImpact)
+def sample_type_removal_impact(
+    sample_type_id: str,
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """What removing this sample type would do now (requires admin:manage_catalog; #94). Reads only;
+    the removal itself decides again under its locks."""
+    if not has_permission(user.id, "admin:manage_catalog", session):
+        raise HTTPException(403, "Permission required: admin:manage_catalog")
+    row = _get_owned(session, ctx, sample_type_id)
+    refs = catalog_removal.references(session, "sample_type", row.id)
+    return CatalogTypeRemovalImpact(
+        id=str(row.id), code=row.code, already_removed=row.removed_at is not None, references=refs,
+        code_will_be_released=(row.code_released_at is not None) if row.removed_at is not None
+        else not catalog_removal.has_history("sample_type", refs),
+        code_released=row.code_released_at is not None,
+    )

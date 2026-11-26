@@ -82,6 +82,11 @@ class StudyTypeResponse(BaseModel):
     created_at: datetime
     default_report_template_id: Optional[str] = None
     default_template: Optional[TemplateRef] = None
+    # Céluma 1.5 (#94): removed from the catalog (retained tombstone). A removed type is always inactive.
+    is_removed: bool = False
+    removed_at: Optional[datetime] = None
+    # Céluma 1.5 (#94): the removal freed the code for another type (no historical order/sample).
+    code_released: bool = False
 
 
 class StudyTypeDetailResponse(BaseModel):
@@ -95,6 +100,36 @@ class StudyTypeDetailResponse(BaseModel):
     created_at: datetime
     default_report_template_id: Optional[str] = None
     default_template: Optional[TemplateRef] = None
+    # Céluma 1.5 (#94): removed from the catalog (retained tombstone). A removed type is always inactive.
+    is_removed: bool = False
+    removed_at: Optional[datetime] = None
+    # Céluma 1.5 (#94): the removal freed the code for another type (no historical order/sample).
+    code_released: bool = False
+
+
+class CatalogTypeRemoveRequest(BaseModel):
+    """Body of `POST /study-types/{id}/remove` and `POST /sample-types/{id}/remove` (#94). The reason is
+    optional free text for the audit trail (≤ 500 characters, checked by the route)."""
+    reason: Optional[str] = None
+
+
+class StudyTypeRemovalResponse(StudyTypeResponse):
+    """The removed type plus what still references it (counted, never changed). `already_removed` is true
+    when the request repeated an earlier removal (nothing was written)."""
+    already_removed: bool = False
+    references: Dict[str, int] = {}
+
+
+class CatalogTypeRemovalImpact(BaseModel):
+    """`GET /{study,sample}-types/{id}/removal-impact` (#94): what a removal would do NOW. Informative only:
+    the removal re-evaluates it under its locks."""
+    id: str
+    code: str
+    already_removed: bool
+    references: Dict[str, int]
+    #: true = no historical order/sample (withdrawn included): the removal frees the code for another type.
+    code_will_be_released: bool
+    code_released: bool = False
 
 
 class StudyTypesListResponse(BaseModel):
@@ -107,6 +142,7 @@ class StudyTypeRef(BaseModel):
     id: str
     code: str
     name: str
+    is_removed: bool = False
 
 
 class StudyTypeReportDefaultsResponse(BaseModel):

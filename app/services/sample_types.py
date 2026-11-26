@@ -26,13 +26,14 @@ def sample_type_ref(sample_type: Optional[SampleType]) -> Optional[SampleTypeRef
     if sample_type is None:
         return None
     return SampleTypeRef(
-        id=str(sample_type.id), code=sample_type.code, name=sample_type.name, is_active=sample_type.is_active
+        id=str(sample_type.id), code=sample_type.code, name=sample_type.name, is_active=sample_type.is_active,
+        is_removed=sample_type.removed_at is not None,
     )
 
 
 def sample_type_refs(session: Session, sample_type_ids: Iterable) -> dict:
     """`{sample_type_id: SampleTypeRef}` for the ids, in one query. Includes
-    deactivated types: a referenced type stays readable."""
+    deactivated and removed (#94) types: a referenced type stays readable."""
     ids = {i for i in sample_type_ids if i is not None}
     if not ids:
         return {}
@@ -53,20 +54,34 @@ def _parse_uuid(value) -> Optional[UUID]:
         return None
 
 
+class SampleTypeRemovedForNewSample(HTTPException):
+    """A new sample named a type removed from the catalog (#94). 400 like an inactive type (the same
+    registration outcome family), but distinguishable so registration can report `sample_type_removed`."""
+
+    def __init__(self, code: str):
+        super().__init__(400, f"Sample type '{code}' was removed from the catalog and cannot be used for new samples")
+
+
 def require_active_sample_types(session: Session, tenant_id, sample_type_ids: Sequence) -> dict:
     """Resolve the types a NEW sample may use, or raise.
 
     Every creation route calls this before it writes anything. A type of
     another laboratory is indistinguishable from a missing one (404, so
     catalog ids of other tenants cannot be probed); a deactivated type is a
-    400 naming the type. Returns `{id_str: SampleType}`.
+    400 naming the type; a removed type (#94) is a 400 saying it was removed
+    (checked first: a removed type is always inactive too). Returns
+    `{id_str: SampleType}`.
     """
     resolved: dict = {}
     for raw in dict.fromkeys(str(i) for i in sample_type_ids):
         uid = _parse_uuid(raw)
-        row = session.get(SampleType, uid) if uid else None
+        # FOR SHARE (#94): a concurrent removal waits until this registration commits, and a registration
+        # that starts after a removal committed sees it.
+        row = session.get(SampleType, uid, with_for_update={"read": True}) if uid else None
         if row is None or str(row.tenant_id) != str(tenant_id):
             raise HTTPException(404, "Sample type not found")
+        if row.removed_at is not None:
+            raise SampleTypeRemovedForNewSample(row.code)
         if not row.is_active:
             raise HTTPException(400, f"Sample type '{row.code}' is inactive and cannot be used for new samples")
         resolved[raw] = row
@@ -93,6 +108,9 @@ def sample_type_response(session: Session, sample_type: SampleType) -> SampleTyp
             str(sample_type.default_report_template_id) if sample_type.default_report_template_id else None
         ),
         default_template=template_ref_for(session, sample_type),
+        is_removed=sample_type.removed_at is not None,
+        removed_at=sample_type.removed_at,
+        code_released=sample_type.code_released_at is not None,
     )
 
 
@@ -128,7 +146,9 @@ def record_audit(
 
 
 def snapshot(sample_type: SampleType) -> dict:
-    return {
+    """Audit snapshot. The removal fields are added only once set, so pre-#94 audit rows and snapshots of
+    types that were never removed keep their exact shape."""
+    data = {
         "code": sample_type.code,
         "name": sample_type.name,
         "description": sample_type.description,
@@ -136,4 +156,17 @@ def snapshot(sample_type: SampleType) -> dict:
         "default_report_template_id": (
             str(sample_type.default_report_template_id) if sample_type.default_report_template_id else None
         ),
+    }
+    return {**data, **removal_snapshot(sample_type)}
+
+
+def removal_snapshot(row) -> dict:
+    """The removal fields of a study or sample type, for audit rows; empty while it was never removed."""
+    if getattr(row, "removed_at", None) is None:
+        return {}
+    return {
+        "removed_at": row.removed_at.isoformat(),
+        "removed_by": str(row.removed_by) if row.removed_by else None,
+        "removal_reason": row.removal_reason,
+        "code_released": getattr(row, "code_released_at", None) is not None,
     }

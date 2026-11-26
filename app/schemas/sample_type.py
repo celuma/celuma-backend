@@ -19,12 +19,14 @@ class SampleTypeRef(BaseModel):
     """A sample's type as list/detail/report-data consumers receive it.
 
     `is_active` is false for a deactivated type that samples still reference:
-    it stays readable, it just cannot be chosen for new samples.
+    it stays readable, it just cannot be chosen for new samples. `is_removed` (Céluma 1.5, #94) is true
+    for a type removed from the catalog: the reference still resolves, and the type is shown as removed.
     """
     id: str
     code: str
     name: str
     is_active: bool
+    is_removed: bool = False
 
 
 def _clean_code(v: str) -> str:
@@ -107,6 +109,17 @@ class SampleTypeResponse(BaseModel):
     created_at: datetime
     default_report_template_id: Optional[str] = None
     default_template: Optional[TemplateRef] = None
+    # Céluma 1.5 (#94): removed from the catalog (retained tombstone). A removed type is always inactive.
+    is_removed: bool = False
+    removed_at: Optional[datetime] = None
+    # Céluma 1.5 (#94): the removal freed the code for another type (no historical order/sample).
+    code_released: bool = False
+
+
+class SampleTypeRemovalResponse(SampleTypeResponse):
+    """The removed type plus what still references it (counted, never changed); see `StudyTypeRemovalResponse`."""
+    already_removed: bool = False
+    references: Dict[str, int] = {}
 
 
 class SampleTypesListResponse(BaseModel):

@@ -7,6 +7,7 @@ Contract: the migration docstring and `celuma-engineering/specs/laboratory/type-
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -107,3 +108,130 @@ def test_downgrade_drops_only_the_table(mdb):
         assert _current_revision(mdb) == HOTFIX_1_4_1_REVISION
         assert not exists(conn)
         assert conn.execute(text("SELECT to_regclass('public.numbering_config') IS NOT NULL")).scalar_one()
+
+
+# ---------------------------------------------------------------------------- §2: catalog type removal (#94)
+
+REMOVAL_COLUMNS = {"removed_at", "removed_by", "removal_reason", "code_released_at"}
+
+
+def removal_columns(conn, table: str) -> set:
+    return {r[0] for r in conn.execute(text(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = :t "
+        "AND column_name IN ('removed_at', 'removed_by', 'removal_reason', 'code_released_at')"), {"t": table})}
+
+
+def seed_catalogs(conn) -> dict:
+    tenant = insert(conn, "tenant")["id"]
+    branch = insert(conn, "branch", tenant_id=tenant)["id"]
+    study = insert(conn, "study_type", tenant_id=tenant, code="CU", name="Citología", is_active=True)["id"]
+    inactive = insert(conn, "study_type", tenant_id=tenant, code="OLD", name="Anterior", is_active=False)["id"]
+    sample_type = insert(conn, "sample_type", tenant_id=tenant, code="BX", name="Biopsia", is_active=True)["id"]
+    order = insert(conn, '"order"', tenant_id=tenant, branch_id=branch, order_code="CU-1", study_type_id=study)["id"]
+    insert(conn, "sample", tenant_id=tenant, branch_id=branch, order_id=order, sample_code="BX-1",
+           sample_type_id=sample_type)
+    return {"tenant": tenant, "study": study, "inactive": inactive, "sample_type": sample_type}
+
+
+def test_upgrade_adds_an_empty_removal_marker_to_both_catalogs(mdb):
+    _alembic(HOTFIX_1_4_1_REVISION, database=DB)
+    with mdb.begin() as conn:
+        seeded = seed_catalogs(conn)
+        assert removal_columns(conn, "study_type") == set() and removal_columns(conn, "sample_type") == set()
+    _alembic(RELEASE_1_5_REVISION, database=DB)
+    with mdb.connect() as conn:
+        for table in ("study_type", "sample_type"):
+            assert removal_columns(conn, table) == REMOVAL_COLUMNS
+            assert conn.execute(text(f"SELECT count(*) FROM {table} WHERE removed_at IS NOT NULL OR removed_by IS NOT "
+                                     "NULL OR removal_reason IS NOT NULL OR code_released_at IS NOT NULL")).scalar_one() == 0
+        # sample-type codes: unique among code-reserving rows (was the full uq_sample_type_tenant_code)
+        uniques = conn.execute(text("SELECT conname FROM pg_constraint WHERE conrelid = 'public.sample_type'::regclass "
+                                    "AND contype = 'u'")).scalars().all()
+        assert "uq_sample_type_tenant_code" not in uniques
+        index = conn.execute(text("SELECT indexdef FROM pg_indexes WHERE indexname = 'uq_sample_type_tenant_code_reserved'"
+                                  )).scalar_one()
+        assert "UNIQUE" in index and "code_released_at IS NULL" in index
+        # nothing is removed or reactivated by the upgrade
+        actives = dict(conn.execute(text("SELECT code, is_active FROM study_type")).all())
+        assert actives == {"CU": True, "OLD": False}
+        assert conn.execute(text("SELECT sample_type_id FROM sample")).scalar_one() == seeded["sample_type"]
+
+
+@pytest.mark.parametrize("table", ["study_type", "sample_type"])
+def test_a_removed_type_can_never_be_active(mdb, table):
+    _alembic(RELEASE_1_5_REVISION, database=DB)
+    with mdb.begin() as conn:
+        tenant = insert(conn, "tenant")["id"]
+    with pytest.raises(IntegrityError, match=f"ck_{table}_removed_inactive"), mdb.begin() as conn:
+        insert(conn, table, tenant_id=tenant, code="X", name="X", is_active=True, removed_at=datetime(2026, 11, 25))
+    with mdb.begin() as conn:
+        row = insert(conn, table, tenant_id=tenant, code="Y", name="Y", is_active=False,
+                     removed_at=datetime(2026, 11, 25), removal_reason="duplicado")["id"]
+    with pytest.raises(IntegrityError, match=f"ck_{table}_removed_inactive"), mdb.begin() as conn:
+        conn.execute(text(f"UPDATE {table} SET is_active = true WHERE id = :i"), {"i": row})
+
+
+def test_downgrade_drops_the_marker_and_leaves_removed_types_inactive(mdb):
+    _alembic(RELEASE_1_5_REVISION, database=DB)
+    with mdb.begin() as conn:
+        seeded = seed_catalogs(conn)
+        conn.execute(text("UPDATE sample_type SET is_active = false, removed_at = now(), removal_reason = 'x' "
+                          "WHERE id = :i"), {"i": seeded["sample_type"]})
+    _alembic(HOTFIX_1_4_1_REVISION, command="downgrade", database=DB)
+    with mdb.connect() as conn:
+        assert _current_revision(mdb) == HOTFIX_1_4_1_REVISION
+        assert removal_columns(conn, "study_type") == set() and removal_columns(conn, "sample_type") == set()
+        # the removed type survives as an ordinary INACTIVE type, with its id, code and references
+        row = conn.execute(text("SELECT code, is_active FROM sample_type WHERE id = :i"),
+                           {"i": seeded["sample_type"]}).one()
+        assert tuple(row) == ("BX", False)
+        assert conn.execute(text("SELECT sample_type_id FROM sample")).scalar_one() == seeded["sample_type"]
+    # and the cycle is repeatable on the same database
+    _alembic(RELEASE_1_5_REVISION, database=DB)
+    with mdb.connect() as conn:
+        assert removal_columns(conn, "sample_type") == REMOVAL_COLUMNS
+
+
+def test_one_reserving_row_per_code_and_only_removed_types_release(mdb):
+    _alembic(RELEASE_1_5_REVISION, database=DB)
+    with mdb.begin() as conn:
+        tenant = insert(conn, "tenant")["id"]
+        insert(conn, "sample_type", tenant_id=tenant, code="BX", name="A", is_active=False,
+               removed_at=datetime(2026, 11, 25), code_released_at=datetime(2026, 11, 25))
+        insert(conn, "sample_type", tenant_id=tenant, code="BX", name="B", is_active=True)  # reuse is allowed
+    with pytest.raises(IntegrityError, match="uq_sample_type_tenant_code_reserved"), mdb.begin() as conn:
+        insert(conn, "sample_type", tenant_id=tenant, code="BX", name="C", is_active=True)
+    with pytest.raises(IntegrityError, match="ck_study_type_code_release_removed"), mdb.begin() as conn:
+        insert(conn, "study_type", tenant_id=tenant, code="CU", name="X", is_active=False,
+               code_released_at=datetime(2026, 11, 25))
+
+
+@pytest.mark.parametrize("table", ["study_type", "sample_type"])
+def test_downgrade_refuses_when_a_released_code_was_reused_and_changes_nothing(mdb, table):
+    _alembic(RELEASE_1_5_REVISION, database=DB)
+    with mdb.begin() as conn:
+        tenant = insert(conn, "tenant")["id"]
+        old = insert(conn, table, tenant_id=tenant, code="BX", name="Anterior", is_active=False,
+                     removed_at=datetime(2026, 11, 25), code_released_at=datetime(2026, 11, 25))["id"]
+        insert(conn, table, tenant_id=tenant, code="BX", name="Nuevo", is_active=True)
+    with pytest.raises(Exception):
+        _alembic(HOTFIX_1_4_1_REVISION, command="downgrade", database=DB)
+    with mdb.connect() as conn:
+        assert _current_revision(mdb) == RELEASE_1_5_REVISION
+        assert conn.execute(text(f"SELECT code, code_released_at IS NOT NULL FROM {table} WHERE id = :i"),
+                            {"i": old}).one() == ("BX", True)
+        assert removal_columns(conn, table) == REMOVAL_COLUMNS
+
+
+def test_downgrade_without_reuse_restores_the_full_unique_constraint(mdb):
+    _alembic(RELEASE_1_5_REVISION, database=DB)
+    with mdb.begin() as conn:
+        tenant = insert(conn, "tenant")["id"]
+        insert(conn, "sample_type", tenant_id=tenant, code="BX", name="Liberado", is_active=False,
+               removed_at=datetime(2026, 11, 25), code_released_at=datetime(2026, 11, 25))
+    _alembic(HOTFIX_1_4_1_REVISION, command="downgrade", database=DB)
+    with mdb.connect() as conn:
+        uniques = conn.execute(text("SELECT conname FROM pg_constraint WHERE conrelid = 'public.sample_type'::regclass "
+                                    "AND contype = 'u'")).scalars().all()
+        assert "uq_sample_type_tenant_code" in uniques
+        assert conn.execute(text("SELECT code, is_active FROM sample_type")).one() == ("BX", False)

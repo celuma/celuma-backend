@@ -31,6 +31,7 @@ from sqlmodel import Session, select
 from app.models.report import ReportTemplate
 from app.models.sample_type import SampleType
 from app.models.study_type import StudyType
+from app.services import catalog_removal
 from app.schemas.sample_type import (
     MAX_DESCRIPTION_LENGTH,
     SkippedItem,
@@ -73,11 +74,14 @@ def build_export(session: Session, tenant_id, kind: str, *, include_inactive: bo
     """The full catalog of `kind` for the tenant, whatever its size (no paging).
 
     Deterministic order (code, then id). Inactive entries are included unless
-    excluded, flagged by `is_active`; an empty catalog is a valid document
-    with `items: []`. The tenant's id is NOT part of the document.
+    excluded, flagged by `is_active`; removed types (#94) are never included;
+    an empty catalog is a valid document with `items: []`. The tenant's id is
+    NOT part of the document.
     """
     model = StudyType if kind == "study_types" else SampleType
-    stmt = select(model).where(model.tenant_id == tenant_id)
+    # Céluma 1.5 (#94): a removed type is not part of the catalog and is never exported, so a file can never
+    # carry it back in (an import or copy would otherwise recreate it under a new id).
+    stmt = select(model).where(model.tenant_id == tenant_id, model.removed_at.is_(None))
     if not include_inactive:
         stmt = stmt.where(model.is_active.is_(True))
     rows = session.exec(stmt.order_by(model.code, model.id)).all()
@@ -291,7 +295,9 @@ def _build_plan(session: Session, tenant_id, source_kind: str, origin: str, raw_
     if codes:
         existing = {
             r.code: r for r in session.exec(
-                select(SampleType).where(SampleType.tenant_id == tenant_id, SampleType.code.in_(set(codes)))
+                # #94: a code released by an unused removed type is free; a reserved one (history) collides.
+                select(SampleType).where(SampleType.tenant_id == tenant_id, SampleType.code.in_(set(codes)),
+                                         SampleType.code_released_at.is_(None))
             ).all()
         }
     seen: set = set()
@@ -309,7 +315,8 @@ def _build_plan(session: Session, tenant_id, source_kind: str, origin: str, raw_
             item.existing_sample_type_id = str(row.id)
             item.issues.append(_issue(
                 "code_exists", f"A sample type with code '{item.code}' already exists"
-                + ("" if row.is_active else " (inactive)"), "code"))
+                + (" (removed; the code stays reserved by its samples)" if row.removed_at is not None
+                   else "" if row.is_active else " (inactive)"), "code"))
         else:
             item.status = "ready"
         seen.add(item.code)
@@ -352,6 +359,10 @@ def plan_copy(session: Session, tenant_id, study_type_ids: Sequence[str]) -> _Pl
     }
     if len(rows) != len(ids):  # unknown, or another laboratory's: indistinguishable
         raise _refuse(404, "study_type_not_found", "One or more study types were not found")
+    removed = sorted(r.code for r in rows.values() if r.removed_at is not None)
+    if removed:  # Céluma 1.5 (#94): a removed study type is no longer part of the catalog to copy from.
+        raise _refuse(409, "study_type_removed",
+                      "These study types were removed from the catalog and cannot be copied: " + ", ".join(removed))
     raw_items = []
     for uid in ids:
         r = rows[uid]
@@ -421,6 +432,8 @@ def confirm(
     changed. `selected=None` (copy) means every item of the plan.
     """
     _lock_tenant_transfers(session, tenant_id)
+    # #94: also serialised with manual creates/renames and removals (code releases) of the sample-type catalog.
+    catalog_removal.lock_catalog_codes(session, "sample_type", tenant_id)
     plan = build()
     if plan.digest() != plan_digest:
         session.rollback()
