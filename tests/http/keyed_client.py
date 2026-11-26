@@ -10,7 +10,9 @@ import uuid
 
 from fastapi.testclient import TestClient
 
-CREATION_PATHS = ("/laboratory/orders/", "/laboratory/orders/unified", "/laboratory/samples/")
+CREATION_PATHS = ("/laboratory/orders/", "/laboratory/orders/unified", "/laboratory/samples/",
+                  # Céluma 1.5 (#88): a conversation message requires a key too.
+                  "/comments")
 
 
 class KeyedClient(TestClient):

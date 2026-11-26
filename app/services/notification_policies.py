@@ -187,6 +187,16 @@ NOTIFICATION_DELIVERY_POLICIES: Dict[NotificationType, NotificationDeliveryPolic
         email_supported=True,
         email_default_enabled=True,
     ),
+    # Céluma 1.5 (#98): a message in an order conversation. Email is supported and on by
+    # default like the other workflow events, and each user can turn it off in
+    # preferences. The email is content-free (no text, no order number, no image): it
+    # only says that something is waiting in Céluma. Recipients are the order's
+    # participants, not the tenant (see `resolve_order_comment_recipients`).
+    NotificationType.ORDER_COMMENT_ADDED: NotificationDeliveryPolicy(
+        in_app_required=True,
+        email_supported=True,
+        email_default_enabled=True,
+    ),
 }
 
 

@@ -116,6 +116,33 @@ class OrderComment(BaseModel, TimestampMixin, TenantMixin, BranchMixin, table=Tr
     edited_at: Optional[datetime] = Field(default=None)
     deleted_at: Optional[datetime] = Field(default=None)
 
+class OrderCommentAttachment(BaseModel, table=True):
+    """An image attached to one order conversation message (Céluma 1.5, #96; ADR 0026).
+
+    Written in the same transaction as its `OrderComment`, so a message and its
+    images commit together or not at all. Both renditions are re-encoded JPEGs
+    (EXIF, GPS and the original file are not retained) kept in private storage
+    under `conversations/{tenant}/{branch}/{order}/{comment}/{id}/`; they are
+    read only through the authorized attachment route, never by a public or
+    presigned URL. No filename is stored: a camera or user filename can carry a
+    patient name, and the UI labels images by position.
+    """
+    __tablename__ = "order_comment_attachment"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    tenant_id: UUID = Field(foreign_key="tenant.id")
+    branch_id: UUID = Field(foreign_key="branch.id")
+    order_id: UUID = Field(foreign_key="order.id")
+    comment_id: UUID = Field(foreign_key="order_comment.id")
+    position: int
+    storage_id: UUID = Field(foreign_key="storage_object.id")
+    thumbnail_storage_id: UUID = Field(foreign_key="storage_object.id")
+    width: int
+    height: int
+    created_by: UUID = Field(foreign_key="app_user.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class OrderCommentMention(BaseModel, table=True):
     """Mention relationship for order comments"""
     __tablename__ = "order_comment_mention"

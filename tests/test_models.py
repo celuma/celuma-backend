@@ -270,6 +270,8 @@ class TestNotificationModels:
             "STORAGE_LIMIT_REACHED",
             "USER_LIMIT_APPROACHING",
             "USER_LIMIT_REACHED",
+            # Céluma 1.5 (#98): a new message in an order's conversation.
+            "ORDER_COMMENT_ADDED",
         }
 
     def test_email_is_the_only_declared_channel(self):

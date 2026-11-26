@@ -314,6 +314,15 @@ _TEMPLATES_ES_MX: Dict[NotificationType, NotificationTemplate] = {
         body="{actor_name} te asignó a esta orden.",
         params=(_ORDER_NUMBER, _ACTOR_NAME),
     ),
+    # Céluma 1.5 (#98): the message text is user-authored free text and never part of
+    # a notification (content policy §4); the notice says where to look.
+    NotificationType.ORDER_COMMENT_ADDED: NotificationTemplate(
+        key="order_comment_added_v1",
+        notification_type=NotificationType.ORDER_COMMENT_ADDED,
+        title="Nuevo comentario — Orden {order_number}",
+        body="{actor_name} escribió en la conversación de esta orden.",
+        params=(_ORDER_NUMBER, _ACTOR_NAME),
+    ),
     NotificationType.SAMPLE_STATUS_CHANGED: NotificationTemplate(
         key="sample_status_changed_v2",
         notification_type=NotificationType.SAMPLE_STATUS_CHANGED,
@@ -403,6 +412,10 @@ _TEMPLATES_ES_MX: Dict[NotificationType, NotificationTemplate] = {
 #: directly.
 ASSIGNMENT_ADDED_SAMPLE_TEMPLATE_KEY = "assignment_added_sample_v1"
 ASSIGNMENT_ADDED_REVIEW_TEMPLATE_KEY = "assignment_added_review_v1"
+#: Céluma 1.5 (#98): the same `ORDER_COMMENT_ADDED` event addressed to a user the
+#: message mentions. A separate notification (its own occurrence marker), so a
+#: mentioned user gets this one instead of the generic notice, never both.
+ORDER_COMMENT_MENTION_TEMPLATE_KEY = "order_comment_mention_v1"
 
 _ASSIGNMENT_CONTEXT_TEMPLATES_ES_MX: Dict[str, NotificationTemplate] = {
     ASSIGNMENT_ADDED_SAMPLE_TEMPLATE_KEY: NotificationTemplate(
@@ -417,6 +430,13 @@ _ASSIGNMENT_CONTEXT_TEMPLATES_ES_MX: Dict[str, NotificationTemplate] = {
         notification_type=NotificationType.ASSIGNMENT_ADDED,
         title="Nueva revisión asignada — Orden {order_number}",
         body="{actor_name} te asignó la revisión del reporte de esta orden.",
+        params=(_ORDER_NUMBER, _ACTOR_NAME),
+    ),
+    ORDER_COMMENT_MENTION_TEMPLATE_KEY: NotificationTemplate(
+        key=ORDER_COMMENT_MENTION_TEMPLATE_KEY,
+        notification_type=NotificationType.ORDER_COMMENT_ADDED,
+        title="Te mencionaron — Orden {order_number}",
+        body="{actor_name} te mencionó en la conversación de esta orden.",
         params=(_ORDER_NUMBER, _ACTOR_NAME),
     ),
 }

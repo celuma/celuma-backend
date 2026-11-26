@@ -58,7 +58,7 @@ from uuid import UUID
 from sqlalchemy import func, or_
 from sqlmodel import Session, select
 
-from app.models.laboratory import SampleImage
+from app.models.laboratory import OrderCommentAttachment, SampleImage
 from app.models.report import Report, ReportVersion
 from app.models.storage import SampleImageRendition, StorageObject
 from app.models.tenant import Tenant
@@ -82,6 +82,8 @@ CATEGORY_REPORT_JSON = "report_json"
 CATEGORY_TENANT_LOGO = "tenant_logo"
 CATEGORY_LETTERHEAD_ASSET = "letterhead_asset"
 CATEGORY_SIGNATURE = "signature"
+#: Céluma 1.5 (#96): order-conversation images, full and thumbnail renditions.
+CATEGORY_CONVERSATION_IMAGE = "conversation_image"
 
 
 def tenant_logo_key_prefix(tenant_id: UUID) -> str:
@@ -137,6 +139,7 @@ class BillableStorageBreakdown:
     tenant_logo_bytes: int
     letterhead_asset_bytes: int
     signature_bytes: int
+    conversation_images_bytes: int = 0
 
     @property
     def total_bytes(self) -> int:
@@ -148,6 +151,7 @@ class BillableStorageBreakdown:
             + self.tenant_logo_bytes
             + self.letterhead_asset_bytes
             + self.signature_bytes
+            + self.conversation_images_bytes
         )
 
 
@@ -281,9 +285,28 @@ class StorageBillingService:
         )
 
     @staticmethod
+    def _conversation_image_rows(tenant_id: UUID):
+        """Céluma 1.5 (#96): both renditions of every retained order-
+        conversation attachment. There is no message deletion, so every
+        attachment row's objects are retained and billable until the
+        laboratory-content cleanup removes rows and objects together."""
+        return (
+            select(*StorageBillingService._row_columns())
+            .select_from(OrderCommentAttachment)
+            .join(
+                StorageObject,
+                or_(
+                    StorageObject.id == OrderCommentAttachment.storage_id,
+                    StorageObject.id == OrderCommentAttachment.thumbnail_storage_id,
+                ),
+            )
+            .where(OrderCommentAttachment.tenant_id == tenant_id)
+        )
+
+    @staticmethod
     def _categories(tenant_id: UUID) -> List[tuple]:
-        """(category label, row selection) for all seven billable
-        categories — the single enumeration both `compute_breakdown` and
+        """(category label, row selection) for all eight billable
+        categories (the conversation images joined in Céluma 1.5, #96) — the single enumeration both `compute_breakdown` and
         `get_billable_storage_objects` walk."""
         return [
             (CATEGORY_SAMPLE_IMAGE, StorageBillingService._sample_image_rows(tenant_id)),
@@ -300,6 +323,10 @@ class StorageBillingService:
                 StorageBillingService._letterhead_asset_rows(tenant_id),
             ),
             (CATEGORY_SIGNATURE, StorageBillingService._signature_rows(tenant_id)),
+            (
+                CATEGORY_CONVERSATION_IMAGE,
+                StorageBillingService._conversation_image_rows(tenant_id),
+            ),
         ]
 
     # -- aggregation --------------------------------------------------------
@@ -375,6 +402,9 @@ class StorageBillingService:
             tenant_logo_bytes=StorageBillingService._tenant_logo_bytes(session, tenant_id),
             letterhead_asset_bytes=StorageBillingService._letterhead_asset_bytes(session, tenant_id),
             signature_bytes=StorageBillingService._signature_bytes(session, tenant_id),
+            conversation_images_bytes=StorageBillingService._sum_rows(
+                session, StorageBillingService._conversation_image_rows(tenant_id)
+            ),
         )
 
     @staticmethod

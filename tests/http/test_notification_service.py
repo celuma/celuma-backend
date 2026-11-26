@@ -87,6 +87,11 @@ VALID_PARAMS = {
     NotificationType.STORAGE_LIMIT_REACHED: {},
     NotificationType.USER_LIMIT_APPROACHING: {"usage_percent": 80},
     NotificationType.USER_LIMIT_REACHED: {},
+    # Céluma 1.5 (#98): the conversation notice names the order and the author only.
+    NotificationType.ORDER_COMMENT_ADDED: {
+        "order_number": "ORD-2026-00152",
+        "actor_name": "Dra. Martínez",
+    },
 }
 
 #: The types whose template declares at least one required parameter. Two of

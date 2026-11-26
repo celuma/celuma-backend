@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, File, Query, Request, Response
 from typing import Dict, Literal, Optional, List, Set
 from uuid import UUID
 from sqlmodel import select, Session, and_, func
@@ -64,7 +64,6 @@ from app.schemas.laboratory import (
     OrderNotesUpdate,
     OrderReportTemplateSelection,
     ReportTemplateRef,
-    CommentCreate,
     CommentResponse,
     CommentsListResponse,
     PageInfo,
@@ -572,6 +571,9 @@ def update_order_notes(
 
 
 # --- Order Comments Endpoints ---
+#
+# Céluma 1.5 (#88, #96, #98). Contract: celuma-engineering/specs/laboratory/order-conversation.md.
+# The logic lives in app/services/order_conversation.py.
 
 @router.get("/orders/{order_id}/comments", response_model=CommentsListResponse)
 def get_order_comments(
@@ -583,227 +585,170 @@ def get_order_comments(
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Get paginated comments for an order (requires lab:read)."""
+    """A page of an order's conversation (requires lab:read), oldest first within the page.
+
+    Without a cursor: the LATEST `limit` messages. `before`: the `limit` messages just
+    older than the cursor (`page_info.next_before` = cursor of the oldest item returned,
+    `has_more` = older ones exist). `after`: the messages newer than the cursor, oldest
+    first (`has_more` = still newer ones exist).
+
+    #88: the first page used to be the OLDEST `limit` messages, so from the 21st message
+    on, the newest ones (including one just sent) never appeared.
+    """
     _require(user.id, "lab:read", session)
     from app.services.cursor_pagination import decode_cursor, encode_cursor
-    from app.models.laboratory import OrderComment, OrderCommentMention
-    
-    # Validate order access
-    order = session.get(Order, order_id)
-    if not order or str(order.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Order not found")
-    
-    # Validate limit
+    from app.models.laboratory import OrderComment
+    from app.services.order_conversation import load_order, serialize_comments
+
+    order = load_order(session, order_id, ctx.tenant_id)
     if limit < 1 or limit > 100:
         raise HTTPException(400, "Limit must be between 1 and 100")
-    
-    # Build base query
+    if before and after:
+        raise HTTPException(400, "Use either before or after, not both")
+
     query = select(OrderComment).where(
-        OrderComment.tenant_id == ctx.tenant_id,
-        OrderComment.order_id == order_id,
-        OrderComment.deleted_at.is_(None)
+        OrderComment.tenant_id == order.tenant_id,
+        OrderComment.order_id == order.id,
+        OrderComment.deleted_at.is_(None),
     )
-    
-    # Apply cursor filters
-    if before:
-        try:
-            cursor_time, cursor_id = decode_cursor(before)
-            query = query.where(
-                (OrderComment.created_at < cursor_time) |
-                ((OrderComment.created_at == cursor_time) & (OrderComment.id < cursor_id))
-            )
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-    
-    if after:
-        try:
+    try:
+        if after:
             cursor_time, cursor_id = decode_cursor(after)
             query = query.where(
-                (OrderComment.created_at > cursor_time) |
-                ((OrderComment.created_at == cursor_time) & (OrderComment.id > cursor_id))
-            )
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-    
-    # Order and limit (fetch limit+1 to check has_more)
-    # ASC = oldest first (top) to newest (bottom) like a normal chat
-    query = query.order_by(OrderComment.created_at.asc(), OrderComment.id.asc())
-    comments = session.exec(query.limit(limit + 1)).all()
-    
-    # Check if there are more results
-    has_more = len(comments) > limit
-    if has_more:
-        comments = comments[:limit]
-    
-    # Resolve mentions for all comments
-    comment_ids = [c.id for c in comments]
-    mentions_query = select(OrderCommentMention).where(
-        OrderCommentMention.comment_id.in_(comment_ids)
-    )
-    all_mentions = session.exec(mentions_query).all()
-    
-    # Group mentions by comment
-    mentions_by_comment = {}
-    user_ids = set()
-    for mention in all_mentions:
-        if mention.comment_id not in mentions_by_comment:
-            mentions_by_comment[mention.comment_id] = []
-        mentions_by_comment[mention.comment_id].append(str(mention.user_id))
-        user_ids.add(mention.user_id)
-    
-    # Also collect comment creators for user info
-    creator_ids = set(c.created_by for c in comments)
-    all_user_ids = user_ids | creator_ids
-    
-    # Fetch user info for mentions and creators
-    users_map = {}
-    creator_info = {}
-    if all_user_ids:
-        users = session.exec(select(AppUser).where(AppUser.id.in_(all_user_ids))).all()
-        for u in users:
-            user_id_str = str(u.id)
-            users_map[user_id_str] = MentionedUser(
-                user_id=user_id_str,
-                username=u.username,
-                name=u.full_name or u.email,
-                avatar=u.avatar_url
-            )
-            creator_info[user_id_str] = {
-                "name": u.full_name or u.email,
-                "avatar": u.avatar_url
-            }
-    
-    # Build response items
-    items = []
-    for comment in comments:
-        mention_ids = mentions_by_comment.get(comment.id, [])
-        mentioned_users = [users_map[uid] for uid in mention_ids if uid in users_map]
-        
-        creator_id_str = str(comment.created_by)
-        creator_data = creator_info.get(creator_id_str, {})
-        
-        items.append(CommentResponse(
-            id=str(comment.id),
-            tenant_id=str(comment.tenant_id),
-            branch_id=str(comment.branch_id),
-            order_id=str(comment.order_id),
-            created_at=comment.created_at,
-            created_by=creator_id_str,
-            created_by_name=creator_data.get("name"),
-            created_by_avatar=creator_data.get("avatar"),
-            text=comment.text,
-            mentions=mention_ids,
-            mentioned_users=mentioned_users,
-            metadata=comment.comment_metadata,
-            edited_at=comment.edited_at,
-            deleted_at=comment.deleted_at,
-        ))
-    
-    # Build page info
+                (OrderComment.created_at > cursor_time)
+                | ((OrderComment.created_at == cursor_time) & (OrderComment.id > cursor_id))
+            ).order_by(OrderComment.created_at.asc(), OrderComment.id.asc())
+        else:
+            if before:
+                cursor_time, cursor_id = decode_cursor(before)
+                query = query.where(
+                    (OrderComment.created_at < cursor_time)
+                    | ((OrderComment.created_at == cursor_time) & (OrderComment.id < cursor_id))
+                )
+            query = query.order_by(OrderComment.created_at.desc(), OrderComment.id.desc())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    rows = list(session.exec(query.limit(limit + 1)).all())
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    if not after:
+        rows.reverse()  # newest-first page read, oldest-first presentation
+
     page_info = PageInfo(has_more=has_more)
-    if items:
-        last_item = comments[-1]
-        page_info.next_before = encode_cursor(last_item.created_at, str(last_item.id))
-        if before:  # If scrolling up, provide after cursor to go back
-            first_item = comments[0]
-            page_info.next_after = encode_cursor(first_item.created_at, str(first_item.id))
-    
-    return CommentsListResponse(items=items, page_info=page_info)
+    if rows:
+        page_info.next_before = encode_cursor(rows[0].created_at, str(rows[0].id))
+        page_info.next_after = encode_cursor(rows[-1].created_at, str(rows[-1].id))
+    return CommentsListResponse(items=serialize_comments(session, rows), page_info=page_info)
 
 
 @router.post("/orders/{order_id}/comments", response_model=CommentResponse)
-def create_order_comment(
+async def create_order_comment(
     order_id: str,
-    comment_data: CommentCreate,
+    request: Request,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     session: Session = Depends(get_session),
     ctx: AuthContext = Depends(get_auth_ctx),
     user: AppUser = Depends(current_user),
 ):
-    """Create a new comment on an order (requires lab:manage_comments)."""
-    _require(user.id, "lab:manage_comments", session)
-    from app.models.laboratory import OrderComment, OrderCommentMention
-    
-    # Validate order access
-    order = session.get(Order, order_id)
-    if not order or str(order.tenant_id) != ctx.tenant_id:
-        raise HTTPException(404, "Order not found")
-    
-    # Verify user has branch access
-    user_branch_ids = [str(b.branch_id) for b in user.branches]
-    if str(order.branch_id) not in user_branch_ids:
-        raise HTTPException(403, "No access to this order's branch")
-    
-    # Create comment
-    comment = OrderComment(
-        tenant_id=order.tenant_id,
-        branch_id=order.branch_id,
-        order_id=order.id,
-        created_by=user.id,
-        text=comment_data.text,
-        comment_metadata=comment_data.metadata or {},
+    """Add a message to an order conversation (requires lab:manage_comments).
+
+    Body: JSON `{text, mentions, metadata}` (text only), or `multipart/form-data` with
+    `text`, repeated `mentions`, and up to 4 `files` (JPG, PNG, WebP or HEIC, 10 MB
+    each). `Idempotency-Key` is required: a retry with the same key and payload
+    returns the stored message (`Idempotent-Replayed: true`) and stores nothing.
+    """
+    from starlette.concurrency import run_in_threadpool
+    from app.services import order_conversation
+
+    def _authorize() -> Order:
+        _require(user.id, "lab:manage_comments", session)
+        order = order_conversation.load_order(session, order_id, ctx.tenant_id)
+        order_conversation.require_branch_access(session, user, order)
+        return order
+
+    order = await run_in_threadpool(_authorize)
+
+    content_type = (request.headers.get("content-type") or "").lower()
+    files: List[bytes] = []
+    metadata = None
+    if content_type.startswith("multipart/form-data"):
+        try:
+            form = await request.form(
+                max_files=order_conversation.MAX_ATTACHMENTS + 1,
+                max_part_size=order_conversation.MAX_ATTACHMENT_BYTES + 1024 * 1024,
+            )
+        except Exception:
+            raise HTTPException(422, "No se pudo leer el mensaje enviado.")
+        raw_text = form.get("text")
+        raw_mentions = [str(value) for value in form.getlist("mentions")]
+        uploads = [value for value in form.getlist("files") if hasattr(value, "read")]
+        if len(uploads) > order_conversation.MAX_ATTACHMENTS:
+            raise HTTPException(
+                422, f"Puedes adjuntar como máximo {order_conversation.MAX_ATTACHMENTS} imágenes por mensaje."
+            )
+        for upload in uploads:
+            data = await upload.read(order_conversation.MAX_ATTACHMENT_BYTES + 1)
+            files.append(data)
+        raw_text = raw_text if isinstance(raw_text, str) else None
+    else:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            raise HTTPException(422, "Escribe un mensaje o adjunta al menos una imagen.")
+        raw_text = payload.get("text") if isinstance(payload.get("text"), str) else None
+        mentions_value = payload.get("mentions") or []
+        raw_mentions = [str(value) for value in mentions_value] if isinstance(mentions_value, list) else []
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None
+
+    response, replayed = await run_in_threadpool(
+        order_conversation.create_comment,
+        session,
+        order=order,
+        actor=user,
+        raw_text=raw_text,
+        raw_mentions=raw_mentions,
+        files=files,
+        metadata=metadata,
+        idempotency_key=idempotency_key,
     )
-    session.add(comment)
-    session.flush()
-    
-    # Create mentions
-    mentioned_users = []
-    if comment_data.mentions:
-        # Validate mentioned users exist and belong to tenant
-        mentioned_user_objs = session.exec(
-            select(AppUser).where(
-                AppUser.id.in_(comment_data.mentions),
-                AppUser.tenant_id == ctx.tenant_id,
-                AppUser.is_active == True
-            )
-        ).all()
-        
-        for mentioned_user in mentioned_user_objs:
-            mention = OrderCommentMention(
-                comment_id=comment.id,
-                user_id=mentioned_user.id
-            )
-            session.add(mention)
-            
-            mentioned_users.append(MentionedUser(
-                user_id=str(mentioned_user.id),
-                username=mentioned_user.username,
-                name=mentioned_user.full_name or mentioned_user.email,
-                avatar=mentioned_user.avatar_url
-            ))
-    
-    # Create timeline event
-    event = OrderEvent(
-        tenant_id=order.tenant_id,
-        branch_id=order.branch_id,
-        order_id=order.id,
-        event_type=EventType.COMMENT_ADDED,
-        description="",
-        event_metadata={
-            "comment_id": str(comment.id),
-            "comment_preview": comment.text[:50] + "..." if len(comment.text) > 50 else comment.text,
-            "order_id": str(order.id),
-            "order_code": order.order_code,
-            "mentions_count": len(mentioned_users),
+    if replayed:
+        return idempotency.replayed(response)
+    return response
+
+
+@router.get("/orders/{order_id}/comments/{comment_id}/attachments/{attachment_id}")
+def get_order_comment_attachment(
+    order_id: str,
+    comment_id: str,
+    attachment_id: str,
+    variant: str = "thumbnail",
+    session: Session = Depends(get_session),
+    ctx: AuthContext = Depends(get_auth_ctx),
+    user: AppUser = Depends(current_user),
+):
+    """The bytes of one conversation image (requires lab:read; checked on every read).
+
+    Another tenant's order, a foreign or mismatched comment/attachment and a deleted
+    message all answer 404. Never cached by shared caches.
+    """
+    _require(user.id, "lab:read", session)
+    from app.services.order_conversation import load_attachment_bytes, load_order
+
+    order = load_order(session, order_id, ctx.tenant_id)
+    data = load_attachment_bytes(
+        session, order=order, comment_id=comment_id, attachment_id=attachment_id, variant=variant
+    )
+    return Response(
+        content=data,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": 'inline; filename="imagen.jpg"',
         },
-        created_by=user.id,
-    )
-    session.add(event)
-    session.commit()
-    session.refresh(comment)
-    
-    return CommentResponse(
-        id=str(comment.id),
-        tenant_id=str(comment.tenant_id),
-        branch_id=str(comment.branch_id),
-        order_id=str(comment.order_id),
-        created_at=comment.created_at,
-        created_by=str(comment.created_by),
-        created_by_name=user.full_name or user.email,
-        created_by_avatar=user.avatar_url,
-        text=comment.text,
-        mentions=[str(u.user_id) for u in mentioned_users],
-        mentioned_users=mentioned_users,
-        metadata=comment.comment_metadata,
     )
 
 
