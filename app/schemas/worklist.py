@@ -124,6 +124,22 @@ class WorklistItemResponse(BaseModel):
     # Frontend navigation link
     link: str  # e.g., /orders/{id}, /samples/{id}, /reports/{id}
 
+    # Céluma 1.5 (#85): what the row means now. Three separate facts, never merged:
+    # - entity_status: the record's workflow state (order status, sample state,
+    #   report status; for a review row, the REPORT's status);
+    # - review_decision: the user's own review decision (review rows only);
+    # - next_step: the action that falls to this user now, from the existing
+    #   approval/signing contracts (`review`, `sign`) or the record still being
+    #   open for an assignee (`work`); null when the user has nothing to do.
+    # `waiting_on` says, for an assignment the user cannot advance, whose step is
+    # next (`review` or `signature`). `actionable` == (next_step is not null): the
+    # row belongs to "Pendientes"; otherwise it is only in "Todas".
+    entity_status: Optional[str] = None
+    review_decision: Optional[str] = None
+    next_step: Optional[Literal["review", "sign", "work"]] = None
+    waiting_on: Optional[Literal["review", "signature"]] = None
+    actionable: bool = False
+
 
 class WorklistResponse(BaseModel):
     """Response for the unified worklist"""
@@ -132,3 +148,7 @@ class WorklistResponse(BaseModel):
     page: int
     page_size: int
     has_more: bool
+    # Céluma 1.5 (#85): set only for `scope=all`, the whole personal list read in one
+    # REPEATABLE READ, READ ONLY transaction; `as_of` is that transaction's start time.
+    scope: Optional[Literal["all"]] = None
+    as_of: Optional[datetime] = None

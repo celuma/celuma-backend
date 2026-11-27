@@ -11,8 +11,9 @@ Provides:
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import select, Session, and_, or_
-from sqlalchemy import cast, String
-from typing import Optional, List
+from sqlalchemy import cast, String, text
+from dataclasses import dataclass, field
+from typing import Literal, Optional, List
 from uuid import UUID
 from datetime import datetime
 
@@ -26,7 +27,7 @@ from app.models.report_review import ReportReview
 from app.models.laboratory import Order, Sample, OrderComment
 from app.models.report import Report, ReportVersion
 from app.models.patient import Patient
-from app.models.enums import AssignmentItemType, ReviewStatus, ReportStatus, EventType
+from app.models.enums import AssignmentItemType, OrderStatus, ReviewStatus, ReportStatus, SampleState, EventType
 from app.models.events import OrderEvent
 from app.schemas.worklist import (
     AssignmentCreate,
@@ -71,6 +72,101 @@ def _get_user_ref(session: Session, user_id: Optional[UUID]) -> Optional[UserRef
 
 # === Worklist Endpoint ===
 
+#: Céluma 1.5 (#85): states in which an assignment has nothing left for anyone to do.
+_ORDER_CLOSED = {OrderStatus.RELEASED, OrderStatus.CLOSED, OrderStatus.CANCELLED}
+_SAMPLE_CLOSED = {SampleState.READY, SampleState.DAMAGED, SampleState.CANCELLED}
+_REPORT_CLOSED = {ReportStatus.PUBLISHED, ReportStatus.RETRACTED}
+
+
+@dataclass
+class _Membership:
+    """What the current user can do, resolved once per request (Céluma 1.5, #85).
+
+    `can_approve` / `can_sign` are locks 1-2 of `report_authorization`'s reviewer
+    contract (the `reviewer` role plus the capability); lock 3, the assignment, is the
+    user's own `ReportReview` row (`my_reviews`, order id -> review status), and the
+    lifecycle state is the report's status. Tenant (lock 4) is every query's anchor.
+    So a row says "review" exactly when `authorize_approval` would pass and "sign"
+    exactly when `authorize_signing` would — `test_worklist_membership.py` checks that
+    parity. Nothing here grants or widens an action: the action routes still decide.
+    """
+    can_approve: bool
+    can_sign: bool
+    can_edit_reports: bool
+    my_reviews: dict = field(default_factory=dict)
+    latest_report_by_order: dict = field(default_factory=dict)
+
+    def for_report(self, order_id, report_status) -> tuple[Optional[str], Optional[str]]:
+        """(next_step, waiting_on) of a report assignment (or an order in review)."""
+        status = _enum_value(report_status)
+        if status == ReportStatus.DRAFT.value:
+            return ("work" if self.can_edit_reports else None), None
+        if status == ReportStatus.IN_REVIEW.value:
+            if self.can_approve and self.my_reviews.get(order_id) == ReviewStatus.PENDING.value:
+                return "review", None
+            return None, "review"
+        if status == ReportStatus.APPROVED.value:
+            if self.can_sign and order_id in self.my_reviews:
+                return "sign", None
+            return None, "signature"
+        return None, None
+
+    def for_review(self, review_status, report_status) -> Optional[str]:
+        """next_step of the user's own review row."""
+        status = _enum_value(report_status)
+        if status == ReportStatus.IN_REVIEW.value and self.can_approve and _enum_value(review_status) == ReviewStatus.PENDING.value:
+            return "review"
+        if status == ReportStatus.APPROVED.value and self.can_sign:
+            return "sign"
+        return None
+
+
+def _enum_value(value) -> Optional[str]:
+    return value.value if hasattr(value, "value") else (str(value) if value is not None else None)
+
+
+def _membership(session: Session, tenant_id: UUID, user_id) -> _Membership:
+    reviewer = is_reviewer(user_id, session)
+    my_reviews = {
+        order_id: _enum_value(status)
+        for order_id, status in session.exec(
+            select(ReportReview.order_id, ReportReview.status).where(
+                ReportReview.tenant_id == tenant_id, ReportReview.reviewer_user_id == user_id
+            )
+        ).all()
+    }
+    return _Membership(
+        can_approve=reviewer and has_permission(user_id, "reports:approve", session),
+        can_sign=reviewer and has_permission(user_id, "reports:sign", session),
+        can_edit_reports=has_permission(user_id, "reports:edit", session),
+        my_reviews=my_reviews,
+    )
+
+
+def _with_step(item: WorklistItemResponse, next_step: Optional[str], waiting_on: Optional[str] = None) -> WorklistItemResponse:
+    item.next_step = next_step
+    item.waiting_on = None if next_step else waiting_on
+    item.actionable = next_step is not None
+    return item
+
+
+def _begin_snapshot(session: Session):
+    """Céluma 1.5 (#85): start a fresh REPEATABLE READ, READ ONLY transaction.
+
+    The auth dependencies already read the token blacklist and the user in this
+    session's current (READ COMMITTED) transaction, and PostgreSQL only accepts
+    `SET TRANSACTION` as the first statement of a transaction. That transaction is
+    read-only, so committing it ends it without writing anything; the SET is then the
+    first statement of a new one, and every worklist read below sees the database as of
+    that transaction's first query. The level is transaction-scoped: the connection
+    returns to the pool at its default and no other endpoint is affected.
+    Returns the snapshot's `now()`.
+    """
+    session.commit()
+    session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+    return session.execute(text("SELECT now()")).scalar_one()
+
+
 @router.get("/me/worklist", response_model=WorklistResponse)
 def get_my_worklist(
     session: Session = Depends(get_session),
@@ -79,28 +175,46 @@ def get_my_worklist(
     kind: Optional[str] = Query(None, description="Filter by kind: assignment | review"),
     item_type: Optional[str] = Query(None, description="Filter by item type: lab_order | sample | report"),
     status: Optional[str] = Query(None, description="Filter by status"),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page: Optional[int] = Query(None, ge=1),
+    page_size: Optional[int] = Query(None, ge=1, le=100),
+    scope: Optional[Literal["all"]] = Query(
+        None,
+        description="`all` returns the whole personal list from one consistent snapshot (no paging).",
+    ),
 ):
     """
     Get unified worklist for current user (requires lab:read).
 
-    Returns both assignments and pending reviews in a unified format,
-    sorted by assigned_at descending.
+    Returns both assignments and reviews in a unified format, sorted by
+    assigned_at descending, then id descending (a stable tie-break).
+
+    Paged (default, unchanged): `page` (1) and `page_size` (20, at most 100).
+    `scope=all` (Céluma 1.5, #85): every item in one response, read from one
+    REPEATABLE READ snapshot, so the list cannot lose or repeat rows that change
+    between page requests. It cannot be combined with `page`/`page_size`.
     """
     if not has_permission(user.id, "lab:read", session):
         raise HTTPException(403, "Permission required: lab:read")
+    if scope == "all" and (page is not None or page_size is not None):
+        raise HTTPException(422, "scope=all returns the whole list; do not send page or page_size")
+
+    # Read before any commit: committing expires the loaded user.
+    user_id = user.id
+    tenant_id = UUID(ctx.tenant_id)
+    as_of = _begin_snapshot(session) if scope == "all" else None
+
     items: List[WorklistItemResponse] = []
-    
+    membership = _membership(session, tenant_id, user_id)
+
     # 1. Get assignments for current user
     if kind is None or kind == "assignment":
         assignment_query = select(Assignment).where(
             and_(
-                Assignment.tenant_id == UUID(ctx.tenant_id),
-                Assignment.assignee_user_id == user.id,
+                Assignment.tenant_id == tenant_id,
+                Assignment.assignee_user_id == user_id,
                 Assignment.unassigned_at.is_(None),
             )
-        )
+        ).order_by(Assignment.assigned_at.desc(), Assignment.id.desc())
         
         if item_type:
             assignment_query = assignment_query.where(cast(Assignment.item_type, String) == item_type)
@@ -109,21 +223,21 @@ def get_my_worklist(
         # Held for the whole build: the identity map keeps only weak
         # references, so unreferenced prefetched rows would be collected and
         # `session.get` would query again.
-        prefetched = _prefetch_assignment_targets(session, assignments)
+        prefetched = _prefetch_assignment_targets(session, assignments, membership)
 
         for assignment in assignments:
-            item = _build_assignment_worklist_item(session, assignment)
+            item = _build_assignment_worklist_item(session, assignment, membership)
             if item:
                 items.append(item)
     
-    # 2. Get pending reviews for current user
+    # 2. Get the current user's reviews (every decision status)
     if kind is None or kind == "review":
         review_query = select(ReportReview).where(
             and_(
-                ReportReview.tenant_id == UUID(ctx.tenant_id),
-                ReportReview.reviewer_user_id == user.id,
+                ReportReview.tenant_id == tenant_id,
+                ReportReview.reviewer_user_id == user_id,
             )
-        )
+        ).order_by(ReportReview.assigned_at.desc(), ReportReview.id.desc())
         
         if status:
             review_query = review_query.where(ReportReview.status == status.upper())
@@ -133,15 +247,25 @@ def get_my_worklist(
         reports_by_order, prefetched_for_reviews = _prefetch_review_targets(session, reviews)
 
         for review in reviews:
-            item = _build_review_worklist_item(session, review, reports_by_order)
+            item = _build_review_worklist_item(session, review, reports_by_order, membership)
             if item:
                 items.append(item)
     
-    # 3. Sort by assigned_at descending
-    items.sort(key=lambda x: x.assigned_at, reverse=True)
-    
-    # 4. Paginate
+    # 3. Newest first; the id breaks ties so equal timestamps keep one order on every request.
+    items.sort(key=lambda x: (x.assigned_at, x.id), reverse=True)
     total = len(items)
+
+    if scope == "all":
+        # The items are plain response models now: end the read-only snapshot here so the
+        # session holds no transaction at its isolation level past this request.
+        session.rollback()
+        return WorklistResponse(
+            items=items, total=total, page=1, page_size=total, has_more=False, scope="all", as_of=as_of,
+        )
+
+    # 4. Paginate (legacy callers)
+    page = page or 1
+    page_size = page_size or 20
     start = (page - 1) * page_size
     end = start + page_size
     paginated_items = items[start:end]
@@ -165,7 +289,7 @@ def _load_into_session(session: Session, model, ids) -> list:
     return session.exec(select(model).where(model.id.in_(ids))).all()
 
 
-def _prefetch_assignment_targets(session: Session, assignments) -> list:
+def _prefetch_assignment_targets(session: Session, assignments, membership: Optional[_Membership] = None) -> list:
     """Céluma 1.4 (#6): batch what `_build_assignment_worklist_item` reads.
 
     The worklist builds every item before sorting and paging (its total counts
@@ -184,7 +308,18 @@ def _prefetch_assignment_targets(session: Session, assignments) -> list:
         session, Order, {s.order_id for s in samples} | {r.order_id for r in reports}
     )
     patients = _load_into_session(session, Patient, {o.patient_id for o in orders})
-    return [*orders, *samples, *reports, *patients]
+    latest = []
+    if membership is not None and by_type.get("lab_order"):
+        # Céluma 1.5 (#85): an order in REVIEW waits on its latest report (the one
+        # `update_order_status` derives the order status from).
+        latest = session.exec(
+            select(Report)
+            .where(Report.order_id.in_(by_type["lab_order"]))
+            .order_by(Report.order_id, Report.created_at.desc(), Report.id.desc())
+        ).all()
+        for report in latest:
+            membership.latest_report_by_order.setdefault(report.order_id, report)
+    return [*orders, *samples, *reports, *patients, *latest]
 
 
 def _prefetch_review_targets(session: Session, reviews) -> tuple[dict, list]:
@@ -208,8 +343,32 @@ def _prefetch_review_targets(session: Session, reviews) -> tuple[dict, list]:
     return reports_by_order, [*orders, *reports, *patients]
 
 
-def _build_assignment_worklist_item(session: Session, assignment: Assignment) -> Optional[WorklistItemResponse]:
+def _build_assignment_worklist_item(
+    session: Session, assignment: Assignment, membership: Optional[_Membership] = None
+) -> Optional[WorklistItemResponse]:
     """Build a WorklistItemResponse from an Assignment"""
+    item = _assignment_item(session, assignment)
+    if item is None or membership is None:
+        return item
+    status = item.entity_status
+    if item.item_type == "lab_order":
+        if status in {s.value for s in _ORDER_CLOSED}:
+            return _with_step(item, None)
+        if status == OrderStatus.REVIEW.value:
+            latest = membership.latest_report_by_order.get(assignment.item_id)
+            if latest is None:
+                return _with_step(item, None, "review")
+            return _with_step(item, *membership.for_report(assignment.item_id, latest.status))
+        return _with_step(item, "work")
+    if item.item_type == "sample":
+        return _with_step(item, None if status in {s.value for s in _SAMPLE_CLOSED} else "work")
+    if item.item_type == "report":
+        report = session.get(Report, assignment.item_id)
+        return _with_step(item, *membership.for_report(report.order_id, report.status))
+    return item
+
+
+def _assignment_item(session: Session, assignment: Assignment) -> Optional[WorklistItemResponse]:
     item_type = assignment.item_type.value if hasattr(assignment.item_type, 'value') else str(assignment.item_type)
     
     if item_type == "lab_order":
@@ -224,6 +383,7 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
             item_id=str(assignment.item_id),
             display_id=order.order_code,
             item_status=order.status.value if hasattr(order.status, 'value') else str(order.status),
+            entity_status=_enum_value(order.status),
             assigned_at=assignment.assigned_at,
             patient_id=str(patient.id) if patient else None,
             patient_name=patient.first_name + " " + patient.last_name if patient else None,
@@ -245,6 +405,7 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
             item_id=str(assignment.item_id),
             display_id=sample.sample_code,
             item_status=sample.state.value if hasattr(sample.state, 'value') else str(sample.state),
+            entity_status=_enum_value(sample.state),
             assigned_at=assignment.assigned_at,
             patient_id=str(patient.id) if patient else None,
             patient_name=patient.first_name + " " + patient.last_name if patient else None,
@@ -266,6 +427,7 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
             item_id=str(assignment.item_id),
             display_id=report.title or order.order_code if order else str(assignment.item_id),
             item_status=report.status.value if hasattr(report.status, 'value') else str(report.status),
+            entity_status=_enum_value(report.status),
             assigned_at=assignment.assigned_at,
             patient_id=str(patient.id) if patient else None,
             patient_name=patient.first_name + " " + patient.last_name if patient else None,
@@ -278,7 +440,8 @@ def _build_assignment_worklist_item(session: Session, assignment: Assignment) ->
 
 
 def _build_review_worklist_item(
-    session: Session, review: ReportReview, reports_by_order: Optional[dict] = None
+    session: Session, review: ReportReview, reports_by_order: Optional[dict] = None,
+    membership: Optional[_Membership] = None,
 ) -> Optional[WorklistItemResponse]:
     """Build a WorklistItemResponse from a ReportReview"""
     order = session.get(Order, review.order_id)
@@ -302,13 +465,15 @@ def _build_review_worklist_item(
     
     patient = session.get(Patient, order.patient_id) if order and order.patient_id else None
     
-    return WorklistItemResponse(
+    item = WorklistItemResponse(
         id=str(review.id),
         kind="review",
         item_type="report",
         item_id=str(report.id),
         display_id=report.title or order.order_code,
         item_status=review.status.value if hasattr(review.status, 'value') else str(review.status),
+        entity_status=_enum_value(report.status),
+        review_decision=_enum_value(review.status),
         assigned_at=review.assigned_at,
         patient_id=str(patient.id) if patient else None,
         patient_name=patient.first_name + " " + patient.last_name if patient else None,
@@ -316,6 +481,9 @@ def _build_review_worklist_item(
         order_code=order.order_code if order else None,
         link=f"/reports/{report.id}"
     )
+    if membership is not None:
+        _with_step(item, membership.for_review(review.status, report.status))
+    return item
 
 
 # === Assignment Endpoints ===
